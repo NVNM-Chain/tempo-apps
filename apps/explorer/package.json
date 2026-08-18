@@ -23,7 +23,10 @@
 		"check:types:test": "tsc --project test/tsconfig.json --noEmit",
 		"predeploy": "bash scripts/build.sh",
 		"deploy": "bash scripts/deploy.sh",
-		"deploy:nvnm": "pnpm deploy --env nvnm",
+		"deploy:nvnm": "pnpm run deploy --env nvnm",
+		"ci:build": "CLOUDFLARE_ENV='nvnm' bash scripts/build.sh",
+		"ci:deploy": "CLOUDFLARE_ENV='nvnm' wrangler deploy --env nvnm",
+		"ci:versions": "CLOUDFLARE_ENV='nvnm' wrangler versions upload --env nvnm",
 		"gen:types": "CLOUDFLARE_ENV='nvnm' wrangler types --env-interface='CloudflareBindings' --env-file='.env.example'",
 		"preview": "vite preview --mode='preview'",
 		"test": "vitest"
