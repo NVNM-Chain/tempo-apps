@@ -19,6 +19,7 @@ catalog:
   '@logtape/logtape': ^2.0.4
   '@logtape/pretty': ^2.0.4
   '@logtape/redaction': ^2.0.4
+  '@modelcontextprotocol/sdk': 1.29.0
   '@sentry/cloudflare': ^10.44.0
   '@sentry/react': ^10.44.0
   '@sentry/vite-plugin': ^5.1.1
@@ -47,9 +48,8 @@ catalog:
   '@vitejs/plugin-react': ^6.0.1
   '@vitest/ui': 4.1.0
   '@wagmi/core': ^3.4.8
-  '@modelcontextprotocol/sdk': 1.29.0
-  accounts: ~0.14.9
   abitype: ^1.2.4
+  accounts: ~0.14.9
   ai: 6.0.202
   animejs: ^4.3.6
   cloudflare-worker-metrics: ^1.4.0
@@ -97,24 +97,11 @@ ignoredBuiltDependencies:
   - cadent
   - cbor-extract
   - cpu-features
+  - es5-ext
   - protobufjs
   - sharp
   - ssh2
   - vue-demi
-
-nodeOptions: '--disable-warning=ExperimentalWarning --disable-warning=DeprecationWarning'
-onlyBuiltDependencies:
-  - '@ast-grep/cli'
-  - '@j178/prek'
-  - '@sentry/cli'
-  - esbuild
-  - simple-git-hooks
-  - utf-8-validate
-  - workerd
-
-shellEmulator: true
-
-workspaceConcurrency: -1
 
 minimumReleaseAge: 1440
 minimumReleaseAgeExclude:
@@ -127,21 +114,35 @@ minimumReleaseAgeExclude:
   - '@wagmi/connectors'
   - '@cloudflare/containers'
 
+nodeOptions: '--disable-warning=ExperimentalWarning --disable-warning=DeprecationWarning'
+onlyBuiltDependencies:
+  - '@ast-grep/cli'
+  - '@j178/prek'
+  - '@sentry/cli'
+  - esbuild
+  - simple-git-hooks
+  - utf-8-validate
+  - workerd
+
 overrides:
   basic-ftp: 5.3.0
-  flatted: ^3.4.2
-  tar: ^7.5.13
-  picomatch@<3: ^2.3.2
-  picomatch@>=4: ^4.0.4
-  lodash: ^4.18.1
   brace-expansion@<3: ^2.0.3
   brace-expansion@>=5: ^5.0.5
-  yaml: ^2.8.3
+  flatted: ^3.4.2
+  lodash: ^4.18.1
+  picomatch@<3: ^2.3.2
+  picomatch@>=4: ^4.0.4
   protobufjs: 7.5.5
+  tar: ^7.5.13
+  yaml: ^2.8.3
 
 patchedDependencies:
   '@cloudflare/vite-plugin@1.30.3': patches/@cloudflare__vite-plugin@1.30.3.patch
 
+shellEmulator: true
+
 strictDepBuilds: true
 
 trustPolicy: no-downgrade
+
+workspaceConcurrency: -1
