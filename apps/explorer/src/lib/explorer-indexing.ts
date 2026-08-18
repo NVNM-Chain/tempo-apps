@@ -1,24 +1,22 @@
 import type { TempoEnv } from '#lib/env'
 
-export const EXPLORER_ORGANIZATION_ID = 'https://tempo.xyz/#organization'
+export const EXPLORER_ORGANIZATION_ID =
+	'https://mantrachain.io/#organization'
 
 const CANONICAL_EXPLORER_ORIGINS: Partial<Record<TempoEnv, string>> = {
-	mainnet: 'https://explore.tempo.xyz',
-	testnet: 'https://explore.testnet.tempo.xyz',
+	nvnm: 'https://scan.nvnm.canary.mantrachain.dev',
 }
 
 const EXPLORER_HOST_REDIRECTS = new Map([
-	['explore.4217.tempo.xyz', 'explore.tempo.xyz'],
-	['explore.42431.tempo.xyz', 'explore.testnet.tempo.xyz'],
-	['explore.mainnet.tempo.xyz', 'explore.tempo.xyz'],
-	['explore.moderato.tempo.xyz', 'explore.testnet.tempo.xyz'],
-	['explore.presto.tempo.xyz', 'explore.tempo.xyz'],
+	['scan.787222.nvnm.canary.mantrachain.dev', 'scan.nvnm.canary.mantrachain.dev'],
 ])
 
+/**
+ * Hosts served with `noindex`. The internal devnet must never be indexed —
+ * every NVNM host stays here until a public network exists.
+ */
 const NON_INDEXABLE_EXPLORER_HOSTS = new Set([
-	'explore.31318.tempo.xyz',
-	'explore.devnet.tempo.xyz',
-	'explore.nextfork.devnet.tempo.xyz',
+	'scan.nvnm.canary.mantrachain.dev',
 ])
 
 export type ExplorerHostPolicy = { type: 'redirect'; location: string }
@@ -81,8 +79,7 @@ export function getExplorerWebApplication(tempoEnv: TempoEnv) {
 	const origin = CANONICAL_EXPLORER_ORIGINS[tempoEnv]
 	if (!origin) return undefined
 
-	const name =
-		tempoEnv === 'testnet' ? 'Tempo Testnet Explorer' : 'Tempo Explorer'
+	const name = 'NVNM Explorer'
 
 	return {
 		'@context': 'https://schema.org',
@@ -91,7 +88,7 @@ export function getExplorerWebApplication(tempoEnv: TempoEnv) {
 		applicationCategory: 'DeveloperApplication',
 		description:
 			'Explore and analyze blocks, transactions, contracts, and tokens on Tempo.',
-		isPartOf: { '@id': 'https://tempo.xyz/#website' },
+		isPartOf: { '@id': 'https://mantrachain.io/#website' },
 		name,
 		operatingSystem: 'Web',
 		provider: { '@id': EXPLORER_ORGANIZATION_ID },

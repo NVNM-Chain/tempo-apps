@@ -4,7 +4,7 @@ import type { Hex } from 'ox'
 import * as OxHex from 'ox/Hex'
 import { numberToHex } from 'viem'
 import * as z from 'zod/mini'
-import { tempoMainnet, tempoTestnet } from '#lib/chains'
+import { nvnmDevnet } from '#lib/chains'
 import { serverEnv, tempoApiUrl } from '#lib/server/env'
 import { checkRateLimit } from '#lib/server/rate-limit'
 import { zAddress, zHash } from '#lib/zod'
@@ -114,12 +114,14 @@ function getRpcTarget(chainId: number): {
 	headers: Record<string, string>
 } {
 	const apiKey = serverEnv.TEMPO_API_KEY
-	if (apiKey && (chainId === tempoMainnet.id || chainId === tempoTestnet.id))
+	if (apiKey)
 		return {
 			url: `${tempoApiUrl}/rpc/${chainId}`,
 			headers: { 'tempo-api-key': apiKey },
 		}
-	return { url: `https://proxy.tempo.xyz/rpc/${chainId}`, headers: {} }
+	// No hosted RPC proxy fronts our chain — go straight to it. Tracing needs
+	// the debug namespace, which the public NVNM endpoint serves.
+	return { url: nvnmDevnet.rpcUrls.default.http[0], headers: {} }
 }
 
 async function rpcRequest<T>(args: {

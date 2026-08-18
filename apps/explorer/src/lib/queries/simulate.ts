@@ -22,7 +22,7 @@ export interface SimulationBatchCall {
 }
 
 export interface SimulationInput {
-	chainId: 4217 | 42431 | 31318
+	chainId: number
 	from: Address.Address
 	to: Address.Address
 	data: Hex.Hex

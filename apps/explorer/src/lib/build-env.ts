@@ -2,28 +2,12 @@ import * as z from 'zod/mini'
 
 const enabledSchema = z.stringbool()
 
-const canonicalTempoEnvSchema = z.union([
-	z.literal('devnet'),
-	z.literal('nextfork'),
-	z.literal('testnet'),
-	z.literal('mainnet'),
-])
+const canonicalTempoEnvSchema = z.literal('nvnm')
 
+// Tempo's `moderato`/`presto` aliases are gone with their networks.
 export const tempoEnvSchema = z.prefault(
-	z.pipe(
-		z.pipe(
-			z.string(),
-			z.transform((value) =>
-				value === 'moderato'
-					? 'testnet'
-					: value === 'presto'
-						? 'mainnet'
-						: value,
-			),
-		),
-		canonicalTempoEnvSchema,
-	),
-	'testnet',
+	z.pipe(z.string(), canonicalTempoEnvSchema),
+	'nvnm',
 )
 
 export const buildEnvSchema = z.object({

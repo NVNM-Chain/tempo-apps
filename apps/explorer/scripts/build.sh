@@ -12,7 +12,7 @@ if [[ -z "$env_name" ]]; then
 fi
 
 case "$env_name" in
-	devnet|nextfork|testnet|mainnet) ;;
+	nvnm) ;;
 	*)
 		echo "Unsupported env: $env_name" >&2
 		exit 1

@@ -19,17 +19,12 @@ const SPOTLIGHT_DATA: Record<
 		receiptHash: Hex.Hex
 	}
 > = {
-	testnet: {
-		accountAddress: '0xa726a1CD723409074DF9108A2187cfA19899aCF8',
-		contractAddress: '0x3e44E7C5AAc48Cc0ed6f74D191bd465674571745',
+	// Real values from tidx_787222.txs. Re-pick if the chain is regenerated.
+	nvnm: {
+		accountAddress: '0x9493feed391b9d1875731c8a4b5e492db8505843',
+		contractAddress: '0x20c000000000000000000000566f8b4a921dcd3a',
 		receiptHash:
-			'0x48b138255c60bf0e2c6bcede32768398f679a213a6a7a7973aa71a8afd89c506',
-	},
-	mainnet: {
-		accountAddress: '0xdf25f88aa6cde9937fdcfcf10fa349528c79dbf9',
-		contractAddress: '0x20c000000000000000000000b9537d11c60e8b50',
-		receiptHash:
-			'0x334d04f62d5e48cee0171396adc95b7f36cef999f95be9e96c5ee42877a057e5',
+			'0x4dc23799c4f7474c29de45e62ec533c6cd3026f3ac0c5993483487d3b2fc7f72',
 	},
 }
 

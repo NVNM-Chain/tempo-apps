@@ -11,7 +11,14 @@ const clientEnvSchema = z.object({
 
 export const clientEnv = clientEnvSchema.parse(import.meta.env)
 
-export type TempoEnv = 'testnet' | 'mainnet' | 'devnet' | 'nextfork'
+/**
+ * Environments this build serves. NVNM chains only — Tempo's own networks were
+ * removed deliberately, so adding one back means adding a chain definition, a
+ * wrangler env and a network-switcher entry too.
+ */
+export type TempoEnv = 'nvnm'
+
+const TEMPO_ENVS = ['nvnm'] as const satisfies readonly TempoEnv[]
 
 export function inferTempoEnvFromHostname(
 	hostname: string | undefined,
@@ -21,48 +28,27 @@ export function inferTempoEnvFromHostname(
 	const host = hostname.toLowerCase()
 
 	if (
-		host.includes('explorer-mainnet') ||
-		host.includes('explore.mainnet.') ||
-		host.includes('explore.presto.') ||
-		host.includes('explore.4217.') ||
-		host === 'explore.tempo.xyz'
+		host.includes('explorer-nvnm') ||
+		host.includes('scan.nvnm.') ||
+		host.includes('scan.787222.')
 	) {
-		return 'mainnet'
-	}
-
-	if (
-		host.includes('explorer-nextfork') ||
-		host.includes('explore.nextfork.') ||
-		host.includes('explore-nextfork.') ||
-		host.includes('nextfork.devnet.')
-	) {
-		return 'nextfork'
-	}
-
-	if (
-		host.includes('explorer-devnet') ||
-		host.includes('explore.devnet.') ||
-		host.includes('explore.31318.')
-	) {
-		return 'devnet'
-	}
-
-	if (
-		host.includes('explorer-testnet') ||
-		host.includes('explore.testnet.') ||
-		host.includes('explore.moderato.') ||
-		host.includes('explore.42431.')
-	) {
-		return 'testnet'
+		return 'nvnm'
 	}
 
 	return undefined
 }
 
 function normalizeTempoEnv(value: string | undefined): TempoEnv {
-	return value === 'mainnet' || value === 'devnet' || value === 'nextfork'
-		? value
-		: 'testnet'
+	// Unset falls back (vitest and other tooling never inject it). A *wrong*
+	// value throws rather than silently resolving to another network — the
+	// upstream behaviour turned a typo into an explorer showing the wrong
+	// chain's data while looking perfectly healthy.
+	if (value === undefined || value === '') return 'nvnm'
+	if ((TEMPO_ENVS as readonly string[]).includes(value))
+		return value as TempoEnv
+	throw new Error(
+		`VITE_TEMPO_ENV must be one of ${TEMPO_ENVS.join(' | ')} — got '${value}'`,
+	)
 }
 
 function getRequestUrlIfAvailable(): URL | undefined {
@@ -112,6 +98,11 @@ export const getTempoEnv = createIsomorphicFn()
 		return inferred ?? normalizeTempoEnv(import.meta.env.VITE_TEMPO_ENV)
 	})
 
+/**
+ * True for every non-production NVNM chain. The devnet is the only network this
+ * build serves today, so this is constant — it stays a function because the UI
+ * calls it to gate testnet-only affordances (see comps/Header.tsx).
+ */
 export const isTestnet = createIsomorphicFn()
-	.client(() => getTempoEnv() === 'testnet')
-	.server(() => getTempoEnv() === 'testnet')
+	.client(() => true)
+	.server(() => true)

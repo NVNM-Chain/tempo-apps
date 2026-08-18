@@ -169,9 +169,8 @@ function verdictHeadline(execution: SimulationExecutionResult): string {
 }
 
 function networkName(chainId: number): string {
-	if (chainId === 4217) return 'mainnet'
-	if (chainId === 42431) return 'moderato'
-	return 'devnet'
+	if (chainId === 787222) return 'nvnm-tempo-devnet-1'
+	return `chain-${chainId}`
 }
 
 /* -------------------------------------------------------------------------- */

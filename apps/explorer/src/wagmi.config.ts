@@ -1,10 +1,10 @@
 import { createIsomorphicFn, createServerFn } from '@tanstack/react-start'
 import { getRequestHeader } from '@tanstack/react-start/server'
 import { createPublicClient } from 'viem'
-import { tempoDevnet, tempoLocalnet } from 'viem/chains'
+import { tempoLocalnet } from 'viem/chains'
 import { tempoActions } from 'viem/tempo'
 import { loadBalance, rateLimit } from '@tempo/rpc-utils'
-import { tempoMainnet, tempoNextfork, tempoTestnet } from './lib/chains'
+import { nvnmDevnet } from './lib/chains'
 import { getTempoEnv } from './lib/env'
 import { serverEnv, tempoApiUrl } from './lib/server/env'
 import {
@@ -20,37 +20,23 @@ import { tempoWallet } from 'wagmi/connectors'
 export type WagmiConfig = ReturnType<typeof getWagmiConfig>
 let wagmiConfigSingleton: ReturnType<typeof createConfig> | null = null
 
+/**
+ * This build serves exactly one chain. Kept behind createIsomorphicFn so the
+ * call sites (and the client/server split) stay identical to upstream.
+ */
 export const getTempoChain = createIsomorphicFn()
-	.client(() =>
-		getTempoEnv() === 'mainnet'
-			? tempoMainnet
-			: getTempoEnv() === 'nextfork'
-				? tempoNextfork
-				: getTempoEnv() === 'devnet'
-					? tempoDevnet
-					: getTempoEnv() === 'testnet'
-						? tempoTestnet
-						: tempoMainnet,
-	)
-	.server(() =>
-		getTempoEnv() === 'mainnet'
-			? tempoMainnet
-			: getTempoEnv() === 'nextfork'
-				? tempoNextfork
-				: getTempoEnv() === 'devnet'
-					? tempoDevnet
-					: getTempoEnv() === 'testnet'
-						? tempoTestnet
-						: tempoMainnet,
-	)
+	.client(() => nvnmDevnet)
+	.server(() => nvnmDevnet)
 
-const RPC_PROXY_HOSTNAME = 'proxy.tempo.xyz'
-
+/**
+ * Browser RPC target.
+ *
+ * Upstream sends client traffic to proxy.tempo.xyz, which has no route for our
+ * chain id: SSR would render correctly and every client-side query would then
+ * 404 — a page that is right on first paint and wrong a moment later.
+ */
 function getRpcProxyUrl() {
-	const chain = getTempoChain()
-	return {
-		http: `https://${RPC_PROXY_HOSTNAME}/rpc/${chain.id}`,
-	}
+	return { http: nvnmDevnet.rpcUrls.default.http[0] }
 }
 
 const getFallbackUrls = createIsomorphicFn()
@@ -80,12 +66,9 @@ const getTempoTransport = createIsomorphicFn()
 	.server(() => {
 		const chain = getTempoChain()
 
-		// Tempo API RPC passthrough (mainnet + testnet; requires an API key).
+		// tapimo RPC passthrough, when an API key is configured.
 		const apiKey = serverEnv.TEMPO_API_KEY
-		if (
-			apiKey &&
-			(chain.id === tempoMainnet.id || chain.id === tempoTestnet.id)
-		)
+		if (apiKey)
 			return http(`${tempoApiUrl}/rpc/${chain.id}`, {
 				fetchOptions: { headers: { 'tempo-api-key': apiKey } },
 			})

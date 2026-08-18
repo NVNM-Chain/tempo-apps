@@ -2,22 +2,32 @@ import { describe, expect, it } from 'vitest'
 import {
 	buildExplorerNetworkHref,
 	EXPLORER_NETWORK_OPTIONS,
+	getActiveExplorerNetworkOption,
 	isExplorerNetworkPathPreservable,
 } from '#lib/explorer-network.ts'
 
-const MAINNET_HOST = 'https://explore.tempo.xyz'
-const TESTNET_HOST = 'https://explore.testnet.tempo.xyz'
+const NVNM_HOST = 'https://scan.nvnm.canary.mantrachain.dev'
 
 const SAMPLE_HASH =
 	'0x0000000000000000000000000000000000000000000000000000000000000000'
 const SAMPLE_ADDRESS = '0x20c0000000000000000000000000000000000000'
 
 describe('explorer network switcher hrefs', () => {
-	it('uses the canonical mainnet and testnet explorer hosts', () => {
+	it('offers NVNM chains only — Tempo networks are not served by this build', () => {
 		expect(EXPLORER_NETWORK_OPTIONS).toEqual([
-			expect.objectContaining({ env: 'mainnet', host: MAINNET_HOST }),
-			expect.objectContaining({ env: 'testnet', host: TESTNET_HOST }),
+			expect.objectContaining({ env: 'nvnm', host: NVNM_HOST }),
 		])
+		expect(
+			EXPLORER_NETWORK_OPTIONS.some((option) =>
+				option.host.includes('tempo.xyz'),
+			),
+		).toBe(false)
+	})
+
+	it('resolves the active option for the only supported env', () => {
+		expect(getActiveExplorerNetworkOption('nvnm')).toEqual(
+			EXPLORER_NETWORK_OPTIONS[0],
+		)
 	})
 
 	it.each([
@@ -28,43 +38,25 @@ describe('explorer network switcher hrefs', () => {
 		['token compatibility route', `/token/${SAMPLE_ADDRESS}?tab=holders`],
 		['fee amm route with hash', '/fee-amm#pools'],
 	])('preserves the %s resource path when switching networks', (_, path) => {
-		expect(buildExplorerNetworkHref(MAINNET_HOST, path)).toBe(
-			`${MAINNET_HOST}${path}`,
-		)
-		expect(buildExplorerNetworkHref(TESTNET_HOST, path)).toBe(
-			`${TESTNET_HOST}${path}`,
-		)
+		expect(buildExplorerNetworkHref(NVNM_HOST, path)).toBe(`${NVNM_HOST}${path}`)
 	})
 
 	it('normalizes a path without a leading slash', () => {
-		expect(buildExplorerNetworkHref(TESTNET_HOST, 'blocks')).toBe(
-			`${TESTNET_HOST}/blocks`,
+		expect(buildExplorerNetworkHref(NVNM_HOST, 'blocks')).toBe(
+			`${NVNM_HOST}/blocks`,
 		)
 	})
 
-	it('preserves resource paths even when the current route rendered not found', () => {
-		expect(isExplorerNetworkPathPreservable(`/receipt/${SAMPLE_HASH}`)).toBe(
-			true,
-		)
+	it('falls back to home when asked', () => {
 		expect(
-			isExplorerNetworkPathPreservable(`/tx/${SAMPLE_HASH}?tab=logs#top`),
-		).toBe(true)
-		expect(
-			buildExplorerNetworkHref(TESTNET_HOST, `/receipt/${SAMPLE_HASH}`),
-		).toBe(`${TESTNET_HOST}/receipt/${SAMPLE_HASH}`)
-		expect(
-			buildExplorerNetworkHref(MAINNET_HOST, `/tx/${SAMPLE_HASH}?tab=logs#top`),
-		).toBe(`${MAINNET_HOST}/tx/${SAMPLE_HASH}?tab=logs#top`)
-	})
-
-	it('still links unknown not-found routes to the target network homepage', () => {
-		expect(isExplorerNetworkPathPreservable('/definitely-not-a-route')).toBe(
-			false,
-		)
-		expect(
-			buildExplorerNetworkHref(TESTNET_HOST, '/definitely-not-a-route', {
+			buildExplorerNetworkHref(NVNM_HOST, '/simulate', {
 				fallbackToHome: true,
 			}),
-		).toBe(`${TESTNET_HOST}/`)
+		).toBe(`${NVNM_HOST}/`)
+	})
+
+	it('classifies preservable paths', () => {
+		expect(isExplorerNetworkPathPreservable('/blocks')).toBe(true)
+		expect(isExplorerNetworkPathPreservable('/simulate')).toBe(false)
 	})
 })
