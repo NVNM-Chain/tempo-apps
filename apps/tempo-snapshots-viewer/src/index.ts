@@ -1,9 +1,14 @@
 import { Hono } from 'hono'
+import { LOGO_WHITE_PNG } from './logo'
 
 // Types
 interface Env {
 	SNAPSHOTS: R2Bucket
 	R2_PUBLIC_URL: string
+	VIEWER_ORIGIN: string
+	CHAIN_ID: string
+	NETWORK_KEY: string
+	NETWORK_NAME: string
 }
 
 // Legacy metadata format (single archive per snapshot)
@@ -96,13 +101,7 @@ interface NetworkInfo {
 	name: string
 }
 
-const NETWORKS: Record<string, NetworkInfo> = {
-	'4217': { chainId: '4217', key: 'mainnet', name: 'Mainnet' },
-	'42431': { chainId: '42431', key: 'moderato', name: 'Moderato' },
-	'31318': { chainId: '31318', key: 'devnet', name: 'Devnet' },
-}
-
-const DEFAULT_CHAIN_ID = '4217'
+const SNAPSHOT_DIR_PREFIX = 'snapshots/'
 const SNAPSHOT_INDEX_KEY = '_index.json'
 const SNAPSHOT_INDEX_VERSION = 2
 const RECENT_SNAPSHOTS_PER_NETWORK = 5
@@ -246,27 +245,14 @@ function error(status: number, body: string): Response {
 	return new Response(body, { status })
 }
 
-function getNetworkInfo(chainId: string): NetworkInfo {
-	return (
-		NETWORKS[chainId] || {
-			chainId,
-			key: `chain-${chainId}`,
-			name: `Chain ${chainId}`,
-		}
-	)
+function getNetworkInfo(chainId: string, env: Env): NetworkInfo {
+	if (chainId === env.CHAIN_ID) {
+		return { chainId, key: env.NETWORK_KEY, name: env.NETWORK_NAME }
+	}
+	return { chainId, key: `chain-${chainId}`, name: `Chain ${chainId}` }
 }
 
 function compareChainIds(a: string, b: string): number {
-	const order = [DEFAULT_CHAIN_ID, '42431', '31318']
-	const aIndex = order.indexOf(a)
-	const bIndex = order.indexOf(b)
-
-	if (aIndex !== -1 || bIndex !== -1) {
-		if (aIndex === -1) return 1
-		if (bIndex === -1) return -1
-		return aIndex - bIndex
-	}
-
 	return Number(a) - Number(b)
 }
 
@@ -293,6 +279,7 @@ async function withR2Retry<T>(label: string, fn: () => Promise<T>): Promise<T> {
 			return await fn()
 		} catch (err) {
 			if (attempt === R2_MAX_RETRIES || !isRetryableR2Error(err)) {
+				console.error(`R2 error during ${label}:`, err)
 				throw err
 			}
 
@@ -341,17 +328,18 @@ async function refreshSnapshotCaches(env: Env): Promise<void> {
 	const snapshots = await getSnapshots(env)
 	await writeSnapshotIndex(env, snapshots)
 	const cache = caches.default
-	await populateSnapshotCaches(cache, snapshots)
-	await cache.delete(new Request(CACHE_KEY_UI_HTML, { method: 'GET' }))
+	await populateSnapshotCaches(env, cache, snapshots)
+	await cache.delete(new Request(cacheKeyUiHtml(env), { method: 'GET' }))
 }
 
 async function serveLatest(
-	{ chainId = DEFAULT_CHAIN_ID }: { chainId?: string },
+	{ chainId }: { chainId?: string },
 	env: Env,
 ): Promise<Response> {
+	const targetChainId = chainId ?? env.CHAIN_ID
 	const snapshots = await getFullSnapshots(env)
 	const latest = snapshots.find(
-		(snapshot) => snapshot.chainId === chainId && !snapshot.isModular,
+		(snapshot) => snapshot.chainId === targetChainId && !snapshot.isModular,
 	)
 
 	if (!latest) {
@@ -520,16 +508,19 @@ interface LegacyMetadataInfo {
 	timestamp: number
 }
 
-function parseSnapshotDirInfo(dir: string): SnapshotDirInfo | null {
+function parseSnapshotDirInfo(
+	dir: string,
+	chainId: string,
+): SnapshotDirInfo | null {
 	const normalized = dir.replace(/\/$/, '')
-	const match = /^tempo-(\d+)-(\d+)-(\d+)$/.exec(normalized)
+	const match = /^snapshots\/(\d+)-(\d+)$/.exec(normalized)
 	if (!match) return null
 
 	return {
 		dir: normalized,
-		chainId: match[1] || '',
-		block: Number.parseInt(match[2] || '0', 10),
-		timestamp: Number.parseInt(match[3] || '0', 10),
+		chainId,
+		block: Number.parseInt(match[1] || '0', 10),
+		timestamp: Number.parseInt(match[2] || '0', 10),
 	}
 }
 
@@ -555,10 +546,11 @@ function compareSnapshotInfoDesc(
 function selectRecentSnapshotDirsByNetwork(
 	dirs: string[],
 	limit: number,
+	chainId: string,
 ): string[] {
 	const byChain = new Map<string, SnapshotDirInfo[]>()
 	for (const dir of dirs) {
-		const info = parseSnapshotDirInfo(dir)
+		const info = parseSnapshotDirInfo(dir, chainId)
 		if (!info) continue
 
 		const chainSnapshots = byChain.get(info.chainId) || []
@@ -636,7 +628,7 @@ function manifestToSnapshot(
 	manifestKey: string,
 ): Snapshot {
 	const chainId = String(manifest.chain_id)
-	const network = getNetworkInfo(chainId)
+	const network = getNetworkInfo(chainId, env)
 	const baseUrl = `${env.R2_PUBLIC_URL}/${dirName}`
 
 	const date = new Date(manifest.timestamp * 1000).toISOString().split('T')[0]
@@ -716,7 +708,7 @@ async function loadLegacySnapshot(
 
 		const metadata: LegacyMetadata = await obj.json()
 		const chainId = String(metadata.chain_id)
-		const network = getNetworkInfo(chainId)
+		const network = getNetworkInfo(chainId, env)
 
 		const archiveUrl = `${env.R2_PUBLIC_URL}/${metadata.archive}`
 		const metadataUrl = `${env.R2_PUBLIC_URL}/${file.key}`
@@ -766,10 +758,15 @@ function sortSnapshotsByTimestampDesc(snapshots: Snapshot[]): Snapshot[] {
 // Build the recent index from R2. The request path reads the persisted index
 // instead of doing this scan unless the index is missing.
 async function getSnapshots(env: Env): Promise<Snapshot[]> {
-	const { dirs, objects: rootObjects } = await listRoot(env.SNAPSHOTS)
+	const { objects: rootObjects } = await listRoot(env.SNAPSHOTS)
+	const snapshotDirs = await listSnapshotDirs(
+		env.SNAPSHOTS,
+		SNAPSHOT_DIR_PREFIX,
+	)
 	const recentDirs = selectRecentSnapshotDirsByNetwork(
-		dirs,
+		snapshotDirs,
 		RECENT_SNAPSHOTS_PER_NETWORK,
+		env.CHAIN_ID,
 	)
 	const legacyMetadataFiles = selectRecentLegacyMetadataFilesByNetwork(
 		rootObjects,
@@ -795,12 +792,14 @@ async function getSnapshots(env: Env): Promise<Snapshot[]> {
 }
 
 const CACHE_VERSION = 'v30'
-const VIEWER_ORIGIN = 'https://snapshots.tempo.xyz'
-const SNAPSHOT_DOCS_URL =
-	'https://docs.tempo.xyz/cli/download#validator-migration-guidance'
-const CACHE_KEY_FULL = `${VIEWER_ORIGIN}/cache/${CACHE_VERSION}/full`
-const CACHE_KEY_API = `${VIEWER_ORIGIN}/cache/${CACHE_VERSION}/api`
-const CACHE_KEY_UI_HTML = `${VIEWER_ORIGIN}/cache/${CACHE_VERSION}/ui-html`
+const SNAPSHOT_REPO_URL = 'https://github.com/NVNM-Chain/tempo'
+const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" fill="none"><g clip-path="url(#a)"><path fill="url(#b)" d="M64 0H0v64h64V0Z"/><path fill="#fff" d="M46.406 33.805v-3.34c-6.762 0-12.61 3.898-15.327 9.518h3.89a13.61 13.61 0 0 1 11.441-6.178h-.004Z"/><path fill="#fff" d="M40.314 24.973c-3.95 1.16-6.221 2.697-7.983 4.21a35.552 35.552 0 0 0-2.105 1.852c-1.92 1.806-3.736 3.51-8.105 4.787-2.06.6-3.692.818-5.121.834v3.327c1.699-.016 3.672-.264 6.092-.972 3.95-1.159 6.222-2.697 7.983-4.209v.016c.782-.629 1.458-1.261 2.105-1.869 1.921-1.805 3.736-3.509 8.105-4.786 2.06-.601 3.692-.818 5.121-.834v-3.328c-1.699.016-3.672.265-6.092.972Z"/><path fill="#fff" d="M17.004 30.178v3.34c6.762 0 12.61-3.898 15.327-9.518h-3.89A13.61 13.61 0 0 1 17 30.178h.004Z"/></g><defs><linearGradient id="b" x1="40" x2="9.659" y1="24.415" y2="64" gradientUnits="userSpaceOnUse"><stop/><stop offset=".708" stop-color="#04C"/><stop offset="1" stop-color="#05F"/></linearGradient><clipPath id="a"><path fill="#fff" d="M0 0h64v64H0z"/></clipPath></defs></svg>`
+const cacheKeyFull = (env: Env) =>
+	`${env.VIEWER_ORIGIN}/cache/${CACHE_VERSION}/full`
+const cacheKeyApi = (env: Env) =>
+	`${env.VIEWER_ORIGIN}/cache/${CACHE_VERSION}/api`
+const cacheKeyUiHtml = (env: Env) =>
+	`${env.VIEWER_ORIGIN}/cache/${CACHE_VERSION}/ui-html`
 const CACHE_TTL = 3600 // 1 hour — snapshots change at most once per day
 let snapshotRefreshPromise: Promise<Snapshot[]> | undefined
 
@@ -858,6 +857,7 @@ function stripSnapshotInternals(snapshots: Snapshot[]): Snapshot[] {
 
 // Populate both caches from a fresh snapshot list
 async function populateSnapshotCaches(
+	env: Env,
 	cache: Cache,
 	snapshots: Snapshot[],
 ): Promise<void> {
@@ -877,29 +877,29 @@ async function populateSnapshotCaches(
 		},
 	)
 	await Promise.all([
-		cache.put(CACHE_KEY_FULL, full),
-		cache.put(CACHE_KEY_API, stripped),
+		cache.put(cacheKeyFull(env), full),
+		cache.put(cacheKeyApi(env), stripped),
 	])
 }
 
 // Canonical source: returns UI snapshots with precomputed preset sizes.
 async function getFullSnapshots(env: Env): Promise<Snapshot[]> {
 	const cache = caches.default
-	const cached = await cache.match(CACHE_KEY_FULL)
+	const cached = await cache.match(cacheKeyFull(env))
 	if (cached) {
 		return cached.json()
 	}
 
 	const indexedSnapshots = await readSnapshotIndex(env)
 	if (indexedSnapshots) {
-		await populateSnapshotCaches(cache, indexedSnapshots)
+		await populateSnapshotCaches(env, cache, indexedSnapshots)
 		return indexedSnapshots
 	}
 
 	snapshotRefreshPromise ??= getSnapshots(env)
 		.then(async (snapshots) => {
 			await writeSnapshotIndex(env, snapshots)
-			await populateSnapshotCaches(cache, snapshots)
+			await populateSnapshotCaches(env, cache, snapshots)
 			return snapshots
 		})
 		.finally(() => {
@@ -917,7 +917,7 @@ async function getCachedSnapshotsForUI(env: Env): Promise<Snapshot[]> {
 // Handle API requests — returns stripped snapshots without UI-only sizing data.
 async function handleAPI(_req: Request, env: Env): Promise<Response> {
 	const cache = caches.default
-	const cached = await cache.match(CACHE_KEY_API)
+	const cached = await cache.match(cacheKeyApi(env))
 	if (cached) {
 		return new Response(cached.body, {
 			headers: {
@@ -954,9 +954,9 @@ async function getSnapshotHistoryPage(
 	beforeBlock: number,
 	limit: number,
 ): Promise<{ snapshots: Snapshot[]; hasMore: boolean }> {
-	const dirs = await listSnapshotDirs(env.SNAPSHOTS, `tempo-${chainId}-`)
+	const dirs = await listSnapshotDirs(env.SNAPSHOTS, SNAPSHOT_DIR_PREFIX)
 	const candidates = dirs
-		.map(parseSnapshotDirInfo)
+		.map((dir) => parseSnapshotDirInfo(dir, env.CHAIN_ID))
 		.filter(
 			(info): info is SnapshotDirInfo =>
 				info !== null && info.chainId === chainId && info.block < beforeBlock,
@@ -983,7 +983,7 @@ async function handleSnapshotHistory(
 	env: Env,
 ): Promise<Response> {
 	const url = new URL(req.url)
-	const chainId = url.searchParams.get('chainId') || DEFAULT_CHAIN_ID
+	const chainId = url.searchParams.get('chainId') || env.CHAIN_ID
 	if (!/^\d+$/.test(chainId)) {
 		return error(400, 'Invalid chainId')
 	}
@@ -1021,7 +1021,7 @@ async function handleSnapshotHistory(
 async function handleUI(_req: Request, env: Env) {
 	// Serve cached HTML from CF edge cache to avoid re-rendering
 	const cache = caches.default
-	const cacheKey = new Request(CACHE_KEY_UI_HTML, { method: 'GET' })
+	const cacheKey = new Request(cacheKeyUiHtml(env), { method: 'GET' })
 	const cachedHtml = await cache.match(cacheKey)
 	if (cachedHtml) {
 		return cachedHtml
@@ -1090,9 +1090,9 @@ async function handleUI(_req: Request, env: Env) {
 		snapshotPresetSizes[s.snapshotId] =
 			getSnapshotPresetSizes(s) || defaultPresetSizes
 	}
-	const selectedChainId = chainIds.includes(DEFAULT_CHAIN_ID)
-		? DEFAULT_CHAIN_ID
-		: chainIds[0] || DEFAULT_CHAIN_ID
+	const selectedChainId = chainIds.includes(env.CHAIN_ID)
+		? env.CHAIN_ID
+		: chainIds[0] || env.CHAIN_ID
 	const selectedNetworkSnapshots =
 		modularSnapshotsByChain[selectedChainId] || []
 	const latestModular = selectedNetworkSnapshots[0]
@@ -1100,7 +1100,7 @@ async function handleUI(_req: Request, env: Env) {
 		? snapshotPresetSizes[latestModular.snapshotId] || defaultPresetSizes
 		: defaultPresetSizes
 	const networkOptions = chainIds.map((chainId) => {
-		const network = getNetworkInfo(chainId)
+		const network = getNetworkInfo(chainId, env)
 		const latestSnapshot = snapshotsByChain[chainId]?.[0]
 
 		return {
@@ -1153,18 +1153,16 @@ async function handleUI(_req: Request, env: Env) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Snapshots - Tempo</title>
-  <meta name="description" content="Download Tempo snapshots. Select a network, snapshot, and data profile for the tempo download CLI.">
-  <meta property="og:title" content="Snapshots - Tempo">
-  <meta property="og:description" content="Download Tempo snapshots with network-aware profiles and generated tempo download commands.">
+  <title>Snapshots - NVNM</title>
+  <meta name="description" content="Download NVNM ${env.NETWORK_NAME} snapshots. Select a snapshot and data profile for the tempo download CLI.">
+  <meta property="og:title" content="Snapshots - NVNM">
+  <meta property="og:description" content="Download NVNM ${env.NETWORK_NAME} snapshots with generated tempo download commands.">
   <meta property="og:type" content="website">
-  <meta property="og:url" content="${VIEWER_ORIGIN}">
+  <meta property="og:url" content="${env.VIEWER_ORIGIN}">
   <meta name="twitter:card" content="summary">
-  <meta name="twitter:title" content="Snapshots - Tempo">
-  <meta name="twitter:description" content="Download Tempo snapshots with network-aware profiles and generated tempo download commands.">
-  <link rel="icon" type="image/x-icon" href="https://tempo.xyz/favicon.ico">
-  <meta property="og:image" content="https://tempo.xyz/favicon.ico">
-  <meta name="twitter:image" content="https://tempo.xyz/favicon.ico">
+  <meta name="twitter:title" content="Snapshots - NVNM">
+  <meta name="twitter:description" content="Download NVNM ${env.NETWORK_NAME} snapshots with generated tempo download commands.">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,${encodeURIComponent(FAVICON_SVG)}">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -1177,6 +1175,12 @@ async function handleUI(_req: Request, env: Env) {
     }
 
     :root, .light {
+      --page-bg:
+        radial-gradient(ellipse 60% 55% at 100% 0%, rgba(139, 205, 255, 0.55), transparent 70%),
+        radial-gradient(ellipse 55% 50% at 0% 100%, rgba(139, 205, 255, 0.45), transparent 70%),
+        #0055ff;
+      --on-bg: #ffffff;
+      --on-bg-muted: rgba(255, 255, 255, 0.82);
       --bg: #fafafa;
       --fg: #0a0a0a;
       --secondary: #525252;
@@ -1222,6 +1226,10 @@ async function handleUI(_req: Request, env: Env) {
 
     .dark {
       color-scheme: dark;
+      --page-bg:
+        radial-gradient(ellipse 60% 55% at 100% 0%, rgba(0, 85, 255, 0.6), transparent 70%),
+        radial-gradient(ellipse 55% 50% at 0% 100%, rgba(0, 85, 255, 0.45), transparent 70%),
+        #002b82;
       --bg: #111111;
       --fg: #ffffff;
       --secondary: #b0b0b0;
@@ -1269,7 +1277,8 @@ async function handleUI(_req: Request, env: Env) {
 
     body {
       font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-      background: var(--bg);
+      background: var(--page-bg);
+      background-attachment: fixed;
       color: var(--fg);
       line-height: 1.6;
       min-height: 100vh;
@@ -1294,14 +1303,15 @@ async function handleUI(_req: Request, env: Env) {
     .wordmark {
       display: inline-flex;
       align-items: center;
-      color: var(--fg);
+      color: var(--on-bg);
       text-decoration: none;
     }
 
-    .wordmark svg {
-      width: auto;
+    .wordmark img {
+      display: block;
       height: 22px;
-      fill: currentColor;
+      width: auto;
+      max-width: 60vw;
     }
 
     .header-actions {
@@ -1376,7 +1386,7 @@ async function handleUI(_req: Request, env: Env) {
       font-weight: 700;
       letter-spacing: 0;
       line-height: 1.1;
-      color: var(--fg);
+      color: var(--on-bg);
     }
 
     .cmd-box {
@@ -1435,6 +1445,50 @@ async function handleUI(_req: Request, env: Env) {
       padding: 0 0 4rem;
     }
 
+    :root:not(.dark) .main {
+      --fg: #ffffff;
+      --secondary: rgba(255, 255, 255, 0.82);
+      --muted: rgba(255, 255, 255, 0.82);
+      --accent: #ffffff;
+      --accent-dim: #ffffff;
+      --accent-muted: rgba(255, 255, 255, 0.16);
+      --size-fg: #ffffff;
+      --count-badge-fg: #0055ff;
+      --cmd-border: rgba(255, 255, 255, 0.35);
+      --border: rgba(255, 255, 255, 0.35);
+      --disk-state:    #ffffff;
+      --disk-headers:  #e0efff;
+      --disk-txs:      #c2e0ff;
+      --disk-tx-send:  #a5d2ff;
+      --disk-receipts: #8bcdff;
+      --disk-acc-cs:   #70bfff;
+      --disk-sto-cs:   #55afff;
+      --disk-indices:  #d6dbe4;
+    }
+
+    :root:not(.dark) .main :is(
+      .cmd-box, .modular-cmd, input, select, select option,
+      .snapshot-history-button, .table-card, .tabs,
+      .preset:not(.active):not(.modified), .cap-item,
+      .checklist-head, .checklist-row.checked, .checklist-row:hover
+    ) {
+      --fg: #0a0a0a;
+      --secondary: #525252;
+      --muted: #5f5f5f;
+      --accent: #3b82f6;
+      --accent-dim: #3b82f6;
+      --accent-muted: rgba(59, 130, 246, 0.1);
+      --size-fg: #0a0a0a;
+      --count-badge-fg: #ffffff;
+      --cmd-border: #e5e5e5;
+      --border: #e5e5e5;
+    }
+
+    :root:not(.dark) .preset.active,
+    :root:not(.dark) .preset.modified {
+      background: rgba(255, 255, 255, 0.14);
+    }
+
     .filters {
       display: flex;
       gap: 0.75rem;
@@ -1461,7 +1515,7 @@ async function handleUI(_req: Request, env: Env) {
     .filter-group label {
       font-size: 0.7rem;
       font-weight: 600;
-      color: var(--muted);
+      color: var(--on-bg-muted);
       text-transform: uppercase;
       letter-spacing: 0;
     }
@@ -1918,7 +1972,7 @@ async function handleUI(_req: Request, env: Env) {
       align-items: center;
       gap: 0.5rem;
       font-size: 0.7rem;
-      color: var(--muted);
+      color: var(--on-bg-muted);
       margin-bottom: 0.75rem;
       font-family: 'JetBrains Mono', monospace;
     }
@@ -1926,7 +1980,7 @@ async function handleUI(_req: Request, env: Env) {
     .snapshot-indicator-reset {
       background: none;
       border: none;
-      color: var(--accent);
+      color: var(--on-bg);
       cursor: pointer;
       font-size: 0.7rem;
       padding: 0;
@@ -1937,7 +1991,7 @@ async function handleUI(_req: Request, env: Env) {
     .snapshot-status-note {
       margin-bottom: 1.5rem;
       font-size: 0.78rem;
-      color: var(--muted);
+      color: var(--on-bg-muted);
       font-family: 'JetBrains Mono', monospace;
     }
 
@@ -2474,18 +2528,18 @@ async function handleUI(_req: Request, env: Env) {
       justify-content: center;
       gap: 0.5rem;
       padding: 2rem 0;
-      color: var(--secondary);
+      color: var(--on-bg-muted);
       font-size: 0.8rem;
     }
 
     .footer a {
-      color: var(--secondary);
+      color: var(--on-bg-muted);
       text-decoration: none;
       transition: color var(--duration) var(--ease);
     }
 
     .footer a:hover {
-      color: var(--fg);
+      color: var(--on-bg);
     }
 
     .footer-sep {
@@ -2508,12 +2562,9 @@ async function handleUI(_req: Request, env: Env) {
 <body>
   <div class="site-shell">
     <header class="site-header">
-      <a class="wordmark" href="https://tempo.xyz" target="_blank" rel="noopener" aria-label="Tempo">
-        <svg viewBox="0 0 107 25" role="img" aria-hidden="true"><path d="M8.10464 23.7163H1.82475L7.64513 5.79356H0.201172L1.82475 0.540352H22.5637L20.9401 5.79356H13.8944L8.10464 23.7163Z"></path><path d="M31.474 23.7163H16.5861L24.0607 0.540352H38.8873L37.4782 4.95923H28.8701L27.3078 9.93433H35.6402L34.231 14.2914H25.8681L24.3057 19.2974H32.8525L31.474 23.7163Z"></path><path d="M38.2124 23.7163H33.2192L40.7244 0.540352H49.0567L48.781 13.0245L56.8989 0.540352H66.0277L58.5531 23.7163H52.3039L57.3584 7.86395L46.9736 23.7163H43.267L43.4201 7.80214L38.2124 23.7163Z"></path><path d="M73.057 4.83563L70.6369 12.3137H71.3108C72.8425 12.3137 74.1189 11.9532 75.14 11.2322C76.1612 10.4906 76.8249 9.43991 77.1312 8.08025C77.3967 6.90601 77.2538 6.07167 76.7023 5.57725C76.1509 5.08284 75.2319 4.83563 73.9453 4.83563H73.057ZM66.9915 23.7163H60.7116L68.1862 0.540352H75.814C77.5703 0.540352 79.0816 0.828764 80.3478 1.40559C81.6344 1.96181 82.5738 2.76524 83.166 3.81588C83.7787 4.84592 83.9829 6.05107 83.7787 7.43133C83.5132 9.2442 82.8189 10.8408 81.6956 12.221C80.5724 13.6013 79.1122 14.6725 77.315 15.4347C75.5383 16.1764 73.5471 16.5472 71.3415 16.5472H69.289L66.9915 23.7163Z"></path><path d="M98.747 22.233C96.664 23.4691 94.4481 24.0871 92.0996 24.0871H92.0383C89.9552 24.0871 88.1989 23.6236 86.7693 22.6965C85.3602 21.7489 84.3493 20.4717 83.7366 18.8648C83.1443 17.2579 83.0014 15.4966 83.3077 13.5807C83.6957 11.1704 84.5841 8.94549 85.9728 6.90601C87.3616 4.86653 89.0975 3.23906 91.1805 2.02361C93.2636 0.808164 95.4897 0.200439 97.8587 0.200439H97.9199C100.085 0.200439 101.872 0.663958 103.281 1.591C104.71 2.51803 105.701 3.78498 106.252 5.39185C106.824 6.97811 106.947 8.76008 106.62 10.7378C106.232 13.0657 105.343 15.2596 103.955 17.3197C102.566 19.3592 100.83 20.997 98.747 22.233ZM90.0777 18.2468C90.6292 19.2974 91.589 19.8227 92.9573 19.8227H93.0186C94.1418 19.8227 95.1833 19.4004 96.1432 18.5558C97.1235 17.6905 97.9506 16.5369 98.6245 15.0948C99.3189 13.6528 99.8294 12.0459 100.156 10.2742C100.463 8.54377 100.34 7.15322 99.7886 6.10257C99.2372 5.03133 98.2875 4.49571 96.9397 4.49571H96.8784C95.8369 4.49571 94.826 4.92833 93.8457 5.79356C92.8858 6.6588 92.0485 7.82274 91.3337 9.2854C90.6189 10.7481 90.0982 12.3343 89.7714 14.0442C89.4446 15.7747 89.5468 17.1755 90.0777 18.2468Z"></path></svg>
-      </a>
+      <span class="wordmark"><img src="${LOGO_WHITE_PNG}" alt="Inveniam" height="22"></span>
 
       <div class="header-actions">
-        <a class="theme-toggle header-docs-button" href="${SNAPSHOT_DOCS_URL}" target="_blank" rel="noopener" data-tooltip="Migration guidance" aria-label="Docs: migration guidance">Docs</a>
         <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme" aria-label="Toggle theme">
           <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
           <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
@@ -2569,9 +2620,8 @@ async function handleUI(_req: Request, env: Env) {
             <span class="preset-name">Minimal<span class="preset-modified-tag">(modified)</span></span>
             <span class="preset-size" id="preset-minimal-size"></span>
           </div>
-          <span class="preset-desc">Tempo state and headers with minimal history. Limited historical RPC.</span>
+          <span class="preset-desc">NVNM state and headers with minimal history. Limited historical RPC.</span>
           <span class="preset-ideal">Best for validators and constrained infrastructure</span>
-          <span class="preset-note"><span class="preset-note-icon" aria-hidden="true">!</span><span>First-time Minimal migration? Add <code>--force</code> to replace old snapshot data while preserving node identity files.</span></span>
         </button>
         <button class="preset" onclick="selectPreset('full')" id="preset-full">
           <div class="preset-header">
@@ -2588,7 +2638,7 @@ async function handleUI(_req: Request, env: Env) {
             <span class="preset-name">Archive<span class="preset-modified-tag">(modified)</span></span>
             <span class="preset-size" id="preset-archive-size"></span>
           </div>
-          <span class="preset-desc">Complete Tempo history with transactions, senders, and indices.</span>
+          <span class="preset-desc">Complete NVNM history with transactions, senders, and indices.</span>
           <span class="preset-ideal">Best for RPC providers, indexers, and analysis</span>
         </button>
       </div>
@@ -2624,11 +2674,7 @@ async function handleUI(_req: Request, env: Env) {
     <footer class="footer">
       <span id="footerStatus">Latest snapshot: block ${latestModular ? latestModular.block.toLocaleString() : '—'} · ${latestModular ? new Date(parseInt(latestModular.timestamp, 10) * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}</span>
       <span class="footer-sep">&middot;</span>
-      <a href="https://tempo.xyz" target="_blank" rel="noopener">About</a>
-      <span class="footer-sep">&middot;</span>
-      <a href="${SNAPSHOT_DOCS_URL}" target="_blank" rel="noopener">Docs</a>
-      <span class="footer-sep">&middot;</span>
-      <a href="https://github.com/tempoxyz/tempo" target="_blank" rel="noopener">GitHub</a>
+      <a href="${SNAPSHOT_REPO_URL}" target="_blank" rel="noopener">GitHub</a>
     </footer>
   </div>
 
@@ -2648,9 +2694,9 @@ async function handleUI(_req: Request, env: Env) {
     var activeChainId = ${safeJsonForInlineScript(selectedChainId)};
     var latestModularSnapshotId = ${safeJsonForInlineScript(latestModular?.snapshotId || null)};
     var COMPONENTS = [
-      { id: 'state',     name: 'state',              desc: 'Tempo MDBX state database',           color: 'var(--disk-state)',     required: true },
-      { id: 'headers',   name: 'headers',            desc: 'Tempo block headers',                 color: 'var(--disk-headers)',   required: true },
-      { id: 'txs',       name: 'transactions',       desc: 'Tempo transaction history',           color: 'var(--disk-txs)',       required: false },
+      { id: 'state',     name: 'state',              desc: 'NVNM MDBX state database',            color: 'var(--disk-state)',     required: true },
+      { id: 'headers',   name: 'headers',            desc: 'NVNM block headers',                  color: 'var(--disk-headers)',   required: true },
+      { id: 'txs',       name: 'transactions',       desc: 'NVNM transaction history',            color: 'var(--disk-txs)',       required: false },
       { id: 'tx_send',   name: 'senders',            desc: 'Recovered transaction sender data',   color: 'var(--disk-tx-send)',   required: false },
       { id: 'receipts',  name: 'receipts',           desc: 'Transaction receipts and logs',       color: 'var(--disk-receipts)',  required: false },
       { id: 'acc_cs',    name: 'state history',      desc: 'Account and storage changesets',      color: 'var(--disk-acc-cs)',    required: false, group: ['acc_cs', 'sto_cs'] },
@@ -2888,11 +2934,7 @@ async function handleUI(_req: Request, env: Env) {
       var latestSnapshot = getLatestSnapshotForActiveNetwork();
 
       if (!hasActiveModularSnapshot()) {
-        var legacyCmd = 'tempo download';
-        if (activeChainId !== '${DEFAULT_CHAIN_ID}') {
-          var legacyNetwork = NETWORK_OPTIONS.find(function(option) { return option.chainId === activeChainId; });
-          if (legacyNetwork) legacyCmd += ' --chain ' + legacyNetwork.key;
-        }
+        var legacyCmd = 'tempo download --chain ./genesis.json';
         if (latestSnapshot && latestSnapshot.archiveUrl) {
           legacyCmd += ' -u ' + latestSnapshot.archiveUrl;
         }
@@ -2927,12 +2969,9 @@ async function handleUI(_req: Request, env: Env) {
         if (checkedComponents.has('acc_cs') || checkedComponents.has('sto_cs')) flags.push('--with-state-history');
         if (flags.length > 0) cmd += ' ' + flags.join(' ');
       }
-      if (activeChainId !== '${DEFAULT_CHAIN_ID}') {
-        var network = NETWORK_OPTIONS.find(function(option) { return option.chainId === activeChainId; });
-        if (network) cmd += ' --chain ' + network.key;
-      }
+      cmd += ' --chain ./genesis.json';
       if (activeSnapshotUrl) {
-        cmd += ' --manifest-url ' + activeSnapshotUrl;
+        cmd += ' --manifest-path ' + activeSnapshotUrl;
       }
 
       var snapshot = getActiveSnapshot();

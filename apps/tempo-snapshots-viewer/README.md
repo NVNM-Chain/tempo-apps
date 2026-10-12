@@ -25,7 +25,7 @@ pnpm --filter tempo-snapshots-viewer dev  # Local development at http://localhos
 ## Deployment
 
 ```bash
-pnpm --filter tempo-snapshots-viewer deploy  # Deploys to snapshots.tempo.xyz
+pnpm --filter tempo-snapshots-viewer deploy  # Deploys to download.nvnm.testnet.nvnmchain.io
 ```
 
 ## Project Structure
