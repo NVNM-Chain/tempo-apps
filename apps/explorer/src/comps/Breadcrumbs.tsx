@@ -76,6 +76,17 @@ function getLabelForPath(pathname: string): {
 		return { label: 'Tokens', type: 'other' }
 	}
 
+	const anchoringMatch = pathname.match(/^\/anchoring(?:\/(\d+)(?:\/(\d+))?)?$/)
+	if (anchoringMatch) {
+		const [, registryId, recordId] = anchoringMatch
+		const label = recordId
+			? `Record ${registryId}/${recordId}`
+			: registryId
+				? `Registry #${registryId}`
+				: 'Anchoring'
+		return { label, type: 'other' }
+	}
+
 	return { label: pathname, type: 'other' }
 }
 

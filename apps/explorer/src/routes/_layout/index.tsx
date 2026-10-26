@@ -5,6 +5,7 @@ import * as z from 'zod/mini'
 import { ExploreInput } from '#comps/ExploreInput'
 import { cx } from '#lib/css'
 import { getTempoEnv } from '#lib/env'
+import AnchorIcon from '~icons/lucide/anchor'
 import BoxIcon from '~icons/lucide/box'
 import CoinsIcon from '~icons/lucide/coins'
 import FileIcon from '~icons/lucide/file'
@@ -148,6 +149,12 @@ function SpotlightLinks() {
 					icon={<CoinsIcon className="size-[14px] text-accent" />}
 				>
 					Tokens
+				</SpotlightPill>
+				<SpotlightPill
+					to="/anchoring"
+					icon={<AnchorIcon className="size-[14px] text-accent" />}
+				>
+					Anchoring
 				</SpotlightPill>
 			</div>
 		</section>
