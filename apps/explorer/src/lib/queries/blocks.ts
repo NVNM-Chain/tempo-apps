@@ -122,7 +122,8 @@ export function blockKnownEventsQueryOptions(
 				if (metadata) tokenMetadataMap.set(address.toLowerCase(), metadata)
 			}
 
-			const result: Record<Hex.Hex, KnownEvent[]> = {}
+			const knownEvents: Record<Hex.Hex, KnownEvent[]> = {}
+			const fees: Record<Hex.Hex, bigint> = {}
 			for (const transaction of transactions) {
 				if (!transaction.hash) continue
 				const receipt = receiptByHash.get(transaction.hash.toLowerCase())
@@ -147,10 +148,11 @@ export function blockKnownEventsQueryOptions(
 					? [knownCall, ...parsedEvents.filter((e) => e.type !== 'fee')]
 					: parsedEvents
 
-				result[transaction.hash] = events
+				knownEvents[transaction.hash] = events
+				fees[transaction.hash] = receipt.effectiveGasPrice * receipt.gasUsed
 			}
 
-			return result
+			return { knownEvents, fees }
 		},
 		staleTime: Number.POSITIVE_INFINITY, // Receipts don't change
 	})

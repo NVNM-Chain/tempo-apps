@@ -6,9 +6,10 @@ import { Midcut } from '#comps/Midcut'
 import { ValidatorTag } from '#comps/ValidatorTag'
 import { useAnimatedBlockNumber } from '#lib/block-number'
 import { cx } from '#lib/css'
-import { DateFormatter } from '#lib/formatting'
+import { DateFormatter, PriceFormatter } from '#lib/formatting'
 import { useCopy, useIsMounted } from '#lib/hooks'
 import type { BlockWithTransactions } from '#lib/queries'
+import ArrowDown01 from '~icons/lucide/arrow-down-0-1'
 import ArrowUp10 from '~icons/lucide/arrow-up-1-0'
 import ChevronDown from '~icons/lucide/chevron-down'
 import CopyIcon from '~icons/lucide/copy'
@@ -23,10 +24,18 @@ export function BlockCard(props: BlockCard.Props) {
 		miner,
 		gasUsed,
 		gasLimit,
+		baseFeePerGas,
 		stateRoot,
 		transactionsRoot,
 		receiptsRoot,
 	} = block
+	// Tempo's consensus context, on blocks a validator committee finalized.
+	const consensus =
+		'consensusContext' in block
+			? (block.consensusContext as
+					| { epoch?: unknown; view?: unknown; proposer?: unknown }
+					| undefined)
+			: undefined
 
 	const [showAdvanced, setShowAdvanced] = React.useState(false)
 
@@ -64,6 +73,12 @@ export function BlockCard(props: BlockCard.Props) {
 	const [utcDate, utcTime] = utcFormatted?.split(', ') ?? []
 
 	const gasUsage = BlockCard.getGasUsagePercent(gasUsed, gasLimit)
+	const next =
+		blockNumber != null &&
+		liveBlockNumber != null &&
+		liveBlockNumber > blockNumber
+			? String(blockNumber + 1n)
+			: undefined
 	const roots = [
 		{ label: 'state', value: stateRoot },
 		{ label: 'txns', value: transactionsRoot },
@@ -148,7 +163,65 @@ export function BlockCard(props: BlockCard.Props) {
 							<Midcut value={parentHash} prefix="0x" align="end" min={4} />
 						</Link>
 					</div>
+					{next && (
+						<div className="w-full flex items-center justify-between gap-[8px]">
+							<span className="flex items-center gap-[6px] font-normal capitalize text-tertiary shrink-0">
+								<ArrowDown01 className="size-[14px] text-content-dimmed" />
+								Next
+							</span>
+							<Link
+								to="/block/$id"
+								params={{ id: next }}
+								className="text-accent hover:underline press-down font-sans tabular-nums"
+							>
+								#{next}
+							</Link>
+						</div>
+					)}
 				</div>,
+				baseFeePerGas != null && (
+					<div key="fees" className="w-full flex flex-col gap-[8px]">
+						<BlockCard.InfoRow label="Base Fee">
+							<span className="text-primary font-sans tabular-nums">
+								{PriceFormatter.formatGasPrice(baseFeePerGas)}
+							</span>
+						</BlockCard.InfoRow>
+						<BlockCard.InfoRow label="Base Fees">
+							<span className="text-primary font-sans tabular-nums">
+								{PriceFormatter.formatGasCost(baseFeePerGas * gasUsed)}
+							</span>
+						</BlockCard.InfoRow>
+					</div>
+				),
+				consensus && (
+					<div key="consensus" className="w-full flex flex-col gap-[8px]">
+						{typeof consensus.proposer === 'string' && (
+							<BlockCard.InfoRow label="Proposer">
+								<span
+									className="font-mono text-primary min-w-0 flex-1 flex justify-end max-w-[18ch]"
+									title={consensus.proposer}
+								>
+									<Midcut
+										value={consensus.proposer}
+										prefix="0x"
+										align="end"
+										min={4}
+									/>
+								</span>
+							</BlockCard.InfoRow>
+						)}
+						<BlockCard.InfoRow label="Epoch">
+							<span className="text-primary font-sans tabular-nums">
+								{String(consensus.epoch ?? '—')}
+							</span>
+						</BlockCard.InfoRow>
+						<BlockCard.InfoRow label="View">
+							<span className="text-primary font-sans tabular-nums">
+								{String(consensus.view ?? '—')}
+							</span>
+						</BlockCard.InfoRow>
+					</div>
+				),
 				<div
 					key="miner-confirmations"
 					className="w-full flex flex-col gap-[8px]"

@@ -14,7 +14,6 @@ import * as Json from 'ox/Json'
 import * as Value from 'ox/Value'
 import * as React from 'react'
 import type { Log, TransactionReceipt } from 'viem'
-import { useChains } from 'wagmi'
 import * as z from 'zod/mini'
 import { Address } from '#comps/Address'
 import { BreadcrumbsSlot } from '#comps/Breadcrumbs'
@@ -375,9 +374,6 @@ function OverviewSection(props: {
 		balanceChangesData,
 	} = props
 
-	const [chain] = useChains()
-	const { decimals, symbol } = chain.nativeCurrency
-
 	const gasUsed = receipt.gasUsed
 	const gasLimit = transaction.gas
 	const gasUsedPercentage =
@@ -457,11 +453,9 @@ function OverviewSection(props: {
 					</div>
 				) : (
 					<span className="text-primary">
-						{Value.format(
+						{PriceFormatter.formatGasCost(
 							receipt.effectiveGasPrice * receipt.gasUsed,
-							decimals,
-						)}{' '}
-						{symbol}
+						)}
 					</span>
 				)}
 			</InfoRow>
@@ -479,21 +473,29 @@ function OverviewSection(props: {
 				</span>
 			</InfoRow>
 			<InfoRow label="Gas Price">
-				<span className="text-primary">{gasPrice}</span>
+				<span className="text-primary">
+					{PriceFormatter.formatGasPrice(gasPrice)}
+				</span>
 			</InfoRow>
 			{baseFee !== undefined && baseFee !== null && (
 				<InfoRow label="Base Fee">
-					<span className="text-primary">{baseFee}</span>
+					<span className="text-primary">
+						{PriceFormatter.formatGasPrice(baseFee)}
+					</span>
 				</InfoRow>
 			)}
 			{maxFee !== undefined && (
 				<InfoRow label="Max Fee">
-					<span className="text-primary">{maxFee}</span>
+					<span className="text-primary">
+						{PriceFormatter.formatGasPrice(maxFee)}
+					</span>
 				</InfoRow>
 			)}
 			{maxPriorityFee !== undefined && (
 				<InfoRow label="Max Priority Fee">
-					<span className="text-primary">{maxPriorityFee}</span>
+					<span className="text-primary">
+						{PriceFormatter.formatGasPrice(maxPriorityFee)}
+					</span>
 				</InfoRow>
 			)}
 			<InfoRow label="Transaction Type">
