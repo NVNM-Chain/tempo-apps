@@ -1316,8 +1316,8 @@ function SectionsWrapper(props: {
 											/>,
 										],
 										link: {
-											href: `/receipt/${transaction.hash}`,
-											title: `View receipt ${transaction.hash}`,
+											href: `/tx/${transaction.hash}`,
+											title: `View transaction ${transaction.hash}`,
 										},
 										expanded: isVoucherMatch ? (
 											<StreamedPaymentReceipt
@@ -1508,7 +1508,7 @@ function SectionsWrapper(props: {
 													<TimestampCell
 														key="time"
 														timestamp={timestamp}
-														link={`/receipt/${transfer.transactionHash}`}
+														link={`/tx/${transfer.transactionHash}`}
 														format={timeFormat}
 													/>,
 													<TransactionCell
@@ -1555,8 +1555,8 @@ function SectionsWrapper(props: {
 													/>,
 												],
 												link: {
-													href: `/receipt/${transfer.transactionHash}`,
-													title: `View receipt ${transfer.transactionHash}`,
+													href: `/tx/${transfer.transactionHash}`,
+													title: `View transaction ${transfer.transactionHash}`,
 												},
 											}
 										},
@@ -1605,7 +1605,7 @@ function SectionsWrapper(props: {
 										<TimestampCell
 											key="time"
 											timestamp={timestamp}
-											link={`/receipt/${transfer.transactionHash}`}
+											link={`/tx/${transfer.transactionHash}`}
 											format={timeFormat}
 										/>,
 										<TransactionCell
@@ -1633,8 +1633,8 @@ function SectionsWrapper(props: {
 										/>,
 									],
 									link: {
-										href: `/receipt/${transfer.transactionHash}`,
-										title: `View receipt ${transfer.transactionHash}`,
+										href: `/tx/${transfer.transactionHash}`,
+										title: `View transaction ${transfer.transactionHash}`,
 									},
 								}))
 							}}
@@ -1790,7 +1790,7 @@ function TransactionTimeCell(props: {
 	return (
 		<TransactionTimestamp
 			timestamp={BigInt(safeTimestamp)}
-			link={`/receipt/${hash}`}
+			link={`/tx/${hash}`}
 			format={format}
 		/>
 	)

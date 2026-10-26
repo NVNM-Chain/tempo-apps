@@ -143,33 +143,38 @@ function rankByName(registries: AnchoringRegistry[], q: string) {
  */
 export const searchAnchoring = createServerFn({ method: 'POST' })
 	.inputValidator(z.object({ q: z.string(), limit: z.optional(z.number()) }))
-	.handler(async ({ data }) => {
-		const client = getBatchedClient()
-		if ((await registryCount(client)) === 0)
-			return { registries: [], records: [] }
-		// The index answers by id, so the name typed can sit behind names that contain it.
-		const asked = Math.min(NAME_INDEX_LIMIT, (data.limit ?? Infinity) * 8)
-		const [[named], [anchored], partial] = await Promise.all([
-			client.readContract({
-				...contract,
-				functionName: 'registriesByName',
-				args: [data.q, 1, FIRST_PAGE],
-			}),
-			client.readContract({
-				...contract,
-				functionName: 'records',
-				args: [0n, data.q, 0n, 0n, FIRST_PAGE],
-			}),
-			nameIndex(client, data.q, asked),
-		])
-		const byId = new Map(
-			[...named.map(registryOf), ...partial].map((r) => [r.id, r]),
-		)
-		return {
-			registries: rankByName([...byId.values()], data.q).slice(0, data.limit),
-			records: anchored.map(recordOf).slice(0, data.limit),
-		}
-	})
+	.handler(({ data }) => findAnchoring(data.q, data.limit))
+
+export async function findAnchoring(
+	q: string,
+	limit?: number,
+): Promise<{ registries: AnchoringRegistry[]; records: AnchoringRecord[] }> {
+	const client = getBatchedClient()
+	if ((await registryCount(client)) === 0)
+		return { registries: [], records: [] }
+	// The index answers by id, so the name typed can sit behind names that contain it.
+	const asked = Math.min(NAME_INDEX_LIMIT, (limit ?? Infinity) * 8)
+	const [[named], [anchored], partial] = await Promise.all([
+		client.readContract({
+			...contract,
+			functionName: 'registriesByName',
+			args: [q, 1, FIRST_PAGE],
+		}),
+		client.readContract({
+			...contract,
+			functionName: 'records',
+			args: [0n, q, 0n, 0n, FIRST_PAGE],
+		}),
+		nameIndex(client, q, asked),
+	])
+	const byId = new Map(
+		[...named.map(registryOf), ...partial].map((r) => [r.id, r]),
+	)
+	return {
+		registries: rankByName([...byId.values()], q).slice(0, limit),
+		records: anchored.map(recordOf).slice(0, limit),
+	}
+}
 
 /**
  * A registry's latest events, newest first, decoded by the indexer; `null` when the indexer

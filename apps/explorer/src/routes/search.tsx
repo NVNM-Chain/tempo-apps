@@ -102,7 +102,7 @@ function getRedirectForSearchMatch(result: SearchMatch) {
 
 	if (result.type === 'transaction') {
 		return {
-			to: '/receipt/$hash',
+			to: '/tx/$hash',
 			params: { hash: result.hash },
 		} as const
 	}
@@ -152,12 +152,6 @@ export const Route = createFileRoute('/search')({
 				params: { address: normalizedQuery },
 			})
 
-		if (Hex.validate(normalizedQuery) && Hex.size(normalizedQuery) === 32)
-			throw redirect({
-				to: '/receipt/$hash',
-				params: { hash: normalizedQuery },
-			})
-
 		let uniqueMatch: SearchMatch | null = null
 		try {
 			uniqueMatch = await fetchUniqueSearchMatch(normalizedQuery)
@@ -165,6 +159,13 @@ export const Route = createFileRoute('/search')({
 
 		if (uniqueMatch != null)
 			throw redirect(getRedirectForSearchMatch(uniqueMatch))
+
+		// A hash nothing answered for may still be a pending transaction.
+		if (Hex.validate(normalizedQuery) && Hex.size(normalizedQuery) === 32)
+			throw redirect({
+				to: '/tx/$hash',
+				params: { hash: normalizedQuery },
+			})
 
 		throw redirect(getLandingRedirect(rawQuery))
 	},
