@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { createFileRoute } from '@tanstack/react-router'
 import * as React from 'react'
+import { formatUnits } from 'viem'
 import * as z from 'zod/mini'
 import { Address } from '#comps/Address'
 import { DataGrid } from '#comps/DataGrid'
@@ -12,6 +13,7 @@ import {
 } from '#comps/TimeFormat'
 import { TokenIcon } from '#comps/TokenIcon'
 import { PREFETCH_PAGE_COUNT } from '#lib/constants'
+import { PriceFormatter } from '#lib/formatting'
 import { useMediaQuery } from '#lib/hooks'
 import { withLoaderTiming } from '#lib/profiling'
 import { TOKENS_PER_PAGE, tokensListQueryOptions } from '#lib/queries'
@@ -123,6 +125,16 @@ function TokensPage() {
 			label: 'Holders',
 			align: 'start',
 			width: 110,
+		},
+		{
+			label: 'Decimals',
+			align: 'end',
+			width: 90,
+		},
+		{
+			label: 'Supply',
+			align: 'end',
+			width: 130,
 		},
 		{
 			label: 'Address',
@@ -245,6 +257,27 @@ function TokensPage() {
 																className="font-mono text-secondary"
 															>
 																{formatHoldersCount(token)}
+															</span>,
+															<span
+																key="decimals"
+																className="font-sans text-secondary"
+															>
+																{token.decimals ?? '—'}
+															</span>,
+															<span
+																key="supply"
+																className="font-sans text-secondary"
+																title={token.totalSupply}
+															>
+																{token.totalSupply !== undefined &&
+																token.decimals !== undefined
+																	? PriceFormatter.formatAmountShort(
+																			formatUnits(
+																				BigInt(token.totalSupply),
+																				token.decimals,
+																			),
+																		)
+																	: '—'}
 															</span>,
 															<Address
 																key="address"

@@ -1,12 +1,13 @@
 import { createServerFn } from '@tanstack/react-start'
 import { parseResponse } from 'hono/client'
 import type { Address } from 'ox'
+import { erc20Abi } from 'viem'
 import { getChainId } from 'wagmi/actions'
 import * as z from 'zod/mini'
 import { getAccountTag } from '#lib/account'
 import { api } from '#lib/server/tempo-api'
 import { parseTimestamp } from '#lib/timestamp'
-import { getWagmiConfig } from '#wagmi.config.ts'
+import { getBatchedClient, getWagmiConfig } from '#wagmi.config.ts'
 
 export type Token = {
 	address: Address.Address
@@ -16,6 +17,9 @@ export type Token = {
 	logoURI?: string | undefined
 	createdAt?: number | undefined
 	holdersCount?: number
+	decimals?: number | undefined
+	/** In base units; unset when the node could not say. */
+	totalSupply?: string | undefined
 }
 
 const FetchTokensInputSchema = z.object({
@@ -96,10 +100,25 @@ export const fetchTokens = createServerFn({ method: 'POST' })
 					})
 			: undefined
 
+		// The list carries no supply; the node answers for the page's tokens.
+		const client = getBatchedClient()
+		const supplies = await Promise.all(
+			pageTokens.map((token) =>
+				client
+					.readContract({
+						address: token.address as Address.Address,
+						abi: erc20Abi,
+						functionName: 'totalSupply',
+					})
+					.catch(() => undefined),
+			),
+		)
+
 		return {
 			total: tokens.length,
-			tokens: pageTokens.map((token) => {
+			tokens: pageTokens.map((token, index) => {
 				const address = token.address as Address.Address
+				const supply = supplies[index]
 
 				return {
 					address,
@@ -112,6 +131,8 @@ export const fetchTokens = createServerFn({ method: 'POST' })
 						parseTimestamp(token.createdAt) ??
 						(isGenesisTokenAddress(address) ? genesisCreatedAt : undefined),
 					holdersCount: token.holderCount,
+					decimals: token.decimals,
+					totalSupply: supply === undefined ? undefined : String(supply),
 				}
 			}),
 		}
