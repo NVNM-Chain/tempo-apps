@@ -11,7 +11,7 @@ import {
 import { isTip20Address } from '#lib/domain/tip20.ts'
 import { getBatchedClient, getWagmiConfig } from '#wagmi.config.ts'
 
-export const BLOCKS_PER_PAGE = 12
+export const BLOCKS_PER_PAGE = 25
 
 export type BlockIdentifier =
 	| { kind: 'hash'; blockHash: Hex.Hex }
