@@ -1,5 +1,6 @@
 import * as Address from 'ox/Address'
 import * as Hex from 'ox/Hex'
+import { isPhrasedEvent } from '#lib/domain/phrases'
 import type { KnownEvent, KnownEventPart } from './known-events'
 
 export type TransactionActivity = {
@@ -54,6 +55,17 @@ export function activitiesToKnownEvents(
 			}),
 		}
 	})
+}
+
+/** The API's activities after the Safe and anchoring events it does not describe; the decoded events when it has none. */
+export function selectTransactionDescriptionEvents(params: {
+	activityEvents: readonly KnownEvent[]
+	fallbackEvents: readonly KnownEvent[]
+}): KnownEvent[] {
+	const { activityEvents, fallbackEvents } = params
+	return activityEvents.length > 0
+		? [...fallbackEvents.filter(isPhrasedEvent), ...activityEvents]
+		: [...fallbackEvents]
 }
 
 function activityAddress(

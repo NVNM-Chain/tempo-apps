@@ -8,6 +8,7 @@ import {
 	useNavigate,
 } from '@tanstack/react-router'
 import type { Address as OxAddress, Hex } from 'ox'
+import type { SignatureEnvelope } from 'ox/tempo'
 import * as OxAddressUtil from 'ox/Address'
 import * as Json from 'ox/Json'
 import * as Value from 'ox/Value'
@@ -43,7 +44,10 @@ import {
 } from '#lib/domain/tx-event-groups'
 import type { FeeBreakdownItem } from '#lib/domain/receipt'
 import { isTip20Address } from '#lib/domain/tip20'
-import { activitiesToKnownEvents } from '#lib/domain/transaction-activities'
+import {
+	activitiesToKnownEvents,
+	selectTransactionDescriptionEvents,
+} from '#lib/domain/transaction-activities'
 import { PriceFormatter } from '#lib/formatting'
 import { useKeyboardShortcut, useMediaQuery } from '#lib/hooks'
 import { buildOgImageUrl, buildTxDescription, OG_BASE_URL } from '#lib/og'
@@ -61,6 +65,7 @@ import {
 	traceQueryOptions,
 } from '#lib/queries/trace'
 import { withLoaderTiming } from '#lib/profiling'
+import { signatureTypeLabel } from '#lib/domain/signature-type'
 import { zHash } from '#lib/zod'
 import { fetchBalanceChanges } from '#routes/api/tx/balance-changes/$hash'
 import { fetchTransactionActivities } from '#lib/server/transaction-activities'
@@ -146,10 +151,10 @@ export const Route = createFileRoute('/_layout/tx/$hash')({
 			? buildTxDescription({
 					timestamp: Number(loaderData.block.timestamp) * 1000,
 					from: loaderData.receipt.from,
-					events:
-						loaderData.activityEvents.length > 0
-							? loaderData.activityEvents
-							: (loaderData.knownEvents ?? []),
+					events: selectTransactionDescriptionEvents({
+						activityEvents: loaderData.activityEvents,
+						fallbackEvents: loaderData.knownEvents ?? [],
+					}),
 				})
 			: 'View transaction details on Tempo Explorer.'
 
@@ -198,8 +203,10 @@ function RouteComponent() {
 			!event.meta?.to ||
 			!OxAddressUtil.isEqual(event.meta.to, RECEIVE_POLICY_GUARD),
 	)
-	const descriptionEvents =
-		activityEvents.length > 0 ? activityEvents : displayKnownEvents
+	const descriptionEvents = selectTransactionDescriptionEvents({
+		activityEvents,
+		fallbackEvents: displayKnownEvents,
+	})
 
 	useKeyboardShortcut({
 		t: () =>
@@ -385,6 +392,11 @@ function OverviewSection(props: {
 			? (transaction.nonceKey as bigint | undefined)
 			: undefined
 	const isExpiringNonce = nonceKey === 2n ** 256n - 1n
+	const signatureType = signatureTypeLabel(
+		'signature' in transaction
+			? (transaction.signature as SignatureEnvelope.SignatureEnvelope)
+			: undefined,
+	)
 	const positionInBlock = receipt.transactionIndex
 	const input = transaction.input
 	const feePayer =
@@ -487,6 +499,11 @@ function OverviewSection(props: {
 			<InfoRow label="Transaction Type">
 				<span className="text-primary">{receipt.type}</span>
 			</InfoRow>
+			{signatureType && (
+				<InfoRow label="Signature Type">
+					<span className="text-primary">{signatureType}</span>
+				</InfoRow>
+			)}
 			{isExpiringNonce ? (
 				<>
 					<InfoRow label="Nonce Key">

@@ -233,6 +233,28 @@ export const receivePolicyGuardAbi = parseAbi([
 	'event ReceiptBurned(address indexed token, address indexed receiver, uint8 receiptVersion, uint64 indexed blockedNonce, uint64 blockedAt, address originator, address recipient, address recoveryAuthority, address caller, uint256 amount)',
 ])
 
+// Safe v1.3.0 (L2 build) and its proxy factory; v1.3.0 indexes fewer arguments than v1.4.1.
+export const safeEventsAbi = parseAbi([
+	'event AddedOwner(address owner)',
+	'event ApproveHash(bytes32 indexed approvedHash, address indexed owner)',
+	'event ChangedFallbackHandler(address handler)',
+	'event ChangedGuard(address guard)',
+	'event ChangedThreshold(uint256 threshold)',
+	'event DisabledModule(address module)',
+	'event EnabledModule(address module)',
+	'event ExecutionFailure(bytes32 txHash, uint256 payment)',
+	'event ExecutionFromModuleFailure(address indexed module)',
+	'event ExecutionFromModuleSuccess(address indexed module)',
+	'event ExecutionSuccess(bytes32 txHash, uint256 payment)',
+	'event ProxyCreation(address proxy, address singleton)',
+	'event RemovedOwner(address owner)',
+	'event SafeModuleTransaction(address module, address to, uint256 value, bytes data, uint8 operation)',
+	'event SafeMultiSigTransaction(address to, uint256 value, bytes data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, bytes signatures, bytes additionalInfo)',
+	'event SafeReceived(address indexed sender, uint256 value)',
+	'event SafeSetup(address indexed initiator, address[] owners, uint256 threshold, address initializer, address fallbackHandler)',
+	'event SignMsg(bytes32 indexed msgHash)',
+])
+
 // NVNM's anchoring contract at 0x…0a00.
 export const anchoringAbi = parseAbi([
 	'struct Record { string uri; string checksum; string checksumAlgo; string metadata; string timestamp; string status; uint64 recordId; uint64 index; bool isLatest; uint64 registryId; }',
@@ -269,6 +291,7 @@ export const Abis = {
 	...ViemTempoAbis,
 	anchoring: anchoringAbi,
 	receivePolicyGuard: receivePolicyGuardAbi,
+	safe: safeEventsAbi,
 	stablecoinDex: stablecoinDexAbi,
 	streamChannel: streamChannelAbi,
 	zonePortal: zonePortalAbi,
