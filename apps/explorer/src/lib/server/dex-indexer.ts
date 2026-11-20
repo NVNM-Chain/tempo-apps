@@ -22,13 +22,17 @@ export async function indexer(
 		ok?: boolean
 		columns?: string[]
 		rows?: unknown[][]
-		error?: string
+		// tidx answers a string; the API in front of it, `{ code, message }`.
+		error?: string | { message?: string }
 	} | null
 	const columns = result?.columns
-	if (!response.ok || !result?.ok || !columns || !result.rows)
+	if (!response.ok || !result?.ok || !columns || !result.rows) {
+		const error = result?.error
+		const reason = typeof error === 'object' ? error.message : error
 		throw new Error(
-			`Indexer query failed (${response.status}): ${result?.error ?? 'no result'}`,
+			`Indexer query failed (${response.status}): ${reason ?? 'no result'}`,
 		)
+	}
 	return result.rows.map((values) =>
 		Object.fromEntries(columns.map((name, i) => [name, values[i]])),
 	)
