@@ -1030,7 +1030,7 @@ function Component() {
 												<TransactionTimestamp
 													key="time"
 													timestamp={tx.block.timestamp}
-													link={`/receipt/${tx.hash}`}
+													link={`/tx/${tx.hash}`}
 												/>,
 												descriptionCell,
 												<Midcut key="hash" value={tx.hash} prefix="0x" />,
@@ -1041,8 +1041,8 @@ function Component() {
 												/>,
 											],
 											link: {
-												href: `/receipt/${tx.hash}`,
-												title: `View receipt ${tx.hash}`,
+												href: `/tx/${tx.hash}`,
+												title: `View transaction ${tx.hash}`,
 											},
 											expanded: isExpanded,
 										}

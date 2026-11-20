@@ -6,7 +6,7 @@ export function TransactionCell(props: { hash: Hex.Hex }) {
 	const { hash } = props
 	return (
 		<Link
-			to="/receipt/$hash"
+			to="/tx/$hash"
 			params={{ hash }}
 			preload="intent"
 			className="text-[13px] text-tertiary press-down w-full"

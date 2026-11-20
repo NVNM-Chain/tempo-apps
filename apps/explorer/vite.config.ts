@@ -1,3 +1,4 @@
+import NodeChildProcess from 'node:child_process'
 import * as z from 'zod/mini'
 import { cloudflare } from '@cloudflare/vite-plugin'
 import { sentryVitePlugin } from '@sentry/vite-plugin'
@@ -192,6 +193,12 @@ export default defineConfig((config) => {
 					: config.mode === 'development'
 						? `http://localhost:${port}`
 						: (envConfig.VITE_BASE_URL ?? ''),
+			),
+			// Empty outside a git checkout.
+			__BUILD_COMMIT__: JSON.stringify(
+				NodeChildProcess.spawnSync('git', ['rev-parse', 'HEAD'], {
+					encoding: 'utf8',
+				}).stdout?.trim() ?? '',
 			),
 			__BUILD_VERSION__: JSON.stringify(
 				envConfig.CF_PAGES_COMMIT_SHA?.slice(0, 8) ?? Date.now().toString(),

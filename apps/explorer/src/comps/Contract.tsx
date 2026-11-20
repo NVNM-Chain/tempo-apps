@@ -27,6 +27,8 @@ import ExternalLinkIcon from '~icons/lucide/external-link'
 const proxyTypeUrls: Record<ProxyType, string> = {
 	'EIP-1967': 'https://eips.ethereum.org/EIPS/eip-1967',
 	'EIP-1822': 'https://eips.ethereum.org/EIPS/eip-1822',
+	'EIP-1167': 'https://eips.ethereum.org/EIPS/eip-1167',
+	Safe: 'https://docs.safe.global/advanced/smart-account-overview',
 	Beacon: 'https://eips.ethereum.org/EIPS/eip-1967#beacon-contract-address',
 	Legacy: 'https://docs.openzeppelin.com/contracts/4.x/api/proxy',
 }

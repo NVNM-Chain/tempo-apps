@@ -11,6 +11,7 @@ import {
 import { Addresses } from 'viem/tempo'
 import { Abis, allAbis } from '#lib/abis'
 import { decodeMemoForDisplay, isMppAttributionMemo } from '#lib/domain/memo'
+import { describePhrasedEvent } from '#lib/domain/phrases'
 import type * as Tip20 from './tip20'
 
 const abi = allAbis
@@ -906,6 +907,18 @@ function createDetectors(
 				}
 			}
 
+			// From N1, `claimFeeShares` emits it for the devshare and buyback wallets too.
+			if (eventName === 'FeesDistributed')
+				return {
+					type: 'fees distributed',
+					parts: [
+						{ type: 'action', value: 'Distribute Fees' },
+						{ type: 'amount', value: createAmount(args.amount, args.token) },
+						{ type: 'text', value: 'to' },
+						{ type: 'account', value: args.validator },
+					],
+				}
+
 			return null
 		},
 
@@ -1290,6 +1303,7 @@ export type KnownEventPart =
 	| { type: 'account'; value: Address.Address }
 	| { type: 'action'; value: string }
 	| { type: 'amount'; value: Amount }
+	| { type: 'anchoring'; value: { registryId: string; recordId?: string } }
 	| { type: 'contractCall'; value: ContractCall }
 	| { type: 'duration'; value: number } // in seconds
 	| { type: 'hex'; value: Hex.Hex }
@@ -1375,7 +1389,8 @@ export function parseKnownEvent(
 		detectors.nonce(event) ||
 		detectors.accountKeychain(event) ||
 		detectors.feeAmm(event) ||
-		detectors.streamChannel(event)
+		detectors.streamChannel(event) ||
+		describePhrasedEvent(event)
 
 	if (!detected || isFeeTransferEvent(detected)) return null
 	return detected
@@ -1971,7 +1986,8 @@ export function parseKnownEvents(
 			detectors.nonce(event) ||
 			detectors.accountKeychain(event) ||
 			detectors.feeAmm(event) ||
-			detectors.streamChannel(event)
+			detectors.streamChannel(event) ||
+			describePhrasedEvent(event)
 
 		if (!detected) continue
 

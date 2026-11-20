@@ -265,6 +265,21 @@ export namespace PriceFormatter {
 		return amountFormatter.format(number)
 	}
 
+	const usd = (wei: bigint, decimals: number) =>
+		formatAmountShort(Value.format(wei, decimals), {
+			maximumFractionDigits: 6,
+		})
+
+	/** A gas cost in wei, 10^18 to the USD, whichever USD token pays it. */
+	export function formatGasCost(wei: bigint): string {
+		return `${usd(wei, 18)} USD`
+	}
+
+	/** A per-gas price in wei, per million gas: per gas it is mostly zeros. */
+	export function formatGasPrice(wei: bigint): string {
+		return `${usd(wei, 12)} USD / 1M gas`
+	}
+
 	export function formatAmountShort(
 		value: string,
 		options?: { maximumFractionDigits?: number },

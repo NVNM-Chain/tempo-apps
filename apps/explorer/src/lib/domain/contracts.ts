@@ -16,6 +16,10 @@ import {
 	tip20ChannelReserveAddress,
 } from '#lib/abis'
 import { getChainId, getPublicClient } from 'wagmi/actions'
+import {
+	ANCHORING_ADDRESS,
+	ANCHORING_IMPLEMENTATION,
+} from '#lib/domain/anchoring.ts'
 import { isTip20Address } from '#lib/domain/tip20.ts'
 import { getWagmiConfig } from '#wagmi.config.ts'
 
@@ -316,6 +320,28 @@ export const systemContractRegistry = new Map<Address.Address, ContractInfo>(<
 			abi: Abis.nonce,
 			category: 'system',
 			address: Addresses.nonceManager,
+		},
+	],
+	[
+		ANCHORING_ADDRESS,
+		{
+			name: 'Anchoring',
+			code: '0xef',
+			description: 'Registries of anchored records',
+			abi: Abis.anchoring,
+			category: 'system',
+			address: ANCHORING_ADDRESS,
+		},
+	],
+	[
+		ANCHORING_IMPLEMENTATION,
+		{
+			name: 'Anchoring Implementation',
+			code: '0xef',
+			description: 'The code the anchoring proxy runs',
+			abi: Abis.anchoring,
+			category: 'system',
+			address: ANCHORING_IMPLEMENTATION,
 		},
 	],
 	[
