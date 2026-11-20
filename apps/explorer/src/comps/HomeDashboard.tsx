@@ -1,5 +1,6 @@
 import { Link } from '@tanstack/react-router'
 import { DataGrid } from '#comps/DataGrid'
+import { RelativeTime } from '#comps/RelativeTime'
 import { Sections } from '#comps/Sections'
 import { TransactionsGrid } from '#comps/TransactionsGrid'
 import {
@@ -39,7 +40,11 @@ export function HomeDashboard(props: { stats: HomeStats }) {
 
 	return (
 		<div className="flex flex-col gap-6 w-full max-w-300 mx-auto pb-16">
-			<IndexProgress indexed={stats.indexed} head={stats.head} />
+			<IndexProgress
+				indexed={stats.indexed}
+				head={stats.head}
+				staleSince={stats.indexStaleSince}
+			/>
 			<div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
 				<Tile label="Latest Block">
 					<Link
@@ -148,9 +153,13 @@ export function HomeDashboard(props: { stats: HomeStats }) {
 	)
 }
 
-function IndexProgress(props: { indexed: number; head: number }) {
+function IndexProgress(props: {
+	indexed: number
+	head: number
+	staleSince: number | null
+}) {
 	// tidx never indexes block 0, so `head` blocks is everything.
-	const { indexed, head } = props
+	const { indexed, head, staleSince } = props
 	const pct = head > 0 ? Math.min((indexed / head) * 100, 100) : 0
 	return (
 		<div className="flex flex-col gap-[6px]">
@@ -159,7 +168,13 @@ function IndexProgress(props: { indexed: number; head: number }) {
 					Index progress — {indexed.toLocaleString()} / {head.toLocaleString()}{' '}
 					blocks indexed
 				</span>
-				<span className="text-accent tabular-nums">{pct.toFixed(1)}%</span>
+				{staleSince === null ? (
+					<span className="text-accent tabular-nums">{pct.toFixed(1)}%</span>
+				) : (
+					<span className="text-negative">
+						not updating, last <RelativeTime timestamp={BigInt(staleSince)} />
+					</span>
+				)}
 			</div>
 			<div className="h-[4px] w-full overflow-hidden rounded-full bg-base-alt">
 				<div className="h-full bg-accent" style={{ width: `${pct}%` }} />

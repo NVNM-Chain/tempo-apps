@@ -126,6 +126,13 @@ describe('home stats', () => {
 		)
 	})
 
+	it('flags an index whose newest block the head has left behind', async () => {
+		// The newest indexed block is block 100, at 10_000 s.
+		expect((await fetchHomeStats()).indexStaleSince).toBe(10_000)
+		getBlockNumber.mockResolvedValue(100n)
+		expect((await fetchHomeStats()).indexStaleSince).toBeNull()
+	})
+
 	it('names calls, counts each block’s transactions and marks failures', async () => {
 		const { blocks, transactions } = await fetchHomeStats()
 		expect(blocks).toEqual([expect.objectContaining({ number: 100, txns: 4 })])

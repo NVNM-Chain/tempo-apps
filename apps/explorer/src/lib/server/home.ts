@@ -17,6 +17,8 @@ export type HomeStats = {
 	head: number
 	/** Blocks the indexer holds. */
 	indexed: number
+	/** When the indexer's newest block was made, once it is a minute old and the head has passed it. */
+	indexStaleSince: number | null
 	latestBlock: number
 	blockTimeMs: number | null
 	tps: number | null
@@ -49,7 +51,8 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 			),
 			getBatchedClient().getBlockNumber(),
 		])
-		const start = Number(newest?.at ?? 0) - HOME_MINUTES * 60
+		const newestAt = Number(newest?.at ?? 0)
+		const start = newestAt - HOME_MINUTES * 60
 		const minute = (column: string) =>
 			`intDiv(toUnixTimestamp(${column}) - ${start} - 1, 60)`
 		const [blockMinutes, [txns], [tokens], blocks, txs] = await Promise.all([
@@ -113,6 +116,11 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 		return {
 			head: Number(head),
 			indexed: Number(newest?.n ?? 0),
+			indexStaleSince:
+				Number(head) > Number(newest?.num ?? 0) &&
+				Date.now() / 1000 - newestAt > 60
+					? newestAt
+					: null,
 			latestBlock: Number(newest?.num ?? 0),
 			blockTimeMs: inWindow > 1 ? spanMs / (inWindow - 1) : null,
 			tps: spanMs > 0 ? (sum(txPerMinute) * 1000) / spanMs : null,
