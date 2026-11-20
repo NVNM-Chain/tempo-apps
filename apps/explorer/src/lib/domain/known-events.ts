@@ -1291,6 +1291,7 @@ export type KnownEventPart =
 	| { type: 'account'; value: Address.Address }
 	| { type: 'action'; value: string }
 	| { type: 'amount'; value: Amount }
+	| { type: 'anchoring'; value: { registryId: string; recordId?: string } }
 	| { type: 'contractCall'; value: ContractCall }
 	| { type: 'duration'; value: number } // in seconds
 	| { type: 'hex'; value: Hex.Hex }

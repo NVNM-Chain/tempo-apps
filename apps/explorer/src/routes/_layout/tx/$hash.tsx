@@ -862,10 +862,22 @@ function EventGroupCell(props: {
 	return (
 		<div className="flex flex-col gap-[4px] w-full">
 			{knownEvent ? (
-				<TxEventDescription
-					event={knownEvent}
-					className="flex flex-row items-center gap-[6px] leading-[18px]"
-				/>
+				<>
+					<TxEventDescription
+						event={knownEvent}
+						className="flex flex-row items-center gap-[6px] leading-[18px]"
+					/>
+					{Array.isArray(knownEvent.note) && (
+						<div className="flex flex-wrap gap-x-[12px] text-[12px]">
+							{knownEvent.note.map(([label, part]) => (
+								<span key={label} className="flex items-center gap-[4px]">
+									<span className="text-tertiary">{label}:</span>
+									<TxEventDescription.Part part={part} />
+								</span>
+							))}
+						</div>
+					)}
+				</>
 			) : (
 				<span className="text-primary">
 					{logs[0].topics[0] ? (

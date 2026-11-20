@@ -81,8 +81,11 @@ describe('Safe and anchoring events', () => {
 				{ type: 'text', value: 'abc123' },
 			],
 			note: [
-				['Registry', { type: 'number', value: 7n }],
-				['Record', { type: 'number', value: 3n }],
+				['Registry', { type: 'anchoring', value: { registryId: '7' } }],
+				[
+					'Record',
+					{ type: 'anchoring', value: { registryId: '7', recordId: '3' } },
+				],
 			],
 		})
 	})

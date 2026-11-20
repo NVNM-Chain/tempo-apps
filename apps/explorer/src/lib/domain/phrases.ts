@@ -7,6 +7,8 @@ type Slot =
 	| { account: string }
 	| { value: string }
 	| { hex: string }
+	// The event's `registryId`, or its `recordId` there, as a link.
+	| { anchoring: 'registry' | 'record' }
 
 type Phrase = {
 	action: string
@@ -16,7 +18,7 @@ type Phrase = {
 
 const to = (name: string): Slot[] => [{ word: 'to' }, { account: name }]
 const from = (name: string): Slot[] => [{ word: 'from' }, { account: name }]
-const inRegistry: [string, Slot] = ['Registry', { value: 'registryId' }]
+const inRegistry: [string, Slot] = ['Registry', { anchoring: 'registry' }]
 
 /** The Safe and anchoring events, as sentences, by event name. */
 const phrases: Record<string, Phrase> = {
@@ -107,12 +109,12 @@ const phrases: Record<string, Phrase> = {
 			{ word: 'of' },
 			{ value: 'checksum' },
 		],
-		notes: [inRegistry, ['Record', { value: 'recordId' }]],
+		notes: [inRegistry, ['Record', { anchoring: 'record' }]],
 	},
 	UpdateRecordStatus: {
 		action: 'Update Record Status',
 		parts: [{ value: 'status' }, { word: 'on version' }, { value: 'index' }],
-		notes: [inRegistry, ['Record', { value: 'recordId' }]],
+		notes: [inRegistry, ['Record', { anchoring: 'record' }]],
 	},
 	GrantRole: {
 		action: 'Grant Role',
@@ -150,6 +152,18 @@ function part(
 		return typeof value === 'string'
 			? { type: 'hex', value: value as Hex.Hex }
 			: undefined
+	}
+	if ('anchoring' in slot) {
+		const { registryId, recordId } = args
+		if (registryId === undefined) return undefined
+		if (slot.anchoring === 'registry')
+			return { type: 'anchoring', value: { registryId: String(registryId) } }
+		return recordId === undefined
+			? undefined
+			: {
+					type: 'anchoring',
+					value: { registryId: String(registryId), recordId: String(recordId) },
+				}
 	}
 	const value = args[slot.value]
 	if (typeof value === 'bigint' || typeof value === 'number')

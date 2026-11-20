@@ -190,6 +190,26 @@ export namespace TxEventDescription {
 			}
 			case 'amount':
 				return <Amount {...part.value} />
+			case 'anchoring': {
+				const { registryId, recordId } = part.value
+				return recordId === undefined ? (
+					<Link
+						to="/anchoring/$registryId"
+						params={{ registryId }}
+						className="text-accent press-down"
+					>
+						{registryId}
+					</Link>
+				) : (
+					<Link
+						to="/anchoring/$registryId/$recordId"
+						params={{ registryId, recordId }}
+						className="text-accent press-down"
+					>
+						{recordId}
+					</Link>
+				)
+			}
 			case 'duration':
 				return <span>{DateFormatter.formatDuration(part.value)}</span>
 			case 'hex':
