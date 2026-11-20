@@ -907,6 +907,18 @@ function createDetectors(
 				}
 			}
 
+			// From N1, `claimFeeShares` emits it for the devshare and buyback wallets too.
+			if (eventName === 'FeesDistributed')
+				return {
+					type: 'fees distributed',
+					parts: [
+						{ type: 'action', value: 'Distribute Fees' },
+						{ type: 'amount', value: createAmount(args.amount, args.token) },
+						{ type: 'text', value: 'to' },
+						{ type: 'account', value: args.validator },
+					],
+				}
+
 			return null
 		},
 
