@@ -10,7 +10,7 @@ import {
 	type AnchoringRecord,
 	type AnchoringRegistry,
 } from '#lib/domain/anchoring'
-import { tidx } from '#lib/server/tempo-queries-provider'
+import { indexer } from '#lib/server/dex-indexer'
 import { getBatchedClient } from '#wagmi.config'
 
 // Registries and records are read from the node rather than an index: the ones seeded at
@@ -191,17 +191,16 @@ async function fetchRegistryEvents(
 				const withRecord = event.inputs.some(
 					(input) => input.name === 'recordId',
 				)
-				const { rows } = await tidx.fetch({
+				const rows = await indexer(
 					chainId,
-					engine: 'clickhouse',
-					query: `SELECT tx_hash, block_num, log_idx, caller${withRecord ? ', recordId' : ''}
+					`SELECT tx_hash, block_num, log_idx, caller${withRecord ? ', recordId' : ''}
 					FROM ${event.name} WHERE address = '${ANCHORING_ADDRESS}' AND registryId = ${registryId}
 					ORDER BY block_num DESC, log_idx DESC LIMIT ${limit}`,
-					signatures: [formatAbiItem(event)],
-				})
+					formatAbiItem(event).replace(/^event /, ''),
+				)
 				return rows.map((row) => ({
 					event: event.name,
-					recordId: 'recordId' in row ? Number(row.recordId) : undefined,
+					recordId: withRecord ? Number(row.recordId) : undefined,
 					caller: String(row.caller),
 					transactionHash: String(row.tx_hash),
 					blockNumber: Number(row.block_num),

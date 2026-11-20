@@ -20,11 +20,11 @@ vi.mock('@tanstack/react-start', async (importOriginal) => ({
 	}),
 }))
 
-const { getStorageAt, readContract, request, tidxFetch } = vi.hoisted(() => ({
+const { getStorageAt, readContract, request, indexer } = vi.hoisted(() => ({
 	getStorageAt: vi.fn(),
 	readContract: vi.fn(),
 	request: vi.fn(),
-	tidxFetch: vi.fn(),
+	indexer: vi.fn(),
 }))
 vi.mock('#wagmi.config', () => ({
 	getBatchedClient: () => ({
@@ -34,9 +34,7 @@ vi.mock('#wagmi.config', () => ({
 		request,
 	}),
 }))
-vi.mock('#lib/server/tempo-queries-provider', () => ({
-	tidx: { fetch: tidxFetch },
-}))
+vi.mock('#lib/server/dex-indexer', () => ({ indexer }))
 
 /** `_recordCount[1]` and `[2]`: `keccak256(abi.encode(id, 5))`, worked out apart from the code. */
 const RECORD_COUNTS: Record<string, bigint> = {
@@ -168,7 +166,7 @@ beforeEach(() => {
 	contract(30n)
 	// Most nodes run no name index.
 	request.mockRejectedValue(new Error('Method not found'))
-	tidxFetch.mockResolvedValue({ rows: [] })
+	indexer.mockResolvedValue([])
 })
 
 const ids = (rows: { id: number }[]) => rows.map((r) => r.id)
@@ -263,8 +261,8 @@ describe('anchoring', () => {
 	})
 
 	it('lists a registry’s events from the indexer, newest first', async () => {
-		tidxFetch.mockImplementation(async ({ query }: { query: string }) => ({
-			rows: query.includes('FROM AddRecord')
+		indexer.mockImplementation(async (_chainId: number, sql: string) =>
+			sql.includes('FROM AddRecord')
 				? [
 						{
 							tx_hash: '0xb',
@@ -281,10 +279,10 @@ describe('anchoring', () => {
 							recordId: 1,
 						},
 					]
-				: query.includes('FROM AddRegistry')
+				: sql.includes('FROM AddRegistry')
 					? [{ tx_hash: '0x9', block_num: 5, log_idx: 0, caller: '0xc' }]
 					: [],
-		}))
+		)
 		const found = await fetchAnchoringRegistry({
 			data: { registryId: 1, page: 1 },
 		})
@@ -296,11 +294,11 @@ describe('anchoring', () => {
 			['AddRegistry', undefined, 5],
 		])
 		// One query per event that names a registry, each for this registry.
-		expect(tidxFetch).toHaveBeenCalledTimes(5)
-		for (const [{ query }] of tidxFetch.mock.calls)
-			expect(query).toContain('registryId = 1')
+		expect(indexer).toHaveBeenCalledTimes(5)
+		for (const [, sql] of indexer.mock.calls)
+			expect(sql).toContain('registryId = 1')
 
-		tidxFetch.mockRejectedValue(new Error('Indexer query failed (402)'))
+		indexer.mockRejectedValue(new Error('Indexer query failed (402)'))
 		const without = await fetchAnchoringRegistry({
 			data: { registryId: 1, page: 1 },
 		})
