@@ -1,12 +1,11 @@
 import { createFileRoute } from '@tanstack/react-router'
 import * as Address from 'ox/Address'
-import { serverEnv, tempoApiUrl } from '#lib/server/env'
-import { getTempoChain } from '#wagmi.config.ts'
+import { fetchLogoURI, resolveLogoURI } from '#lib/domain/tip20'
+import { getWagmiConfig } from '#wagmi.config.ts'
 
 /**
- * Same-origin proxy for the Tempo API's curated token logo
- * (`/v1/tokens/:address/logo`). Keeps the backend host + API key server-side
- * and lets the edge cache the SVG, replacing the former tokenlist icon CDN.
+ * A token's on-chain `logoURI`, as a redirect: following it is the browser's
+ * business, so the Worker never fetches a URL the token's deployer chose.
  */
 export const Route = createFileRoute('/api/token/logo/$address')({
 	server: {
@@ -14,24 +13,17 @@ export const Route = createFileRoute('/api/token/logo/$address')({
 			GET: async ({ params }) => {
 				if (!Address.validate(params.address))
 					return new Response(null, { status: 400 })
-				const address = params.address.toLowerCase()
 
-				const { id: chainId } = getTempoChain()
-				const url = `${tempoApiUrl}/v1/tokens/${address}/logo?chainId=${chainId}`
+				const logo = resolveLogoURI(
+					await fetchLogoURI(getWagmiConfig(), params.address),
+				)
+				if (!logo || !/^https?:\/\//.test(logo))
+					return new Response(null, { status: 404 })
 
-				const upstream = await fetch(url, {
-					headers: serverEnv.TEMPO_API_KEY
-						? { 'tempo-api-key': serverEnv.TEMPO_API_KEY }
-						: undefined,
-				}).catch(() => undefined)
-
-				if (!upstream?.ok) return new Response(null, { status: 404 })
-
-				return new Response(upstream.body, {
-					status: 200,
+				return new Response(null, {
+					status: 302,
 					headers: {
-						'Content-Type':
-							upstream.headers.get('Content-Type') ?? 'image/svg+xml',
+						Location: logo,
 						'Cache-Control':
 							'public, max-age=86400, stale-while-revalidate=604800',
 					},

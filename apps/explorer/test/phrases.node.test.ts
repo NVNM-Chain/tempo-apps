@@ -8,7 +8,6 @@ import {
 import { describe, expect, it } from 'vitest'
 import { anchoringAbi, safeEventsAbi } from '#lib/abis'
 import { parseKnownEvent } from '#lib/domain/known-events'
-import { selectTransactionDescriptionEvents } from '#lib/domain/transaction-activities'
 
 const SAFE = '0x2222222222222222222222222222222222222222'
 const ANCHORING = '0x0000000000000000000000000000000000000a00'
@@ -88,22 +87,5 @@ describe('Safe and anchoring events', () => {
 				],
 			],
 		})
-	})
-
-	it('describes them beside the API’s activities, which call them unknown', () => {
-		const fee = {
-			type: 'fee',
-			parts: [{ type: 'action' as const, value: 'Pay Fee' }],
-		}
-		const registry = {
-			type: 'AddRegistry',
-			parts: [{ type: 'action' as const, value: 'Add Registry' }],
-		}
-		expect(
-			selectTransactionDescriptionEvents({
-				activityEvents: [fee],
-				fallbackEvents: [registry, fee],
-			}),
-		).toEqual([registry, fee])
 	})
 })

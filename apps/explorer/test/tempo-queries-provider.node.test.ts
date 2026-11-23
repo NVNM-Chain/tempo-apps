@@ -13,8 +13,7 @@ vi.mock('tidx.ts', () => ({
 }))
 
 vi.mock('#lib/server/env', () => ({
-	serverEnv: { TEMPO_API_KEY: 'tempo-api-secret' },
-	tempoApiUrl: 'https://api.tempo.xyz',
+	serverEnv: { TIDX_URL: 'https://indexer.example' },
 }))
 
 describe('Tempo query provider', () => {
@@ -24,10 +23,9 @@ describe('Tempo query provider', () => {
 		provider = await import('#lib/server/tempo-queries-provider')
 	})
 
-	it('authenticates indexer requests with the Tempo API key', () => {
+	it('queries the configured tidx', () => {
 		expect(mocks.create).toHaveBeenCalledWith({
-			baseUrl: 'https://api.tempo.xyz/v1/indexer',
-			headers: { 'tempo-api-key': 'tempo-api-secret' },
+			baseUrl: 'https://indexer.example',
 		})
 	})
 

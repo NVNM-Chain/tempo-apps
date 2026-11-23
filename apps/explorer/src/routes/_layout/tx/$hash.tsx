@@ -43,10 +43,6 @@ import {
 } from '#lib/domain/tx-event-groups'
 import type { FeeBreakdownItem } from '#lib/domain/receipt'
 import { isTip20Address } from '#lib/domain/tip20'
-import {
-	activitiesToKnownEvents,
-	selectTransactionDescriptionEvents,
-} from '#lib/domain/transaction-activities'
 import { PriceFormatter } from '#lib/formatting'
 import { useKeyboardShortcut, useMediaQuery } from '#lib/hooks'
 import { buildOgImageUrl, buildTxDescription, OG_BASE_URL } from '#lib/og'
@@ -67,7 +63,6 @@ import { withLoaderTiming } from '#lib/profiling'
 import { signatureTypeLabel } from '#lib/domain/signature-type'
 import { zHash } from '#lib/zod'
 import { fetchBalanceChanges } from '#routes/api/tx/balance-changes/$hash'
-import { fetchTransactionActivities } from '#lib/server/transaction-activities'
 import ChevronDownIcon from '~icons/lucide/chevron-down'
 
 const defaultSearchValues = {
@@ -114,22 +109,19 @@ export const Route = createFileRoute('/_layout/tx/$hash')({
 			try {
 				const offset = (page - 1) * LIMIT
 
-				const [txData, balanceChangesData, traceData, activities] =
-					await Promise.all([
-						context.queryClient.ensureQueryData(txQueryOptions({ hash })),
-						fetchBalanceChanges({ hash, limit: LIMIT, offset }).catch(() => ({
-							changes: [],
-							tokenMetadata: {},
-							total: 0,
-						})),
-						context.queryClient
-							.ensureQueryData(traceQueryOptions({ hash }))
-							.catch(() => ({ trace: null, prestate: null })),
-						fetchTransactionActivities({ data: { hash } }),
-					])
+				const [txData, balanceChangesData, traceData] = await Promise.all([
+					context.queryClient.ensureQueryData(txQueryOptions({ hash })),
+					fetchBalanceChanges({ hash, limit: LIMIT, offset }).catch(() => ({
+						changes: [],
+						tokenMetadata: {},
+						total: 0,
+					})),
+					context.queryClient
+						.ensureQueryData(traceQueryOptions({ hash }))
+						.catch(() => ({ trace: null, prestate: null })),
+				])
 
-				const activityEvents = activitiesToKnownEvents(activities)
-				return { ...txData, balanceChangesData, traceData, activityEvents }
+				return { ...txData, balanceChangesData, traceData }
 			} catch (error) {
 				console.error(error)
 				throw notFound({
@@ -150,10 +142,7 @@ export const Route = createFileRoute('/_layout/tx/$hash')({
 			? buildTxDescription({
 					timestamp: Number(loaderData.block.timestamp) * 1000,
 					from: loaderData.receipt.from,
-					events: selectTransactionDescriptionEvents({
-						activityEvents: loaderData.activityEvents,
-						fallbackEvents: loaderData.knownEvents ?? [],
-					}),
+					events: loaderData.knownEvents ?? [],
 				})
 			: 'View transaction details on Tempo Explorer.'
 
@@ -180,7 +169,6 @@ function RouteComponent() {
 	const { tab, page } = Route.useSearch()
 	const {
 		balanceChangesData,
-		activityEvents,
 		traceData,
 		block,
 		feeBreakdown,
@@ -202,10 +190,6 @@ function RouteComponent() {
 			!event.meta?.to ||
 			!OxAddressUtil.isEqual(event.meta.to, RECEIVE_POLICY_GUARD),
 	)
-	const descriptionEvents = selectTransactionDescriptionEvents({
-		activityEvents,
-		fallbackEvents: displayKnownEvents,
-	})
 
 	useKeyboardShortcut({
 		t: () =>
@@ -229,18 +213,11 @@ function RouteComponent() {
 			buildTxSummary({
 				receipt,
 				transaction,
-				knownEvents: activityEvents.length > 0 ? activityEvents : knownEvents,
+				knownEvents,
 				trace: traceData.trace,
 				balanceChangesData,
 			}),
-		[
-			receipt,
-			knownEvents,
-			activityEvents,
-			traceData.trace,
-			balanceChangesData,
-			transaction,
-		],
+		[receipt, knownEvents, traceData.trace, balanceChangesData, transaction],
 	)
 
 	const setActiveSection = (newIndex: number) => {
@@ -264,7 +241,7 @@ function RouteComponent() {
 				receipt={receipt}
 				transaction={transaction}
 				block={block}
-				knownEvents={descriptionEvents}
+				knownEvents={displayKnownEvents}
 				feeBreakdown={feeBreakdown}
 				balanceChangesData={balanceChangesData}
 			/>

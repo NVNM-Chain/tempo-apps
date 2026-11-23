@@ -1,4 +1,4 @@
-import { indexerBackend } from '#lib/server/tempo-queries-provider'
+import { indexerUrl } from '#lib/server/tempo-queries-provider'
 
 export type Row = Record<string, unknown>
 
@@ -8,7 +8,8 @@ export async function indexer(
 	sql: string,
 	signature?: string,
 ): Promise<Row[]> {
-	const url = new URL(`${indexerBackend.url}/query`)
+	if (!indexerUrl) throw new Error('TIDX_URL is not set')
+	const url = new URL(`${indexerUrl}/query`)
 	url.search = new URLSearchParams({
 		sql,
 		chainId: String(chainId),
@@ -16,23 +17,19 @@ export async function indexer(
 		...(signature ? { signature } : {}),
 	}).toString()
 	const response = await fetch(url, {
-		headers: { Accept: 'application/json', ...indexerBackend.headers },
+		headers: { Accept: 'application/json' },
 	})
 	const result = (await response.json().catch(() => null)) as {
 		ok?: boolean
 		columns?: string[]
 		rows?: unknown[][]
-		// tidx answers a string; the API in front of it, `{ code, message }`.
-		error?: string | { message?: string }
+		error?: string
 	} | null
 	const columns = result?.columns
-	if (!response.ok || !result?.ok || !columns || !result.rows) {
-		const error = result?.error
-		const reason = typeof error === 'object' ? error.message : error
+	if (!response.ok || !result?.ok || !columns || !result.rows)
 		throw new Error(
-			`Indexer query failed (${response.status}): ${reason ?? 'no result'}`,
+			`Indexer query failed (${response.status}): ${result?.error ?? 'no result'}`,
 		)
-	}
 	return result.rows.map((values) =>
 		Object.fromEntries(columns.map((name, i) => [name, values[i]])),
 	)

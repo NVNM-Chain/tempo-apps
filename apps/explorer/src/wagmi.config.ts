@@ -6,7 +6,6 @@ import { tempoActions } from 'viem/tempo'
 import { loadBalance, rateLimit } from '@tempo/rpc-utils'
 import { nvnmDevnet } from './lib/chains'
 import { getTempoEnv } from './lib/env'
-import { serverEnv, tempoApiUrl } from './lib/server/env'
 import {
 	cookieStorage,
 	cookieToInitialState,
@@ -64,15 +63,6 @@ const getTempoTransport = createIsomorphicFn()
 		])
 	})
 	.server(() => {
-		const chain = getTempoChain()
-
-		// tapimo RPC passthrough, when an API key is configured.
-		const apiKey = serverEnv.TEMPO_API_KEY
-		if (apiKey)
-			return http(`${tempoApiUrl}/rpc/${chain.id}`, {
-				fetchOptions: { headers: { 'tempo-api-key': apiKey } },
-			})
-
 		const proxy = getRpcProxyUrl()
 		const fallbackUrls = getFallbackUrls()
 		return loadBalance([

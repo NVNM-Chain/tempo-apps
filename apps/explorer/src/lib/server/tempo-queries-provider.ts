@@ -1,19 +1,10 @@
 import { QB, Tidx } from 'tidx.ts'
-import { serverEnv, tempoApiUrl } from './env'
+import { serverEnv } from './env'
 
-export const indexerBackend = {
-	// The hosted API mounts tidx under /v1/indexer; a self-hosted tidx serves
-	// /query at its root. The tidx.ts client appends /query to baseUrl.
-	url: serverEnv.TIDX_URL ?? `${tempoApiUrl}/v1/indexer`,
-	headers: serverEnv.TEMPO_API_KEY
-		? { 'tempo-api-key': serverEnv.TEMPO_API_KEY }
-		: undefined,
-}
+// Empty rather than tidx.ts's default, which is Tempo's own indexer.
+export const indexerUrl = serverEnv.TIDX_URL ?? ''
 
-const tidx = Tidx.create({
-	baseUrl: indexerBackend.url,
-	headers: indexerBackend.headers,
-})
+const tidx = Tidx.create({ baseUrl: indexerUrl })
 
 tidx.on('response', (res) => {
 	if (!res.ok)

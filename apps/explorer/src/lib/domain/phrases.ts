@@ -173,11 +173,6 @@ function part(
 		: { type: 'text', value: String(value) }
 }
 
-/** Whether `event` is one of these sentences, which the Tempo API reports as unknown. */
-export function isPhrasedEvent(event: KnownEvent): boolean {
-	return Object.hasOwn(phrases, event.type)
-}
-
 /** A Safe or anchoring event as a sentence, or `null` for any other event. */
 export function describePhrasedEvent(event: {
 	eventName: string
