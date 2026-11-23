@@ -17,7 +17,7 @@ export type HomeStats = {
 	head: number
 	/** Blocks the indexer holds. */
 	indexed: number
-	/** When the indexer's newest block was made, once it is a minute old and the head has passed it. */
+	/** When the indexer's newest block was made, once it is five minutes old and the head has passed it: tidx inserts in batches. */
 	indexStaleSince: number | null
 	latestBlock: number
 	blockTimeMs: number | null
@@ -118,7 +118,7 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 			indexed: Number(newest?.n ?? 0),
 			indexStaleSince:
 				Number(head) > Number(newest?.num ?? 0) &&
-				Date.now() / 1000 - newestAt > 60
+				Date.now() / 1000 - newestAt > 300
 					? newestAt
 					: null,
 			latestBlock: Number(newest?.num ?? 0),
