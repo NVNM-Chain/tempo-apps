@@ -5,16 +5,18 @@ import {
 	pickTip20CreatedTimestamp,
 } from '#lib/server/address-metadata'
 
-const { getTransactions } = vi.hoisted(() => ({
-	getTransactions: vi.fn(),
+const { fetchAddressTxStats, fetchAddressOldestTx } = vi.hoisted(() => ({
+	fetchAddressTxStats: vi.fn(),
+	fetchAddressOldestTx: vi.fn(),
 }))
 
-vi.mock('#lib/server/tempo-api', () => ({
-	api: { v1: { transactions: { $get: getTransactions } } },
+vi.mock('#lib/server/tempo-queries', () => ({
+	fetchAddressTxStats,
+	fetchAddressOldestTx,
 }))
 
 beforeEach(() => {
-	getTransactions.mockReset()
+	vi.resetAllMocks()
 })
 
 describe('address metadata', () => {
@@ -46,28 +48,17 @@ describe('address metadata', () => {
 		})
 	})
 
-	it('loads activity boundaries and count from Tempo API transaction pages', async () => {
-		getTransactions
-			.mockResolvedValueOnce(
-				Response.json({
-					data: [
-						{
-							hash: '0xoldest',
-							sender: '0xsender',
-							timestamp: '2026-01-01T00:00:00.000Z',
-						},
-					],
-					meta: { totalCount: 3 },
-					nextCursor: null,
-				}),
-			)
-			.mockResolvedValueOnce(
-				Response.json({
-					data: [{ timestamp: '2026-01-03T00:00:00.000Z' }],
-					nextCursor: null,
-				}),
-			)
-
+	it('loads activity boundaries and count from tidx', async () => {
+		fetchAddressTxStats.mockResolvedValue({
+			count: 3,
+			oldestTimestamp: '2026-01-01T00:00:00+00:00',
+			latestTimestamp: '2026-01-03T00:00:00+00:00',
+		})
+		fetchAddressOldestTx.mockResolvedValue({
+			hash: '0xoldest',
+			from: '0xsender',
+			block_timestamp: '2026-01-01T00:00:00+00:00',
+		})
 		await expect(
 			fetchAddressTxMetadata(
 				4217,
@@ -75,27 +66,10 @@ describe('address metadata', () => {
 			),
 		).resolves.toEqual({
 			count: 3,
-			latestTxsBlockTimestamp: '2026-01-03T00:00:00.000Z',
-			oldestTxsBlockTimestamp: '2026-01-01T00:00:00.000Z',
+			latestTxsBlockTimestamp: '2026-01-03T00:00:00+00:00',
+			oldestTxsBlockTimestamp: '2026-01-01T00:00:00+00:00',
 			oldestTxHash: '0xoldest',
 			oldestTxFrom: '0xsender',
-		})
-		expect(getTransactions).toHaveBeenNthCalledWith(1, {
-			query: {
-				address: '0x1111111111111111111111111111111111111111',
-				chainId: '4217',
-				include: 'totalCount',
-				limit: '5',
-				order: 'asc',
-			},
-		})
-		expect(getTransactions).toHaveBeenNthCalledWith(2, {
-			query: {
-				address: '0x1111111111111111111111111111111111111111',
-				chainId: '4217',
-				limit: '5',
-				order: 'desc',
-			},
 		})
 	})
 })

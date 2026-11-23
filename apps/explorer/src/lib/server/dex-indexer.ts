@@ -38,6 +38,11 @@ export async function indexer(
 	)
 }
 
+/** ClickHouse `DateTime` literal; the indexer rejects ISO-Z strings. */
+export function sqlTime(ms: number): string {
+	return new Date(ms).toISOString().replace('T', ' ').slice(0, 19)
+}
+
 export function list(values: Iterable<string>): string {
 	return [...values].map((value) => `'${value}'`).join(', ')
 }

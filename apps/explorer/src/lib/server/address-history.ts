@@ -1,21 +1,16 @@
-import { type InferResponseType, parseResponse } from 'hono/client'
 import * as Address from 'ox/Address'
 import * as Hex from 'ox/Hex'
-import type { Log, TransactionReceipt } from 'viem'
-import type { Config } from 'wagmi'
-import { Actions } from 'wagmi/tempo'
+import type { TransactionReceipt } from 'viem'
 import * as z from 'zod/mini'
 
-import { type KnownEvent, parseKnownEvents } from '#lib/domain/known-events'
-import { isTip20Address, type Metadata } from '#lib/domain/tip20'
 import {
-	activitiesToKnownEvents,
-	type TransactionActivity,
-} from '#lib/domain/transaction-activities'
-import { api } from '#lib/server/tempo-api'
-import { getTransactionActivities } from '#lib/server/transaction-activities'
-import { parseTimestamp } from '#lib/timestamp'
-import { getWagmiConfig } from '#wagmi.config'
+	type KnownEvent,
+	parseKnownEvents,
+	type TransactionLike,
+} from '#lib/domain/known-events'
+import { type GetTip20MetadataFn, metadataForTokens } from '#lib/domain/tip20'
+import { indexer, sqlTime } from '#lib/server/dex-indexer'
+import { getBatchedClient } from '#wagmi.config'
 
 export const [MAX_LIMIT, DEFAULT_LIMIT] = [10, 10]
 const HISTORY_TOTAL_CACHE_TTL = 60_000
@@ -55,56 +50,58 @@ export const RequestParametersSchema = z.object({
 
 export type HistoryRequestParameters = z.infer<typeof RequestParametersSchema>
 
-type TransactionRow = InferResponseType<
-	typeof api.v1.transactions.$get,
-	200
->['data'][number]
-
-type HistoryTotal = {
-	totalCount: number
-	totalCountCapped: boolean
-}
-
 const historyTotalCache = new Map<
 	string,
-	{ promise: Promise<HistoryTotal | undefined>; timestamp: number }
+	{ promise: Promise<number | undefined>; timestamp: number }
 >()
 
+/** The receipts a page reads: the address's side, the status and the start time. */
 function historyFilters(
 	address: Address.Address,
 	searchParams: HistoryRequestParameters,
-) {
-	const sideFilter =
+): string[] {
+	const account = address.toLowerCase()
+	const filters = [
 		searchParams.include === 'sent'
-			? { sender: address }
+			? `"from" = '${account}'`
 			: searchParams.include === 'received'
-				? { recipient: address }
-				: { address }
+				? `"to" = '${account}'`
+				: `("from" = '${account}' OR "to" = '${account}')`,
+	]
+	if (searchParams.status)
+		filters.push(`status = ${searchParams.status === 'success' ? 1 : 0}`)
+	if (searchParams.after !== undefined)
+		filters.push(`block_timestamp >= '${sqlTime(searchParams.after * 1000)}'`)
+	return filters
+}
 
-	return {
-		...sideFilter,
-		...(searchParams.status ? { status: searchParams.status } : {}),
-		...(searchParams.after
-			? {
-					'timestamp.from': new Date(searchParams.after * 1000).toISOString(),
-				}
-			: {}),
-	}
+/** Where a page ends: its last receipt's block and index. */
+function historyCursor(row: Record<string, unknown>): string {
+	return btoa(JSON.stringify([Number(row.block_num), Number(row.tx_idx)]))
+}
+
+/** The `[block, index]` a history cursor continues from. */
+function parseHistoryCursor(cursor: string): [number, number] {
+	const parsed: unknown = JSON.parse(atob(cursor))
+	const position = (value: unknown): value is number =>
+		typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+	const [block, index] =
+		Array.isArray(parsed) && parsed.length === 2 ? parsed : []
+	if (!position(block) || !position(index))
+		throw new Error('Invalid history cursor')
+	return [block, index]
 }
 
 function getCachedHistoryTotal(
 	key: string,
-): Promise<HistoryTotal | undefined> | undefined {
+): Promise<number | undefined> | undefined {
 	const cached = historyTotalCache.get(key)
 	if (cached && Date.now() - cached.timestamp < HISTORY_TOTAL_CACHE_TTL)
 		return cached.promise
 	if (cached) historyTotalCache.delete(key)
 }
 
-function cacheHistoryTotal(
-	key: string,
-	promise: Promise<HistoryTotal | undefined>,
-) {
+function cacheHistoryTotal(key: string, promise: Promise<number | undefined>) {
 	if (
 		!historyTotalCache.has(key) &&
 		historyTotalCache.size >= HISTORY_TOTAL_CACHE_MAX_ENTRIES
@@ -137,103 +134,26 @@ function serializeBigInts<T>(value: T): T {
 	return value
 }
 
-function toHexQuantity(value: unknown): Hex.Hex {
-	if (typeof value === 'bigint' || typeof value === 'number') {
-		try {
-			return Hex.fromNumber(value)
-		} catch {
-			return '0x0'
-		}
-	}
-	if (typeof value === 'string') {
-		try {
-			return Hex.fromNumber(BigInt(value))
-		} catch {
-			return '0x0'
-		}
-	}
-	return '0x0'
-}
-
-function transactionCursor(row: TransactionRow): string {
-	// Tempo transaction cursors encode the block and transaction index boundary.
-	return btoa(
-		JSON.stringify([Number(row.blockNumber), Number(row.transactionIndex)]),
-	)
-}
-
-/**
- * Resolves TIP-20 metadata for every token referenced by the page's event
- * logs (symbol/decimals for the known-event summaries).
- */
-async function buildTokenMetadataLookup(
-	rows: readonly TransactionRow[],
-): Promise<(address: Address.Address) => Metadata | undefined> {
-	const config = getWagmiConfig()
-	const tokenAddresses = new Set<Address.Address>()
-	for (const row of rows) {
-		for (const log of row.meta?.receipt?.logs ?? []) {
-			if (isTip20Address(log.address)) {
-				tokenAddresses.add(log.address as Address.Address)
-			}
-		}
-	}
-
-	const entries = await Promise.all(
-		[...tokenAddresses].map(async (token) => {
-			try {
-				const metadata = await Actions.token.getMetadata(config as Config, {
-					token,
-				})
-				return [token.toLowerCase(), metadata] as const
-			} catch {
-				return [token.toLowerCase(), undefined] as const
-			}
-		}),
-	)
-	const metadataByToken = new Map<string, Metadata | undefined>(entries)
-	return (address) => metadataByToken.get(address.toLowerCase())
-}
-
-/** Maps an API transaction row (+ embedded receipt) to the UI contract. */
+/** Maps the node's transaction and receipt to the UI contract. */
 export function toEnrichedTransaction(
-	row: TransactionRow,
+	transaction: TransactionLike & { value?: bigint | undefined },
+	receipt: TransactionReceipt,
 	options: {
+		timestamp: number
 		includeKnownEvents: boolean
-		getTokenMetadata: (address: Address.Address) => Metadata | undefined
-		activities?: TransactionActivity[] | undefined
+		getTokenMetadata: GetTip20MetadataFn
 	},
 ): EnrichedTransaction {
-	const receipt = row.meta?.receipt
-	const status = receipt?.status ?? 'success'
-	const to = row.recipient ? Address.checksum(row.recipient) : null
-
 	const knownEvents = (() => {
-		if (!options.includeKnownEvents || !receipt) return []
-		const activityEvents = activitiesToKnownEvents(options.activities ?? [])
-		if (activityEvents.length > 0) return activityEvents
+		if (!options.includeKnownEvents) return []
 		try {
-			return parseKnownEvents(
-				{
-					from: receipt.sender,
-					to,
-					status,
-					logs: receipt.logs as unknown as Log[],
-					contractAddress: receipt.contractAddress ?? null,
-				} as unknown as TransactionReceipt,
-				{
-					transaction: {
-						to,
-						input: row.input,
-						data: row.input,
-						calls: row.meta?.rpc?.calls as never,
-					} as never,
-					getTokenMetadata: options.getTokenMetadata,
-				},
-			)
+			return parseKnownEvents(receipt, {
+				transaction,
+				getTokenMetadata: options.getTokenMetadata,
+			})
 		} catch (error) {
 			console.error(
-				`[history] failed to parse known events for ${row.hash}:`,
+				`[history] failed to parse known events for ${receipt.transactionHash}:`,
 				error,
 			)
 			return []
@@ -241,15 +161,15 @@ export function toEnrichedTransaction(
 	})()
 
 	return {
-		hash: row.hash,
-		blockNumber: toHexQuantity(row.blockNumber),
-		timestamp: parseTimestamp(row.timestamp) ?? 0,
-		from: Address.checksum(row.sender),
-		to,
-		value: toHexQuantity(row.value),
-		status,
-		gasUsed: toHexQuantity(receipt?.gasUsed),
-		effectiveGasPrice: toHexQuantity(receipt?.effectiveGasPrice),
+		hash: receipt.transactionHash,
+		blockNumber: Hex.fromNumber(receipt.blockNumber),
+		timestamp: options.timestamp,
+		from: Address.checksum(receipt.from),
+		to: receipt.to ? Address.checksum(receipt.to) : null,
+		value: Hex.fromNumber(transaction.value ?? 0n),
+		status: receipt.status,
+		gasUsed: Hex.fromNumber(receipt.gasUsed),
+		effectiveGasPrice: Hex.fromNumber(receipt.effectiveGasPrice),
 		knownEvents: serializeBigInts(knownEvents),
 	}
 }
@@ -271,6 +191,7 @@ export async function fetchAddressHistoryData(params: {
 	if (limit > maxLimit) throw new Error('Limit is too high')
 	if (limit < 1) limit = 1
 
+	Address.assert(address)
 	const filters = historyFilters(address, searchParams)
 	const totalKey = JSON.stringify([chainId, filters])
 	const cachedTotal = getCachedHistoryTotal(totalKey)
@@ -280,64 +201,72 @@ export async function fetchAddressHistoryData(params: {
 		searchParams.cursor === undefined &&
 		searchParams.sort === 'desc' &&
 		cachedTotal === undefined
-	const resultPromise = parseResponse(
-		api.v1.transactions.$get({
-			query: {
-				chainId: String(chainId),
-				...filters,
-				order: searchParams.sort,
-				limit: String(limit),
-				...(searchParams.cursor ? { cursor: searchParams.cursor } : {}),
-				include: includeTotal ? 'receipt,totalCount' : 'receipt',
-			},
-		}),
+	const direction = searchParams.sort === 'asc' ? 'ASC' : 'DESC'
+	const paged = [...filters]
+	if (searchParams.cursor) {
+		const [block, index] = parseHistoryCursor(searchParams.cursor)
+		paged.push(
+			`(block_num, tx_idx) ${direction === 'ASC' ? '>' : '<'} (${block}, ${index})`,
+		)
+	}
+	const rowsPromise = indexer(
+		chainId,
+		`SELECT tx_hash, block_num, tx_idx, toUnixTimestamp(block_timestamp) AS timestamp
+		FROM receipts WHERE ${paged.join(' AND ')}
+		ORDER BY block_num ${direction}, tx_idx ${direction} LIMIT ${limit + 1}`,
 	)
 	const requestedTotal = includeTotal
-		? resultPromise
-				.then((result) =>
-					result.meta?.totalCount === undefined
-						? undefined
-						: {
-								totalCount: result.meta.totalCount,
-								totalCountCapped: result.meta.totalCountCapped ?? false,
-							},
-				)
-				.catch(() => undefined)
+		? indexer(
+				chainId,
+				`SELECT count() AS n FROM receipts WHERE ${filters.join(' AND ')}`,
+			).then(
+				([row]) => (row ? Number(row.n) : undefined),
+				() => undefined,
+			)
 		: undefined
 	if (requestedTotal) cacheHistoryTotal(totalKey, requestedTotal)
 
-	const [result, exactTotal] = await Promise.all([
-		resultPromise,
+	const [rows, total] = await Promise.all([
+		rowsPromise,
 		cachedTotal ?? requestedTotal,
 	])
+	const page = rows.slice(0, limit)
 
-	const [getTokenMetadata, activities] = await Promise.all([
-		includeKnownEvents
-			? buildTokenMetadataLookup(result.data)
-			: Promise.resolve(() => undefined),
-		includeKnownEvents
-			? Promise.all(
-					result.data.map((row) => getTransactionActivities(row.hash, chainId)),
-				)
-			: Promise.resolve([]),
-	])
+	const client = getBatchedClient()
+	const fetched = await Promise.all(
+		page.map((row) => {
+			const hash = String(row.tx_hash) as Hex.Hex
+			return Promise.all([
+				client.getTransaction({ hash }),
+				client.getTransactionReceipt({ hash }),
+			])
+		}),
+	)
+	const getTokenMetadata = includeKnownEvents
+		? await metadataForTokens(
+				fetched.flatMap(([, receipt]) =>
+					receipt.logs.map((log) => log.address),
+				),
+			)
+		: () => undefined
 
-	const transactions = result.data.map((row, index) =>
-		toEnrichedTransaction(row, {
+	const transactions = fetched.map(([transaction, receipt], index) =>
+		toEnrichedTransaction(transaction, receipt, {
+			timestamp: Number(page[index]?.timestamp ?? 0),
 			includeKnownEvents,
 			getTokenMetadata,
-			activities: activities[index],
 		}),
 	)
 	if (searchParams.sort === 'asc') transactions.reverse()
 
+	const last = page.at(-1)
 	return {
 		transactions,
-		total: exactTotal?.totalCount ?? null,
+		total: total ?? null,
 		limit,
-		nextCursor: result.nextCursor,
-		reverseCursor: result.data[0] ? transactionCursor(result.data[0]) : null,
-		countCapped: exactTotal?.totalCountCapped ?? false,
+		nextCursor: rows.length > limit && last ? historyCursor(last) : null,
+		reverseCursor: page[0] ? historyCursor(page[0]) : null,
+		countCapped: false,
 		error: null,
 	}
 }

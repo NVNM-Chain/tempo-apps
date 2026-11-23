@@ -214,7 +214,6 @@ function TokensPage() {
 													<TokenIcon
 														address={token.address}
 														name={token.symbol}
-														logoURI={token.logoURI}
 													/>
 													{token.symbol}
 												</span>
@@ -239,7 +238,6 @@ function TokensPage() {
 																<TokenIcon
 																	address={token.address}
 																	name={token.symbol}
-																	logoURI={token.logoURI}
 																/>
 																{token.symbol}
 															</span>,

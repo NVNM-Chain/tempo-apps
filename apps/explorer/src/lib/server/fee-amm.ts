@@ -1,11 +1,12 @@
 import { createServerFn } from '@tanstack/react-start'
-import { type InferResponseType, parseResponse } from 'hono/client'
 import type { Address } from 'ox'
+import { formatUnits, getAbiItem, toEventSelector } from 'viem'
 import { Addresses } from 'viem/tempo'
 import { getChainId } from 'wagmi/actions'
-import { api } from '#lib/server/tempo-api'
-import { parseTimestamp } from '#lib/timestamp'
-import { getWagmiConfig } from '#wagmi.config'
+import { Abis } from '#lib/abis'
+import { indexer } from '#lib/server/dex-indexer'
+import { getTokenMetadata } from '#lib/server/verified-tokens'
+import { getBatchedClient, getWagmiConfig } from '#wagmi.config'
 
 export type FeeAmmPool = {
 	poolId: `0x${string}`
@@ -25,40 +26,14 @@ export type FeeAmmPool = {
 	validatorTokenDecimals: number
 }
 
-type PoolsResponse = InferResponseType<
-	(typeof api.v1)['fee-amm']['pools']['$get'],
-	200
->
-
-/** Max number of pools the page shows (API bounds to the same limit). */
+/** Max number of pools the page shows. */
 const POOL_LIMIT = 50
 
-/**
- * Maps API pools (token metadata + live reserves included) into the page's
- * shape, sorted pathUSD-validator pools first, then by liquidity, then by
- * most recent activity.
- */
-export function mapFeeAmmPools(pools: PoolsResponse['data']): FeeAmmPool[] {
+const MINT = toEventSelector(getAbiItem({ abi: Abis.feeAmm, name: 'Mint' }))
+
+/** pathUSD-validator pools first, then by liquidity, then by most recent activity. */
+export function sortFeeAmmPools(pools: FeeAmmPool[]): FeeAmmPool[] {
 	return pools
-		.map((pool) => ({
-			poolId: pool.poolId,
-			userToken: pool.userToken.address,
-			validatorToken: pool.validatorToken.address,
-			createdAt: parseTimestamp(pool.createdAt) ?? null,
-			latestMintAt: parseTimestamp(pool.lastMintAt) ?? null,
-			mintCount: pool.mintCount,
-			reserveUserToken: BigInt(pool.userAmount?.baseUnits ?? 0),
-			reserveValidatorToken: BigInt(pool.validatorAmount?.baseUnits ?? 0),
-			liquidityUsd:
-				Number(pool.userAmount?.formatted ?? 0) +
-				Number(pool.validatorAmount?.formatted ?? 0),
-			userTokenName: pool.userToken.name,
-			userTokenSymbol: pool.userToken.symbol,
-			userTokenDecimals: pool.userToken.decimals,
-			validatorTokenName: pool.validatorToken.name,
-			validatorTokenSymbol: pool.validatorToken.symbol,
-			validatorTokenDecimals: pool.validatorToken.decimals,
-		}))
 		.sort((a, b) => {
 			const pathUsd = Addresses.pathUsd.toLowerCase()
 			const aPriority = a.validatorToken.toLowerCase() === pathUsd
@@ -79,14 +54,64 @@ export function mapFeeAmmPools(pools: PoolsResponse['data']): FeeAmmPool[] {
 		.slice(0, POOL_LIMIT)
 }
 
+/** The pools `Mint` events name, each one's reserves and tokens read from the node. */
 export const fetchFeeAmmPools = createServerFn({ method: 'POST' }).handler(
 	async (): Promise<FeeAmmPool[]> => {
 		try {
 			const chainId = getChainId(getWagmiConfig())
-			const { data } = await parseResponse(
-				api.v1['fee-amm'].pools.$get({ query: { chainId: String(chainId) } }),
+			const rows = await indexer(
+				chainId,
+				`SELECT topic2, topic3, count() AS mints,
+					toUnixTimestamp(min(block_timestamp)) AS first_at,
+					toUnixTimestamp(max(block_timestamp)) AS last_at
+				FROM logs WHERE address = '${Addresses.feeManager.toLowerCase()}' AND topic0 = '${MINT}'
+				GROUP BY topic2, topic3`,
 			)
-			return mapFeeAmmPools(data)
+			const client = getBatchedClient()
+			const topicAddress = (topic: unknown) =>
+				`0x${String(topic).slice(-40)}` as Address.Address
+			const pools = await Promise.all(
+				rows.map(async (row): Promise<FeeAmmPool> => {
+					const userToken = topicAddress(row.topic2)
+					const validatorToken = topicAddress(row.topic3)
+					const pool = {
+						address: Addresses.feeManager,
+						abi: Abis.feeAmm,
+						args: [userToken, validatorToken],
+					} as const
+					const [poolId, reserves, user, validator] = await Promise.all([
+						client.readContract({ ...pool, functionName: 'getPoolId' }),
+						client.readContract({ ...pool, functionName: 'getPool' }),
+						getTokenMetadata(userToken),
+						getTokenMetadata(validatorToken),
+					])
+					const userDecimals = user?.decimals ?? 6
+					const validatorDecimals = validator?.decimals ?? 6
+					return {
+						poolId,
+						userToken,
+						validatorToken,
+						createdAt: Number(row.first_at),
+						latestMintAt: Number(row.last_at),
+						mintCount: Number(row.mints),
+						reserveUserToken: reserves.reserveUserToken,
+						reserveValidatorToken: reserves.reserveValidatorToken,
+						// Both sides are USD stablecoins, counted at par.
+						liquidityUsd:
+							Number(formatUnits(reserves.reserveUserToken, userDecimals)) +
+							Number(
+								formatUnits(reserves.reserveValidatorToken, validatorDecimals),
+							),
+						userTokenName: user?.name ?? '',
+						userTokenSymbol: user?.symbol ?? '',
+						userTokenDecimals: userDecimals,
+						validatorTokenName: validator?.name ?? '',
+						validatorTokenSymbol: validator?.symbol ?? '',
+						validatorTokenDecimals: validatorDecimals,
+					}
+				}),
+			)
+			return sortFeeAmmPools(pools)
 		} catch (error) {
 			console.error('Failed to fetch Fee AMM pools:', error)
 			return []

@@ -1328,7 +1328,7 @@ export interface KnownEvent {
 	failed?: boolean
 }
 
-type TransactionLike = {
+export type TransactionLike = {
 	to?: Address.Address | null
 	input?: Hex.Hex | null | undefined
 	data?: Hex.Hex | null | undefined

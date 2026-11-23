@@ -1450,7 +1450,7 @@ function SectionsWrapper(props: {
 									Transfers are temporarily unavailable
 								</p>
 								<p className="mt-1 text-xs text-tertiary">
-									The Tempo API could not complete this request.
+									The indexer could not complete this request.
 								</p>
 								<button
 									type="button"
