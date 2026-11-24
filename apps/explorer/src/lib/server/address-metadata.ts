@@ -9,8 +9,6 @@ import { TOKEN_CREATED_EVENT } from '#lib/abis'
 import { isTip20Address } from '#lib/domain/tip20'
 import { indexer } from '#lib/server/dex-indexer'
 import {
-	fetchAddressOldestTx,
-	fetchAddressTxStats,
 	fetchTokenTransferBoundaries,
 	fetchVirtualAddressTransferStats,
 } from '#lib/server/tempo-queries'
@@ -86,22 +84,38 @@ export function buildAddressTxMetadata(aggregate: AddressTxAggregate): {
 	}
 }
 
-/** Address activity boundaries and count from tidx. */
+/**
+ * Address activity boundaries and count, from tidx's ClickHouse: its Postgres
+ * times out counting a busy address's transactions.
+ */
 export async function fetchAddressTxMetadata(
 	chainId: number,
 	address: Address.Address,
 ): Promise<AddressTxAggregate> {
-	const [stats, oldest] = await Promise.all([
-		fetchAddressTxStats(address, chainId),
-		fetchAddressOldestTx(address, chainId),
+	const account = address.toLowerCase()
+	const involved = `("from" = '${account}' OR "to" = '${account}')`
+	const [[stats], [oldest]] = await Promise.all([
+		indexer(
+			chainId,
+			`SELECT count() AS n, toUnixTimestamp(min(block_timestamp)) AS first_at,
+				toUnixTimestamp(max(block_timestamp)) AS last_at
+			FROM receipts WHERE ${involved}`,
+		),
+		indexer(
+			chainId,
+			`SELECT tx_hash, "from" FROM receipts WHERE ${involved}
+			ORDER BY block_num, tx_idx LIMIT 1`,
+		),
 	])
+	const count = Number(stats?.n ?? 0)
 
 	return {
-		count: stats.count,
-		latestTxsBlockTimestamp: stats.latestTimestamp,
-		oldestTxsBlockTimestamp: stats.oldestTimestamp,
-		oldestTxHash: oldest?.hash,
-		oldestTxFrom: oldest?.from,
+		count,
+		// An empty aggregate answers the epoch, not null.
+		latestTxsBlockTimestamp: count ? stats?.last_at : undefined,
+		oldestTxsBlockTimestamp: count ? stats?.first_at : undefined,
+		oldestTxHash: oldest && String(oldest.tx_hash),
+		oldestTxFrom: oldest && String(oldest.from),
 	}
 }
 

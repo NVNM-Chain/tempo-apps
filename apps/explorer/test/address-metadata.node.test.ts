@@ -5,15 +5,9 @@ import {
 	pickTip20CreatedTimestamp,
 } from '#lib/server/address-metadata'
 
-const { fetchAddressTxStats, fetchAddressOldestTx } = vi.hoisted(() => ({
-	fetchAddressTxStats: vi.fn(),
-	fetchAddressOldestTx: vi.fn(),
-}))
+const { indexer } = vi.hoisted(() => ({ indexer: vi.fn() }))
 
-vi.mock('#lib/server/tempo-queries', () => ({
-	fetchAddressTxStats,
-	fetchAddressOldestTx,
-}))
+vi.mock('#lib/server/dex-indexer', () => ({ indexer }))
 
 beforeEach(() => {
 	vi.resetAllMocks()
@@ -49,27 +43,30 @@ describe('address metadata', () => {
 	})
 
 	it('loads activity boundaries and count from tidx', async () => {
-		fetchAddressTxStats.mockResolvedValue({
+		indexer.mockImplementation(async (_chainId: number, sql: string) =>
+			sql.includes('count()')
+				? [{ n: 3, first_at: 100, last_at: 300 }]
+				: [{ tx_hash: '0xoldest', from: '0xsender' }],
+		)
+		const address = '0x1111111111111111111111111111111111111111'
+		await expect(fetchAddressTxMetadata(4217, address)).resolves.toEqual({
 			count: 3,
-			oldestTimestamp: '2026-01-01T00:00:00+00:00',
-			latestTimestamp: '2026-01-03T00:00:00+00:00',
-		})
-		fetchAddressOldestTx.mockResolvedValue({
-			hash: '0xoldest',
-			from: '0xsender',
-			block_timestamp: '2026-01-01T00:00:00+00:00',
-		})
-		await expect(
-			fetchAddressTxMetadata(
-				4217,
-				'0x1111111111111111111111111111111111111111',
-			),
-		).resolves.toEqual({
-			count: 3,
-			latestTxsBlockTimestamp: '2026-01-03T00:00:00+00:00',
-			oldestTxsBlockTimestamp: '2026-01-01T00:00:00+00:00',
+			latestTxsBlockTimestamp: 300,
+			oldestTxsBlockTimestamp: 100,
 			oldestTxHash: '0xoldest',
 			oldestTxFrom: '0xsender',
+		})
+
+		// An address with no transactions: the empty aggregate's epoch is not a time.
+		indexer.mockImplementation(async (_chainId: number, sql: string) =>
+			sql.includes('count()') ? [{ n: 0, first_at: 0, last_at: 0 }] : [],
+		)
+		await expect(fetchAddressTxMetadata(4217, address)).resolves.toEqual({
+			count: 0,
+			latestTxsBlockTimestamp: undefined,
+			oldestTxsBlockTimestamp: undefined,
+			oldestTxHash: undefined,
+			oldestTxFrom: undefined,
 		})
 	})
 })
