@@ -15,7 +15,7 @@ import { Actions } from 'viem/tempo'
 import { Hooks } from 'wagmi/tempo'
 import { useTokenListMembership } from '#comps/TokenListMembership'
 import { cx } from '#lib/css'
-import { getApiUrl } from '#lib/env.ts'
+import { getApiUrl, isTestnet } from '#lib/env.ts'
 import { getFeeTokenForChain } from '#lib/fee-token'
 import { filterSupportedInjectedConnectors } from '#lib/wallets.ts'
 import { getTempoChain } from '#wagmi.config.ts'
@@ -132,7 +132,7 @@ function ConnectWalletInner({
 	return (
 		<div className="flex items-stretch gap-2 justify-end min-w-0 flex-1">
 			<ConnectedAddress />
-			{TEMPO_CHAIN_ID !== 4217 && <FundAccountButton />}
+			{isTestnet() && <FundAccountButton />}
 			{showAddChain && !isSupported && (
 				<Button
 					className="w-fit"

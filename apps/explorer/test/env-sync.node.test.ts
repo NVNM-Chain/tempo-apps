@@ -13,6 +13,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
  * primary source of truth for everything else.
  */
 const CLIENT_AND_BINDING_VARS = [
+	'BLOCKED_ASNS',
 	'DATADOG_APPLICATION_ID',
 	'DATADOG_CLIENT_TOKEN',
 	'DATADOG_SITE',
