@@ -7,6 +7,7 @@ import {
 } from '#lib/explorer-network.ts'
 
 const NVNM_HOST = 'https://scan.nvnm.canary.mantrachain.dev'
+const MAINNET_HOST = 'https://scan.nvnm.mainnet.nvnmchain.io'
 
 const SAMPLE_HASH =
 	'0x0000000000000000000000000000000000000000000000000000000000000000'
@@ -15,6 +16,7 @@ const SAMPLE_ADDRESS = '0x20c0000000000000000000000000000000000000'
 describe('explorer network switcher hrefs', () => {
 	it('offers NVNM chains only — Tempo networks are not served by this build', () => {
 		expect(EXPLORER_NETWORK_OPTIONS).toEqual([
+			expect.objectContaining({ env: 'nvnm-mainnet', host: MAINNET_HOST }),
 			expect.objectContaining({ env: 'nvnm', host: NVNM_HOST }),
 		])
 		expect(
@@ -24,9 +26,12 @@ describe('explorer network switcher hrefs', () => {
 		).toBe(false)
 	})
 
-	it('resolves the active option for the only supported env', () => {
-		expect(getActiveExplorerNetworkOption('nvnm')).toEqual(
+	it('resolves the active option for each env', () => {
+		expect(getActiveExplorerNetworkOption('nvnm-mainnet')).toEqual(
 			EXPLORER_NETWORK_OPTIONS[0],
+		)
+		expect(getActiveExplorerNetworkOption('nvnm')).toEqual(
+			EXPLORER_NETWORK_OPTIONS[1],
 		)
 	})
 
@@ -38,7 +43,9 @@ describe('explorer network switcher hrefs', () => {
 		['token compatibility route', `/token/${SAMPLE_ADDRESS}?tab=holders`],
 		['fee amm route with hash', '/fee-amm#pools'],
 	])('preserves the %s resource path when switching networks', (_, path) => {
-		expect(buildExplorerNetworkHref(NVNM_HOST, path)).toBe(`${NVNM_HOST}${path}`)
+		expect(buildExplorerNetworkHref(NVNM_HOST, path)).toBe(
+			`${NVNM_HOST}${path}`,
+		)
 	})
 
 	it('normalizes a path without a leading slash', () => {

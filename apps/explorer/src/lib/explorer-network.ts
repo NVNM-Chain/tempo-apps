@@ -4,9 +4,14 @@ import type { TempoEnv } from './env'
  * Networks offered in the header switcher.
  *
  * NVNM chains only — Tempo's public networks are not served by this build.
- * Add an entry here when a second NVNM chain (e.g. public testnet) exists.
  */
 export const EXPLORER_NETWORK_OPTIONS = [
+	{
+		env: 'nvnm-mainnet',
+		label: 'NVNM Mainnet',
+		host: 'https://scan.nvnm.mainnet.nvnmchain.io',
+		dotClassName: 'bg-positive',
+	},
 	{
 		env: 'nvnm',
 		label: 'NVNM Devnet',

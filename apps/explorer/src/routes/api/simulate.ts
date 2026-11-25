@@ -4,9 +4,9 @@ import type { Hex } from 'ox'
 import * as OxHex from 'ox/Hex'
 import { numberToHex } from 'viem'
 import * as z from 'zod/mini'
-import { nvnmDevnet } from '#lib/chains'
 import { checkRateLimit } from '#lib/server/rate-limit'
 import { zAddress, zHash } from '#lib/zod'
+import { getTempoChain } from '#wagmi.config'
 
 export const MAX_SIMULATION_CALLDATA_BYTES = 64 * 1024
 const MAX_REQUEST_BYTES = MAX_SIMULATION_CALLDATA_BYTES * 2 + 16 * 1024
@@ -106,7 +106,7 @@ async function rpcRequest<T>(args: {
 	params: unknown[]
 	signal: AbortSignal
 }): Promise<T> {
-	const response = await fetch(nvnmDevnet.rpcUrls.default.http[0], {
+	const response = await fetch(getTempoChain().rpcUrls.default.http[0], {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' },
 		body: JSON.stringify({

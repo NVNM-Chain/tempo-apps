@@ -12,13 +12,17 @@ const clientEnvSchema = z.object({
 export const clientEnv = clientEnvSchema.parse(import.meta.env)
 
 /**
- * Environments this build serves. NVNM chains only — Tempo's own networks were
- * removed deliberately, so adding one back means adding a chain definition, a
- * wrangler env and a network-switcher entry too.
+ * Environments this build serves, one per deployment: `nvnm` is the devnet.
+ * NVNM chains only — Tempo's own networks were removed deliberately, so adding
+ * an env means adding a chain definition, a wrangler env and a network-switcher
+ * entry too.
  */
-export type TempoEnv = 'nvnm'
+export type TempoEnv = 'nvnm' | 'nvnm-mainnet'
 
-const TEMPO_ENVS = ['nvnm'] as const satisfies readonly TempoEnv[]
+const TEMPO_ENVS = [
+	'nvnm',
+	'nvnm-mainnet',
+] as const satisfies readonly TempoEnv[]
 
 export function inferTempoEnvFromHostname(
 	hostname: string | undefined,
@@ -26,6 +30,14 @@ export function inferTempoEnvFromHostname(
 	if (!hostname) return undefined
 
 	const host = hostname.toLowerCase()
+
+	// Before the devnet's patterns, which mainnet's hosts also contain.
+	if (
+		host.includes('explorer-nvnm-mainnet') ||
+		host.includes('scan.nvnm.mainnet.')
+	) {
+		return 'nvnm-mainnet'
+	}
 
 	if (
 		host.includes('explorer-nvnm') ||
@@ -98,11 +110,7 @@ export const getTempoEnv = createIsomorphicFn()
 		return inferred ?? normalizeTempoEnv(import.meta.env.VITE_TEMPO_ENV)
 	})
 
-/**
- * True for every non-production NVNM chain. The devnet is the only network this
- * build serves today, so this is constant — it stays a function because the UI
- * calls it to gate testnet-only affordances (see comps/Header.tsx).
- */
+/** True for every NVNM chain but mainnet; the UI gates testnet-only affordances on it (see comps/Header.tsx). */
 export const isTestnet = createIsomorphicFn()
-	.client(() => true)
-	.server(() => true)
+	.client(() => getTempoEnv() !== 'nvnm-mainnet')
+	.server(() => getTempoEnv() !== 'nvnm-mainnet')
