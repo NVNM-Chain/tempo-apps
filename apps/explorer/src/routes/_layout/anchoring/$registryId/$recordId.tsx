@@ -14,6 +14,7 @@ import { Sections } from '#comps/Sections'
 import { ANCHORING_PER_PAGE, parseAnchoringId } from '#lib/domain/anchoring'
 import { useMediaQuery } from '#lib/hooks'
 import { fetchAnchoringRecord } from '#lib/server/anchoring'
+import { zPage } from '#lib/zod'
 
 export const Route = createFileRoute(
 	'/_layout/anchoring/$registryId/$recordId',
@@ -24,7 +25,7 @@ export const Route = createFileRoute(
 			<h1 className="text-[32px] font-medium text-primary">Record Not Found</h1>
 		</div>
 	),
-	validateSearch: z.object({ page: z.prefault(z.coerce.number(), 1) }),
+	validateSearch: z.object({ page: zPage() }),
 	search: { middlewares: [stripSearchParams({ page: 1 })] },
 	loaderDeps: ({ search: { page } }) => ({ page }),
 	loader: async ({ params, deps }) => {

@@ -18,6 +18,14 @@ export const zAddress = (opts?: { lowercase?: boolean }) =>
 		}),
 	)
 
+/** A whole number from 1, as pages and ids count. */
+export const zPositiveInt = () => z.int().check(z.gte(1))
+
+/** A `page` search param; anything but a whole number from 1 reads as page 1. */
+export const zPage = () =>
+	// `prefault` keeps the param optional in links to the route.
+	z.prefault(z.catch(z.pipe(z.coerce.number(), zPositiveInt()), 1), 1)
+
 export const zHash = () =>
 	z.pipe(
 		z.string().check((ctx) => {

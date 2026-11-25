@@ -6,7 +6,9 @@ import {
 	fetchAnchoringRegistry,
 	newestFirst,
 	searchAnchoring,
+	searchAnchoringPage,
 } from '#lib/server/anchoring'
+import { zPage } from '#lib/zod'
 
 vi.mock('@tanstack/react-start', async (importOriginal) => ({
 	...(await importOriginal<typeof import('@tanstack/react-start')>()),
@@ -146,17 +148,21 @@ function nameIndex(registries: bigint) {
 	request.mockImplementation(
 		async ({ method, params }: { method: string; params: unknown[] }) => {
 			expect(method).toBe('anchoring_searchRegistriesByName')
-			const [{ name, mode, limit }] = params as [
-				{ name: string; mode: string; limit: number },
+			const [{ name, mode, offset, limit }] = params as [
+				{ name: string; mode: string; offset: number; limit: number },
 			]
 			expect(mode).toBe('contains')
 			const rows = []
-			for (let id = 1n; id <= registries && rows.length < limit; id++) {
+			for (let id = 1n; id <= registries; id++) {
 				const row = registry(id)
 				if (row.name.toLowerCase().includes(name.toLowerCase()))
 					rows.push({ ...row, id: Number(id) })
 			}
-			return { registries: rows, nextKey: null }
+			const next = rows[offset + limit]
+			return {
+				registries: rows.slice(offset, offset + limit),
+				nextKey: next ? `0x${next.id.toString(16).padStart(16, '0')}` : null,
+			}
 		},
 	)
 }
@@ -181,6 +187,28 @@ describe('anchoring', () => {
 		expect(newestFirst(0, 1, 25)).toEqual([])
 	})
 
+	it('reads a page param that is not a whole number from 1 as page 1', () => {
+		const page = zPage()
+		expect(
+			['0', '-3', '1.5', 'x', undefined].map((v) => z.parse(page, v)),
+		).toEqual([1, 1, 1, 1, 1])
+		expect(z.parse(page, '2')).toBe(2)
+	})
+
+	it('refuses a page, id or limit that is not a whole number from 1', () => {
+		for (const page of [0, -1, 1.5])
+			expect(() => fetchAnchoringRegistries({ data: { page } })).toThrow()
+		expect(() =>
+			fetchAnchoringRegistry({ data: { registryId: 1.5, page: 1 } }),
+		).toThrow()
+		expect(() =>
+			fetchAnchoringRecord({ data: { registryId: 1, recordId: 0, page: 1 } }),
+		).toThrow()
+		expect(() => searchAnchoring({ data: { q: 'x', limit: -1 } })).toThrow()
+		expect(() => searchAnchoringPage({ data: { q: 'x', page: 0 } })).toThrow()
+		expect(readContract).not.toHaveBeenCalled()
+	})
+
 	it('lists registries newest first', async () => {
 		const first = await fetchAnchoringRegistries({ data: { page: 1 } })
 		expect(first.total).toBe(30)
@@ -195,10 +223,13 @@ describe('anchoring', () => {
 			registries: [],
 			total: 0,
 		})
-		expect(await searchAnchoring({ data: { q: 'twin' } })).toEqual({
+		expect(await searchAnchoring({ data: { q: 'twin', limit: 8 } })).toEqual({
 			registries: [],
 			records: [],
 		})
+		expect(await searchAnchoringPage({ data: { q: 'twin', page: 1 } })).toEqual(
+			{ registries: [], records: [], more: false },
+		)
 		expect(readContract).not.toHaveBeenCalled()
 	})
 
@@ -240,15 +271,17 @@ describe('anchoring', () => {
 	})
 
 	it('finds registries by whole name and records by checksum', async () => {
-		const found = await searchAnchoring({ data: { q: 'twin' } })
+		const found = await searchAnchoringPage({ data: { q: 'twin', page: 1 } })
 		expect(ids(found.registries)).toEqual([2, 3])
-		const anchored = await searchAnchoring({ data: { q: 'sum-1' } })
+		const anchored = await searchAnchoringPage({
+			data: { q: 'sum-1', page: 1 },
+		})
 		expect(anchored.records.map((r) => r.registryId)).toEqual([1, 2])
 	})
 
 	it('finds part of a name on a node running the name index', async () => {
-		const search = async (q: string, limit?: number) =>
-			ids((await searchAnchoring({ data: { q, limit } })).registries)
+		const search = async (q: string) =>
+			ids((await searchAnchoringPage({ data: { q, page: 1 } })).registries)
 		// The contract alone matches a whole name.
 		expect(await search('reg-1')).toEqual([1])
 		expect(await search('eg-1')).toEqual([])
@@ -257,7 +290,19 @@ describe('anchoring', () => {
 		expect(await search('reg-1')).toEqual([
 			1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
 		])
-		expect(await search('eg-2', 3)).toEqual([20, 21, 22])
+		const suggested = await searchAnchoring({ data: { q: 'eg-2', limit: 3 } })
+		expect(ids(suggested.registries)).toEqual([20, 21, 22])
+	})
+
+	it('pages a search on through the name index', async () => {
+		nameIndex(30n)
+		// Every name but the two twins has `reg`: 28, one past a page.
+		const first = await searchAnchoringPage({ data: { q: 'reg', page: 1 } })
+		expect(first.registries).toHaveLength(25)
+		expect(first.more).toBe(true)
+		const second = await searchAnchoringPage({ data: { q: 'reg', page: 2 } })
+		expect(ids(second.registries)).toEqual([28, 29, 30])
+		expect(second.more).toBe(false)
 	})
 
 	it('lists a registry’s events from the indexer, newest first', async () => {

@@ -11,6 +11,7 @@ import {
 	type AnchoringRegistry,
 } from '#lib/domain/anchoring'
 import { indexer } from '#lib/server/dex-indexer'
+import { zPositiveInt } from '#lib/zod'
 import { getBatchedClient } from '#wagmi.config'
 
 // Registries and records are read from the node rather than an index: the ones seeded at
@@ -89,7 +90,7 @@ function recordOf(
 
 /** Registries newest first, and how many there are. */
 export const fetchAnchoringRegistries = createServerFn({ method: 'POST' })
-	.inputValidator(z.object({ page: z.number() }))
+	.inputValidator(z.object({ page: zPositiveInt() }))
 	.handler(async ({ data }) => {
 		const client = getBatchedClient()
 		const total = await registryCount(client)
@@ -114,17 +115,42 @@ export const fetchAnchoringRegistries = createServerFn({ method: 'POST' })
 /** The most the name index returns at once. */
 const NAME_INDEX_LIMIT = 200
 
-/** Registries whose name contains `q`, by id; none unless the node runs `--anchoring.name-index`. */
-async function nameIndex(client: Client, q: string, limit: number) {
+/**
+ * Registries whose name contains `q`, by id, from `offset`, and whether more follow; none
+ * unless the node runs `--anchoring.name-index`.
+ */
+async function nameIndex(
+	client: Client,
+	q: string,
+	offset: number,
+	limit: number,
+): Promise<{ registries: AnchoringRegistry[]; more: boolean }> {
 	try {
 		const answer = (await client.request({
 			method: 'anchoring_searchRegistriesByName',
-			params: [{ name: q, mode: 'contains', limit }],
-		} as never)) as { registries: AnchoringRegistry[] }
-		return answer.registries
+			params: [{ name: q, mode: 'contains', offset, limit }],
+		} as never)) as { registries: AnchoringRegistry[]; nextKey: string | null }
+		return { registries: answer.registries, more: Boolean(answer.nextKey) }
 	} catch {
-		return []
+		return { registries: [], more: false }
 	}
+}
+
+/** The registries named `q` and the latest version of each record with checksum `q`. */
+async function exactMatches(client: Client, q: string) {
+	const [[named], [anchored]] = await Promise.all([
+		client.readContract({
+			...contract,
+			functionName: 'registriesByName',
+			args: [q, 1, FIRST_PAGE],
+		}),
+		client.readContract({
+			...contract,
+			functionName: 'records',
+			args: [0n, q, 0n, 0n, FIRST_PAGE],
+		}),
+	])
+	return { named: named.map(registryOf), records: anchored.map(recordOf) }
 }
 
 /** The name typed first, then the names beginning with it, then the rest, each by id. */
@@ -138,43 +164,56 @@ function rankByName(registries: AnchoringRegistry[], q: string) {
 }
 
 /**
- * Registries whose name is or contains `q`, and the latest version of each record with
- * checksum `q`; at most `limit` of each when given.
+ * The best `limit` registries whose name is or contains `q`, and as many of the latest
+ * versions of records with checksum `q`: suggestions, not every match.
  */
 export const searchAnchoring = createServerFn({ method: 'POST' })
-	.inputValidator(z.object({ q: z.string(), limit: z.optional(z.number()) }))
+	.inputValidator(z.object({ q: z.string(), limit: zPositiveInt() }))
 	.handler(({ data }) => findAnchoring(data.q, data.limit))
 
 export async function findAnchoring(
 	q: string,
-	limit?: number,
+	limit: number,
 ): Promise<{ registries: AnchoringRegistry[]; records: AnchoringRecord[] }> {
 	const client = getBatchedClient()
 	if ((await registryCount(client)) === 0)
 		return { registries: [], records: [] }
 	// The index answers by id, so the name typed can sit behind names that contain it.
-	const asked = Math.min(NAME_INDEX_LIMIT, (limit ?? Infinity) * 8)
-	const [[named], [anchored], partial] = await Promise.all([
-		client.readContract({
-			...contract,
-			functionName: 'registriesByName',
-			args: [q, 1, FIRST_PAGE],
-		}),
-		client.readContract({
-			...contract,
-			functionName: 'records',
-			args: [0n, q, 0n, 0n, FIRST_PAGE],
-		}),
-		nameIndex(client, q, asked),
+	const asked = Math.min(NAME_INDEX_LIMIT, limit * 8)
+	const [{ named, records }, partial] = await Promise.all([
+		exactMatches(client, q),
+		nameIndex(client, q, 0, asked),
 	])
-	const byId = new Map(
-		[...named.map(registryOf), ...partial].map((r) => [r.id, r]),
-	)
+	const byId = new Map([...named, ...partial.registries].map((r) => [r.id, r]))
 	return {
 		registries: rankByName([...byId.values()], q).slice(0, limit),
-		records: anchored.map(recordOf).slice(0, limit),
+		records: records.slice(0, limit),
 	}
 }
+
+/**
+ * Page `page` of the registries whose name is or contains `q`, those named `q` first on
+ * page 1, and the latest version of each record with checksum `q`. The index pages by id
+ * and counts nothing, so a page says only whether another follows.
+ */
+export const searchAnchoringPage = createServerFn({ method: 'POST' })
+	.inputValidator(z.object({ q: z.string(), page: zPositiveInt() }))
+	.handler(async ({ data: { q, page } }) => {
+		const client = getBatchedClient()
+		if ((await registryCount(client)) === 0)
+			return { registries: [], records: [], more: false }
+		const [{ named, records }, matches] = await Promise.all([
+			exactMatches(client, q),
+			nameIndex(client, q, (page - 1) * ANCHORING_PER_PAGE, ANCHORING_PER_PAGE),
+		])
+		const exact = new Set(named.map((r) => r.id))
+		const rest = matches.registries.filter((r) => !exact.has(r.id))
+		return {
+			registries: rankByName([...(page === 1 ? named : []), ...rest], q),
+			records,
+			more: matches.more,
+		}
+	})
 
 /**
  * A registry's latest events, newest first, decoded by the indexer; `null` when the indexer
@@ -223,7 +262,9 @@ async function fetchRegistryEvents(
  * has, and its latest events: one past a page, to tell there are more.
  */
 export const fetchAnchoringRegistry = createServerFn({ method: 'POST' })
-	.inputValidator(z.object({ registryId: z.number(), page: z.number() }))
+	.inputValidator(
+		z.object({ registryId: zPositiveInt(), page: zPositiveInt() }),
+	)
 	.handler(async ({ data }) => {
 		const client = getBatchedClient()
 		const [count, total] = await Promise.all([
@@ -273,9 +314,9 @@ export const fetchAnchoringRegistry = createServerFn({ method: 'POST' })
 export const fetchAnchoringRecord = createServerFn({ method: 'POST' })
 	.inputValidator(
 		z.object({
-			registryId: z.number(),
-			recordId: z.number(),
-			page: z.number(),
+			registryId: zPositiveInt(),
+			recordId: zPositiveInt(),
+			page: zPositiveInt(),
 		}),
 	)
 	.handler(async ({ data }) => {

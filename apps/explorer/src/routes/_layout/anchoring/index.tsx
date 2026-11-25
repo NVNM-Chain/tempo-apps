@@ -18,15 +18,16 @@ import {
 import { useMediaQuery } from '#lib/hooks'
 import {
 	fetchAnchoringRegistries,
-	searchAnchoring,
+	searchAnchoringPage,
 } from '#lib/server/anchoring'
+import { zPage } from '#lib/zod'
 
 const defaultSearch = { page: 1, q: '' } as const
 
 export const Route = createFileRoute('/_layout/anchoring/')({
 	component: AnchoringPage,
 	validateSearch: z.object({
-		page: z.prefault(z.coerce.number(), defaultSearch.page),
+		page: zPage(),
 		q: z.prefault(z.string(), defaultSearch.q),
 	}),
 	search: { middlewares: [stripSearchParams(defaultSearch)] },
@@ -38,23 +39,18 @@ export const Route = createFileRoute('/_layout/anchoring/')({
 				params: { registryId: q },
 			})
 		if (q) {
-			const { registries, records } = await searchAnchoring({ data: { q } })
-			const start = (page - 1) * ANCHORING_PER_PAGE
-			return {
-				registries: registries.slice(start, start + ANCHORING_PER_PAGE),
-				records,
-				total: registries.length,
-			}
+			const found = await searchAnchoringPage({ data: { q, page } })
+			return { ...found, total: undefined }
 		}
 		const listed = await fetchAnchoringRegistries({ data: { page } })
-		return { ...listed, records: [] as AnchoringRecord[] }
+		return { ...listed, records: [] as AnchoringRecord[], more: false }
 	},
 	head: () => ({ meta: [{ title: 'Anchoring – Tempo Explorer' }] }),
 })
 
 function AnchoringPage(): React.JSX.Element {
 	const { page, q } = Route.useSearch()
-	const { registries, records, total } = Route.useLoaderData()
+	const { registries, records, total, more } = Route.useLoaderData()
 	const mode = useMediaQuery('(max-width: 799px)') ? 'stacked' : 'tabs'
 	const [activeSection, setActiveSection] = React.useState(0)
 
@@ -78,6 +74,7 @@ function AnchoringPage(): React.JSX.Element {
 							<RegistriesGrid
 								registries={registries}
 								total={total}
+								more={more}
 								page={page}
 								emptyState={
 									q ? 'No registry name matches.' : 'No registries yet.'
@@ -100,11 +97,13 @@ function AnchoringPage(): React.JSX.Element {
 
 function RegistriesGrid(props: {
 	registries: AnchoringRegistry[]
-	total: number
+	/** None for a search, which pages on while `more` says another page follows. */
+	total: number | undefined
+	more: boolean
 	page: number
 	emptyState: string
 }) {
-	const { registries, total, page } = props
+	const { registries, total, more, page } = props
 	const columns: DataGrid.Column[] = [
 		{ label: 'Id', width: 'max-content' },
 		{ label: 'Registry', width: '3fr', minWidth: 200 },
@@ -146,7 +145,13 @@ function RegistriesGrid(props: {
 					},
 				}))
 			}
-			totalItems={total}
+			totalItems={total ?? registries.length}
+			// Past a search's last page the page count is known.
+			pages={
+				total === undefined ? (more ? { hasMore: true } : page) : undefined
+			}
+			pagination={total === undefined ? 'simple' : 'default'}
+			showSimpleCount={false}
 			page={page}
 			itemsPerPage={ANCHORING_PER_PAGE}
 			itemsLabel="registries"

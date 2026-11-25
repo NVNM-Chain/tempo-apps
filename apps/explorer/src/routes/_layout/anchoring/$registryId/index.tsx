@@ -20,6 +20,7 @@ import {
 } from '#lib/domain/anchoring'
 import { useMediaQuery } from '#lib/hooks'
 import { fetchAnchoringRegistry } from '#lib/server/anchoring'
+import { zPage } from '#lib/zod'
 
 export const Route = createFileRoute('/_layout/anchoring/$registryId/')({
 	component: RegistryPage,
@@ -30,7 +31,7 @@ export const Route = createFileRoute('/_layout/anchoring/$registryId/')({
 			</h1>
 		</div>
 	),
-	validateSearch: z.object({ page: z.prefault(z.coerce.number(), 1) }),
+	validateSearch: z.object({ page: zPage() }),
 	search: { middlewares: [stripSearchParams({ page: 1 })] },
 	loaderDeps: ({ search: { page } }) => ({ page }),
 	loader: async ({ params, deps }) => {
