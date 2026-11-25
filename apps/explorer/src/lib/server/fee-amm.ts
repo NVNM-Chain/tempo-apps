@@ -5,7 +5,7 @@ import { Addresses } from 'viem/tempo'
 import { getChainId } from 'wagmi/actions'
 import { Abis } from '#lib/abis'
 import { indexer } from '#lib/server/dex-indexer'
-import { getTokenMetadata } from '#lib/server/verified-tokens'
+import { getTokensMetadata } from '#lib/server/verified-tokens'
 import { getBatchedClient, getWagmiConfig } from '#wagmi.config'
 
 export type FeeAmmPool = {
@@ -70,8 +70,15 @@ export const fetchFeeAmmPools = createServerFn({ method: 'POST' }).handler(
 			const client = getBatchedClient()
 			const topicAddress = (topic: unknown) =>
 				`0x${String(topic).slice(-40)}` as Address.Address
+			// Every pool's user and validator token, in the rows' order.
+			const metadata = getTokensMetadata(
+				rows.flatMap((row) => [
+					topicAddress(row.topic2),
+					topicAddress(row.topic3),
+				]),
+			)
 			const pools = await Promise.all(
-				rows.map(async (row): Promise<FeeAmmPool> => {
+				rows.map(async (row, i): Promise<FeeAmmPool> => {
 					const userToken = topicAddress(row.topic2)
 					const validatorToken = topicAddress(row.topic3)
 					const pool = {
@@ -79,12 +86,12 @@ export const fetchFeeAmmPools = createServerFn({ method: 'POST' }).handler(
 						abi: Abis.feeAmm,
 						args: [userToken, validatorToken],
 					} as const
-					const [poolId, reserves, user, validator] = await Promise.all([
+					const [poolId, reserves, tokens] = await Promise.all([
 						client.readContract({ ...pool, functionName: 'getPoolId' }),
 						client.readContract({ ...pool, functionName: 'getPool' }),
-						getTokenMetadata(userToken),
-						getTokenMetadata(validatorToken),
+						metadata,
 					])
+					const [user, validator] = [tokens[2 * i], tokens[2 * i + 1]]
 					const userDecimals = user?.decimals ?? 6
 					const validatorDecimals = validator?.decimals ?? 6
 					return {

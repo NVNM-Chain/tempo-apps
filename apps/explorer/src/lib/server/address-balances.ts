@@ -6,7 +6,7 @@ import { getChainId } from 'wagmi/actions'
 import type { BalancesResponse, TokenBalance } from '#lib/address-balances'
 import { indexer } from '#lib/server/dex-indexer'
 import {
-	getTokenMetadata,
+	getTokensMetadata,
 	getVerifiedTokens,
 } from '#lib/server/verified-tokens'
 import { zAddress } from '#lib/zod'
@@ -39,8 +39,8 @@ function sortBalances(balances: TokenBalance[]): TokenBalance[] {
 }
 
 /**
- * The tokens tidx has seen the address hold, and the chain's listed tokens,
- * each balance read from the node: tidx misses balances set at genesis.
+ * The address's `maxTokens` largest balances, read from the node for the tokens
+ * tidx has seen it hold and every listed token: tidx misses balances set at genesis.
  */
 export async function fetchAddressBalancesData(params: {
 	address: Address.Address
@@ -63,12 +63,12 @@ export async function fetchAddressBalancesData(params: {
 			...held.map((row) => String(row.token) as Address.Address),
 			...listed.map((token) => token.address),
 		]),
-	].slice(0, maxTokens)
+	]
 
 	const client = getBatchedClient()
-	const balances = await Promise.all(
-		tokens.map(async (token): Promise<TokenBalance | undefined> => {
-			const [balance, metadata] = await Promise.all([
+	const [amounts, metadata] = await Promise.all([
+		Promise.all(
+			tokens.map((token) =>
 				client
 					.readContract({
 						address: token,
@@ -77,16 +77,16 @@ export async function fetchAddressBalancesData(params: {
 						args: [address],
 					})
 					.catch(() => undefined),
-				getTokenMetadata(token),
-			])
-			if (!balance) return undefined
-			return { token, balance: String(balance), ...metadata }
-		}),
-	)
+			),
+		),
+		getTokensMetadata(tokens),
+	])
+	const balances = tokens.flatMap((token, i): TokenBalance[] => {
+		const balance = amounts[i]
+		return balance ? [{ token, balance: String(balance), ...metadata[i] }] : []
+	})
 
-	return {
-		balances: sortBalances(balances.filter((balance) => balance !== undefined)),
-	}
+	return { balances: sortBalances(balances).slice(0, maxTokens) }
 }
 
 export const fetchAddressBalances = createServerFn({ method: 'GET' })

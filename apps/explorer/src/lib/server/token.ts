@@ -5,7 +5,7 @@ import { getChainId } from 'wagmi/actions'
 import * as z from 'zod/mini'
 import { TOKEN_COUNT_MAX } from '#lib/constants'
 import { indexer } from '#lib/server/dex-indexer'
-import { getTokenMetadata } from '#lib/server/verified-tokens'
+import { getTokensMetadata } from '#lib/server/verified-tokens'
 import { zAddress } from '#lib/zod'
 import { getBatchedClient, getWagmiConfig } from '#wagmi.config.ts'
 
@@ -242,23 +242,21 @@ export const fetchAccountTransfers = createServerFn({ method: 'POST' })
 			const chainId = getChainId(getWagmiConfig())
 
 			const page = await indexedTransfers({ chainId, ...data })
+			const metadata = await getTokensMetadata(
+				page.transfers.map((transfer) => transfer.token),
+			)
 
 			return {
 				...page,
-				transfers: await Promise.all(
-					page.transfers.map(async ({ token, ...transfer }) => {
-						const metadata = await getTokenMetadata(token)
-						return {
-							...transfer,
-							token: {
-								address: token,
-								symbol: metadata?.symbol ?? '',
-								decimals: metadata?.decimals ?? 0,
-								currency: metadata?.currency ?? '',
-							},
-						}
-					}),
-				),
+				transfers: page.transfers.map(({ token, ...transfer }, i) => ({
+					...transfer,
+					token: {
+						address: token,
+						symbol: metadata[i]?.symbol ?? '',
+						decimals: metadata[i]?.decimals ?? 0,
+						currency: metadata[i]?.currency ?? '',
+					},
+				})),
 			}
 		} catch (error) {
 			console.error('Failed to fetch account transfers:', error)
