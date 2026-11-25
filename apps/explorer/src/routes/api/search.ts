@@ -304,7 +304,6 @@ export const Route = createFileRoute('/api/search')({
 
 				const config = getWagmiConfig()
 				const chainId = getChainId(config)
-				const verifiedTokens = await getVerifiedTokens(chainId)
 				const results: SearchResult[] = []
 
 				// block number (plain digits or #-prefixed)
@@ -333,6 +332,8 @@ export const Route = createFileRoute('/api/search')({
 
 				// hash
 				if (isHash) {
+					// A record's checksum can be hash-shaped too, as EVM tools write a sha256.
+					const anchoring = searchAnchoringResults(query)
 					let timestamp: number | undefined
 					let blockNumber: number | undefined
 					try {
@@ -354,14 +355,17 @@ export const Route = createFileRoute('/api/search')({
 						blockNumber === undefined
 							? { type: 'transaction', hash: query, timestamp }
 							: { type: 'block', blockNumber },
+						...(await anchoring),
 					)
 				} else {
 					const isAddress = Address.validate(query)
+					// Only here, so a hash waits for no token list.
+					const tokens = getVerifiedTokens(chainId)
 					const anchoring = isAddress ? [] : searchAnchoringResults(query)
 					if (!isAddress) results.push(...searchKnownContracts(query))
 
 					// search for token matches (even if an address was found)
-					results.push(...searchTokens(query, verifiedTokens))
+					results.push(...searchTokens(query, await tokens))
 					results.push(...(await anchoring))
 				}
 

@@ -4,6 +4,14 @@ import * as Hex from 'ox/Hex'
 import * as z from 'zod/mini'
 import { getApiUrl } from '#lib/env'
 import { normalizeSearchInput } from '#lib/tempo-address'
+import { zPositiveInt } from '#lib/zod'
+
+/** A registry, or one of its records when `recordId` is set. */
+const anchoringMatch = z.object({
+	type: z.literal('anchoring'),
+	registryId: zPositiveInt(),
+	recordId: z.optional(zPositiveInt()),
+})
 
 type SearchMatch =
 	| {
@@ -22,6 +30,7 @@ type SearchMatch =
 			type: 'transaction'
 			hash: Hex.Hex
 	  }
+	| z.infer<typeof anchoringMatch>
 
 function parseBlockInput(raw: string): string | null {
 	const trimmed = raw.trim()
@@ -75,6 +84,9 @@ function parseSearchMatch(result: unknown): SearchMatch | null {
 		}
 	}
 
+	const anchoring = z.safeParse(anchoringMatch, result)
+	if (anchoring.success) return anchoring.data
+
 	return null
 }
 
@@ -112,6 +124,16 @@ function getRedirectForSearchMatch(result: SearchMatch) {
 			to: '/token/$address',
 			params: { address: result.address },
 		} as const
+	}
+
+	if (result.type === 'anchoring') {
+		const registryId = String(result.registryId)
+		return result.recordId === undefined
+			? ({ to: '/anchoring/$registryId', params: { registryId } } as const)
+			: ({
+					to: '/anchoring/$registryId/$recordId',
+					params: { registryId, recordId: String(result.recordId) },
+				} as const)
 	}
 
 	return {

@@ -53,7 +53,13 @@ export function AnchoringSearch(props: { q: string }): React.JSX.Element {
 	}
 
 	return (
-		<div className="relative">
+		<search
+			className="relative block"
+			// Focus moving onto an option, as a screen reader's does, keeps the list.
+			onBlur={(event) => {
+				if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false)
+			}}
+		>
 			<form
 				className="flex items-center gap-2"
 				onSubmit={(event) => {
@@ -86,7 +92,6 @@ export function AnchoringSearch(props: { q: string }): React.JSX.Element {
 						setSelected(-1)
 					}}
 					onFocus={() => setOpen(true)}
-					onBlur={() => setOpen(false)}
 					onKeyDown={(event) => {
 						if (event.key === 'Escape') return setOpen(false)
 						if (!open || suggestions.length === 0) return
@@ -136,6 +141,10 @@ export function AnchoringSearch(props: { q: string }): React.JSX.Element {
 									event.preventDefault()
 									choose(index)
 								}}
+								// No mouse behind it (a screen reader or the keyboard); a mouse chose on mousedown.
+								onClick={(event) => {
+									if (event.detail === 0) choose(index)
+								}}
 								className={cx(
 									'flex w-full items-center justify-between gap-3 px-3 py-[6px] text-left press-down hover:bg-base-alt/25',
 									index === selected && 'bg-base-alt/25',
@@ -152,6 +161,6 @@ export function AnchoringSearch(props: { q: string }): React.JSX.Element {
 					)}
 				</div>
 			) : null}
-		</div>
+		</search>
 	)
 }
