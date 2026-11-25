@@ -40,9 +40,29 @@ export type HomeStats = {
 	transactions: ListedTransaction[]
 }
 
-/** The home page's tiles, charts and latest lists, read from the indexer. */
+/**
+ * `load`, whose last result answers every call for `ms`, and for up to a minute
+ * more while one call per `ms` reloads it. No call awaits another's load: the
+ * Workers runtime cancels as hung a request waiting on another request's fetch.
+ */
+function snapshotted<T>(load: () => Promise<T>, ms: number) {
+	let latest: { value: T; at: number } | undefined
+	let reloadAt = Number.NEGATIVE_INFINITY
+	return async (): Promise<T> => {
+		const now = Date.now()
+		const age = latest ? now - latest.at : Number.POSITIVE_INFINITY
+		if (latest && (age < ms || (age < 60_000 && now - reloadAt < ms)))
+			return latest.value
+		reloadAt = now
+		const value = await load()
+		latest = { value, at: Date.now() }
+		return value
+	}
+}
+
+/** The home page's tiles, charts and latest lists, read from the indexer once per 2 s for every viewer. */
 export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
-	async (): Promise<HomeStats> => {
+	snapshotted(async (): Promise<HomeStats> => {
 		const chainId = getChainId(getWagmiConfig())
 		const [[newest], head] = await Promise.all([
 			indexer(
@@ -51,6 +71,8 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 			),
 			getBatchedClient().getBlockNumber(),
 		])
+		// The window ends here, though tidx may index more blocks while the page is read.
+		const newestNum = Number(newest?.num ?? 0)
 		const newestAt = Number(newest?.at ?? 0)
 		const start = newestAt - HOME_MINUTES * 60
 		const minute = (column: string) =>
@@ -61,7 +83,8 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 				`SELECT ${minute('timestamp')} AS minute, count() AS blocks, sum(gas_used) AS gas,
 					sum(gas_limit) AS gas_limit, min(timestamp_ms) AS first_ms, max(timestamp_ms) AS last_ms,
 					min(num) AS first_num
-				FROM blocks WHERE toUnixTimestamp(timestamp) > ${start} GROUP BY minute`,
+				FROM blocks WHERE toUnixTimestamp(timestamp) > ${start} AND num <= ${newestNum}
+				GROUP BY minute`,
 			),
 			indexer(chainId, 'SELECT count() AS n FROM txs'),
 			// Refreshed on a schedule: `token_metadata` would aggregate every transfer.
@@ -75,7 +98,7 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 		])
 		// `txs` sorts by block, so a block bound spares a scan of every timestamp.
 		const firstInHour = Math.min(
-			Number(newest?.num ?? 0),
+			newestNum,
 			...blockMinutes.map((row) => Number(row.first_num)),
 		)
 		const lowest = Number(blocks.at(-1)?.num ?? 0)
@@ -83,7 +106,7 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 			indexer(
 				chainId,
 				`SELECT ${minute('block_timestamp')} AS minute, count() AS txs FROM txs
-				WHERE block_num >= ${firstInHour} GROUP BY minute`,
+				WHERE block_num >= ${firstInHour} AND block_num <= ${newestNum} GROUP BY minute`,
 			),
 			indexer(
 				chainId,
@@ -117,11 +140,10 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 			head: Number(head),
 			indexed: Number(newest?.n ?? 0),
 			indexStaleSince:
-				Number(head) > Number(newest?.num ?? 0) &&
-				Date.now() / 1000 - newestAt > 300
+				Number(head) > newestNum && Date.now() / 1000 - newestAt > 300
 					? newestAt
 					: null,
-			latestBlock: Number(newest?.num ?? 0),
+			latestBlock: newestNum,
 			blockTimeMs: inWindow > 1 ? spanMs / (inWindow - 1) : null,
 			tps: spanMs > 0 ? (sum(txPerMinute) * 1000) / spanMs : null,
 			gasUtilization:
@@ -140,5 +162,5 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 			})),
 			transactions: txs,
 		}
-	},
+	}, 2_000),
 )

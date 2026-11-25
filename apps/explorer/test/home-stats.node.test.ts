@@ -95,8 +95,16 @@ function answer(sql: string) {
 	throw new Error(`unexpected query: ${sql}`)
 }
 
+let clock = Date.now()
+/** Moves the clock past any use of the last snapshot. */
+function later() {
+	clock += 3_600_000
+	vi.setSystemTime(clock)
+}
+
 beforeEach(() => {
 	vi.resetAllMocks()
+	later()
 	indexer.mockImplementation(async (_chainId: number, sql: string) =>
 		answer(sql),
 	)
@@ -120,9 +128,16 @@ describe('home stats', () => {
 		expect(stats.txPerMinute).toHaveLength(HOME_MINUTES)
 		expect(stats.txPerMinute[59]).toBe(4)
 		expect(stats.gasPerMinute[0]).toBe(30)
+		// Both windows end at the newest block read first, block 100.
 		expect(indexer).toHaveBeenCalledWith(
 			31318,
-			expect.stringMatching(/AS txs FROM txs\s+WHERE block_num >= 40 /),
+			expect.stringMatching(
+				/AS txs FROM txs\s+WHERE block_num >= 40 AND block_num <= 100 /,
+			),
+		)
+		expect(indexer).toHaveBeenCalledWith(
+			31318,
+			expect.stringMatching(/FROM blocks WHERE .* AND num <= 100\s/),
 		)
 	})
 
@@ -130,7 +145,28 @@ describe('home stats', () => {
 		// The newest indexed block is block 100, at 10_000 s.
 		expect((await fetchHomeStats()).indexStaleSince).toBe(10_000)
 		getBlockNumber.mockResolvedValue(100n)
+		later()
 		expect((await fetchHomeStats()).indexStaleSince).toBeNull()
+	})
+
+	it('answers polls from the last snapshot, also while one poll reloads it', async () => {
+		const loads = () =>
+			indexer.mock.calls.filter(([, sql]) => sql.includes('max(num)')).length
+		const first = await fetchHomeStats()
+		vi.setSystemTime(clock + 1_999)
+		expect(await fetchHomeStats()).toBe(first)
+		expect(loads()).toBe(1)
+
+		// Two seconds old: one poll reloads it, and the next does not wait for that.
+		vi.setSystemTime(clock + 2_000)
+		const head = Promise.withResolvers<bigint>()
+		getBlockNumber.mockReturnValue(head.promise)
+		const reload = fetchHomeStats()
+		expect(await fetchHomeStats()).toBe(first)
+		expect(loads()).toBe(2)
+		head.resolve(101n)
+		expect(await reload).not.toBe(first)
+		expect(await fetchHomeStats()).toBe(await reload)
 	})
 
 	it('names calls, counts each block’s transactions and marks failures', async () => {
