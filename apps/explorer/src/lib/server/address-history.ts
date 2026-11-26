@@ -9,7 +9,7 @@ import {
 	type TransactionLike,
 } from '#lib/domain/known-events'
 import { type GetTip20MetadataFn, metadataForTokens } from '#lib/domain/tip20'
-import { distinct, indexer, sqlTime } from '#lib/server/dex-indexer'
+import { indexer, readDistinct, sqlTime } from '#lib/server/dex-indexer'
 import { getBatchedClient } from '#wagmi.config'
 
 export const [MAX_LIMIT, DEFAULT_LIMIT] = [10, 10]
@@ -202,18 +202,28 @@ export async function fetchAddressHistoryData(params: {
 		searchParams.sort === 'desc' &&
 		cachedTotal === undefined
 	const direction = searchParams.sort === 'asc' ? 'ASC' : 'DESC'
-	const paged = [...filters]
-	if (searchParams.cursor) {
-		const [block, index] = parseHistoryCursor(searchParams.cursor)
-		paged.push(
-			`(block_num, tx_idx) ${direction === 'ASC' ? '>' : '<'} (${block}, ${index})`,
-		)
-	}
-	const rowsPromise = indexer(
-		chainId,
-		`SELECT tx_hash, block_num, tx_idx, toUnixTimestamp(block_timestamp) AS timestamp
-		FROM receipts WHERE ${paged.join(' AND ')}
-		ORDER BY block_num ${direction}, tx_idx ${direction} LIMIT ${limit + 1}`,
+	const cursor = searchParams.cursor
+		? parseHistoryCursor(searchParams.cursor)
+		: undefined
+	// One row past the page says there is another.
+	const rowsPromise = readDistinct(
+		limit + 1,
+		(after) => {
+			const from = after ? [after.block_num, after.tx_idx] : cursor
+			const bound = from
+				? [
+						`(block_num, tx_idx) ${direction === 'ASC' ? '>' : '<'} (${from.join(', ')})`,
+					]
+				: []
+			return indexer(
+				chainId,
+				`SELECT tx_hash, block_num, tx_idx, toUnixTimestamp(block_timestamp) AS timestamp
+				FROM receipts WHERE ${[...filters, ...bound].join(' AND ')}
+				ORDER BY block_num ${direction}, tx_idx ${direction} LIMIT ${limit + 1}`,
+			)
+		},
+		'block_num',
+		'tx_idx',
 	)
 	const requestedTotal = includeTotal
 		? indexer(
@@ -226,11 +236,11 @@ export async function fetchAddressHistoryData(params: {
 		: undefined
 	if (requestedTotal) cacheHistoryTotal(totalKey, requestedTotal)
 
-	const [found, total] = await Promise.all([
+	const [rows, total] = await Promise.all([
 		rowsPromise,
 		cachedTotal ?? requestedTotal,
 	])
-	const page = distinct(found, 'block_num', 'tx_idx').slice(0, limit)
+	const page = rows.slice(0, limit)
 
 	const client = getBatchedClient()
 	const fetched = await Promise.all(
@@ -264,7 +274,7 @@ export async function fetchAddressHistoryData(params: {
 		transactions,
 		total: total ?? null,
 		limit,
-		nextCursor: found.length > limit && last ? historyCursor(last) : null,
+		nextCursor: rows.length > limit && last ? historyCursor(last) : null,
 		reverseCursor: page[0] ? historyCursor(page[0]) : null,
 		countCapped: false,
 		error: null,

@@ -54,6 +54,24 @@ export function distinct(rows: Row[], ...columns: string[]): Row[] {
 	})
 }
 
+/**
+ * The first `size` distinct rows of a query read `size` rows at a time, `read(after)` giving
+ * the batch past row `after`: a repeated row takes room in a batch, so this reads on.
+ */
+export async function readDistinct(
+	size: number,
+	read: (after?: Row) => Promise<Row[]>,
+	...columns: string[]
+): Promise<Row[]> {
+	let batch = await read()
+	let rows = distinct(batch, ...columns)
+	while (rows.length < size && batch.length === size) {
+		batch = await read(batch.at(-1))
+		rows = distinct([...rows, ...batch], ...columns)
+	}
+	return rows.slice(0, size)
+}
+
 export function list(values: Iterable<string>): string {
 	return [...values].map((value) => `'${value}'`).join(', ')
 }

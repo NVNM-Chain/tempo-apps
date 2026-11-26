@@ -10,7 +10,7 @@ import {
 	type AnchoringRecord,
 	type AnchoringRegistry,
 } from '#lib/domain/anchoring'
-import { distinct, indexer } from '#lib/server/dex-indexer'
+import { indexer, readDistinct } from '#lib/server/dex-indexer'
 import { zPositiveInt } from '#lib/zod'
 import { getBatchedClient } from '#wagmi.config'
 
@@ -227,14 +227,21 @@ async function fetchRegistryEvents(
 	const found = await Promise.allSettled(
 		registryEvents.map(async (event) => {
 			const withRecord = event.inputs.some((input) => input.name === 'recordId')
-			const rows = await indexer(
-				chainId,
-				`SELECT tx_hash, block_num, log_idx, caller${withRecord ? ', recordId' : ''}
-				FROM ${event.name} WHERE address = '${ANCHORING_ADDRESS}' AND registryId = ${registryId}
-				ORDER BY block_num DESC, log_idx DESC LIMIT ${limit}`,
-				formatAbiItem(event).replace(/^event /, ''),
+			const rows = await readDistinct(
+				limit,
+				(after) =>
+					indexer(
+						chainId,
+						`SELECT tx_hash, block_num, log_idx, caller${withRecord ? ', recordId' : ''}
+						FROM ${event.name} WHERE address = '${ANCHORING_ADDRESS}' AND registryId = ${registryId}
+						${after ? `AND (block_num, log_idx) < (${after.block_num}, ${after.log_idx})` : ''}
+						ORDER BY block_num DESC, log_idx DESC LIMIT ${limit}`,
+						formatAbiItem(event).replace(/^event /, ''),
+					),
+				'tx_hash',
+				'log_idx',
 			)
-			return distinct(rows, 'tx_hash', 'log_idx').map(
+			return rows.map(
 				(row): AnchoringEvent => ({
 					event: event.name,
 					recordId: withRecord ? Number(row.recordId) : undefined,
