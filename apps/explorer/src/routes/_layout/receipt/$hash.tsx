@@ -563,7 +563,7 @@ function buildStreamedPaymentEvent(
 		{ type: 'action', value: 'Streamed Payment' },
 	]
 
-	// Include total amount using pathUSD (6 decimals) if the fee token is available
+	// Include total amount using nUSD (6 decimals) if the fee token is available
 	if (TEMPO_FEE_TOKEN) {
 		parts.push({
 			type: 'amount',
@@ -572,7 +572,7 @@ function buildStreamedPaymentEvent(
 				decimals: 6,
 				currency: 'USD',
 				token: TEMPO_FEE_TOKEN,
-				symbol: 'pathUSD',
+				symbol: 'nUSD',
 			},
 		})
 	}

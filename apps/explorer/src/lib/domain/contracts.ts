@@ -20,9 +20,7 @@ import {
 	ANCHORING_ADDRESS,
 	ANCHORING_IMPLEMENTATION,
 } from '#lib/domain/anchoring.ts'
-import { nvnmTestnet } from '#lib/chains'
 import { isTip20Address } from '#lib/domain/tip20.ts'
-import { getTempoEnv } from '#lib/env'
 import { getWagmiConfig } from '#wagmi.config.ts'
 
 const validatorConfigV2Address =
@@ -181,73 +179,22 @@ export function isPrecompile(address: Address.Address): boolean {
 /**
  * Known TIP-20 Token contracts registry mapping addresses to their metadata and ABIs.
  */
-const tempoTip20ContractRegistry = new Map<Address.Address, ContractInfo>(<
+export const tip20ContractRegistry = new Map<Address.Address, ContractInfo>(<
 	const
 >[
-	// TIP-20 Tokens
+	// The one TIP-20 in every NVNM genesis.
 	[
 		'0x20c0000000000000000000000000000000000000',
 		{
-			name: 'pathUSD',
-			description: 'Non-transferable DEX accounting unit',
+			name: 'nUSD',
+			description: 'NVNM stablecoin',
 			abi: Abis.tip20,
 			code: '0xef',
 			category: 'token',
-			docsUrl: 'https://docs.tempo.xyz/documentation/protocol/exchange/pathUSD',
 			address: '0x20c0000000000000000000000000000000000000',
 		},
 	],
-	[
-		'0x20c0000000000000000000000000000000000001',
-		{
-			name: 'AlphaUSD',
-			code: '0xef',
-			description: 'TIP-20 stablecoin (AUSD)',
-			abi: Abis.tip20,
-			category: 'token',
-			address: '0x20c0000000000000000000000000000000000001',
-		},
-	],
-	[
-		'0x20c0000000000000000000000000000000000002',
-		{
-			name: 'BetaUSD',
-			code: '0xef',
-			description: 'TIP-20 stablecoin (BUSD)',
-			abi: Abis.tip20,
-			category: 'token',
-			address: '0x20c0000000000000000000000000000000000002',
-		},
-	],
-	[
-		'0x20c0000000000000000000000000000000000003',
-		{
-			name: 'ThetaUSD',
-			code: '0xef',
-			description: 'TIP-20 stablecoin (TUSD)',
-			abi: Abis.tip20,
-			category: 'token',
-			address: '0x20c0000000000000000000000000000000000003',
-		},
-	],
 ])
-
-export const tip20ContractRegistry =
-	getTempoEnv() === 'nvnm-testnet'
-		? new Map<Address.Address, ContractInfo>([
-				[
-					nvnmTestnet.feeToken,
-					{
-						name: 'nUSD',
-						description: 'NVNM Testnet stablecoin',
-						abi: Abis.tip20,
-						code: '0xef',
-						category: 'token',
-						address: nvnmTestnet.feeToken,
-					},
-				],
-			])
-		: tempoTip20ContractRegistry
 
 /**
  * Known System contracts registry mapping addresses to their metadata and ABIs.

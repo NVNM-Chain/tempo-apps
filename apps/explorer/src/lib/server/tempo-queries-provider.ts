@@ -1,5 +1,4 @@
 import { QB, Tidx } from 'tidx.ts'
-import { nvnmTestnet } from '#lib/chains'
 import { serverEnv } from './env'
 
 // Empty rather than tidx.ts's default, which is Tempo's own indexer.
@@ -28,9 +27,8 @@ export function tempoQueryBuilder(
 	return QB.from({
 		...tidx,
 		chainId,
-		// The testnet indexer's default engine does not respond to queries.
-		engine:
-			options.engine ?? (chainId === nvnmTestnet.id ? 'clickhouse' : undefined),
+		// As `indexer()` asks: testnet's default engine does not respond.
+		engine: options.engine ?? 'clickhouse',
 	})
 }
 
