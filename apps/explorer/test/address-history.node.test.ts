@@ -148,13 +148,22 @@ describe('fetchAddressHistoryData', () => {
 		expect(queries.at(-1)).toContain('(block_num, tx_idx) < (9, 1)')
 	})
 
-	it('lists a transaction tidx holds twice once, and still pages on', async () => {
-		const twice = { tx_hash: HASH, block_num: 9, tx_idx: 1, timestamp: 1 }
-		answer([
-			twice,
-			twice,
+	it.each([
+		['ends where the history does', [], null],
+		['pages on past the duplicate', [{ block_num: 7, tx_idx: 0 }], '[8,0]'],
+	])('lists a transaction tidx holds twice once and %s', async (_, after, next) => {
+		const [a, b] = [
+			{ tx_hash: HASH, block_num: 9, tx_idx: 1, timestamp: 1 },
 			{ tx_hash: HASH, block_num: 8, tx_idx: 0, timestamp: 1 },
-		])
+		]
+		// The first batch is [A, A, B]; what follows B is `after`.
+		indexer.mockImplementation(async (_chainId: number, sql: string) =>
+			sql.includes('count()')
+				? [{ n: 0 }]
+				: sql.includes('< (8, 0)')
+					? after.map((row) => ({ tx_hash: HASH, timestamp: 1, ...row }))
+					: [a, a, b],
+		)
 
 		const first = await fetchAddressHistoryData({
 			address: ADDRESS,
@@ -164,7 +173,7 @@ describe('fetchAddressHistoryData', () => {
 		})
 
 		expect(first.transactions).toHaveLength(2)
-		expect(first.nextCursor).toBe(btoa('[8,0]'))
+		expect(first.nextCursor).toBe(next && btoa(next))
 	})
 
 	it('fetches and reverses the oldest edge without counting', async () => {

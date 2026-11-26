@@ -355,15 +355,29 @@ describe('anchoring', () => {
 		expect(without?.records).toHaveLength(25)
 	})
 
-	it('lists an event tidx holds twice once', async () => {
-		const row = { tx_hash: '0x9', block_num: 5, log_idx: 0, caller: '0xc' }
-		indexer.mockImplementation(async (_chainId: number, sql: string) =>
-			sql.includes('FROM AddRegistry') ? [row, row] : [],
-		)
+	it('reads on past the events tidx holds twice', async () => {
+		// 30 AddRecord events, each stored twice and newest first, over an older AddRegistry.
+		const records = Array.from({ length: 30 }, (_, i) => ({
+			tx_hash: `0x${i}`,
+			block_num: 100 - i,
+			log_idx: 0,
+			caller: '0xc',
+			recordId: 30 - i,
+		})).flatMap((row) => [row, row])
+		indexer.mockImplementation(async (_chainId: number, sql: string) => {
+			if (sql.includes('FROM AddRegistry'))
+				return [{ tx_hash: '0x9', block_num: 5, log_idx: 0, caller: '0xc' }]
+			if (!sql.includes('FROM AddRecord')) return []
+			const bound = /\(block_num, log_idx\) < \((\d+), (\d+)\)/.exec(sql)
+			const after = bound ? Number(bound[1]) : Number.POSITIVE_INFINITY
+			return records.filter((row) => row.block_num < after).slice(0, 26)
+		})
 		const found = await fetchAnchoringRegistry({
 			data: { registryId: 1, page: 1 },
 		})
-		expect(found?.events).toHaveLength(1)
+		// One past a page of AddRecord alone, so the page says there are more.
+		expect(found?.events).toHaveLength(26)
+		expect(found?.events.every((e) => e.event === 'AddRecord')).toBe(true)
 	})
 
 	it('lists the events the indexer answered for when another times out', async () => {
