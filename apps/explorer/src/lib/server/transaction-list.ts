@@ -20,6 +20,12 @@ function method(input: string): string | null {
 	return getAbiItem({ abi: allAbis as Abi, selector })?.name ?? selector
 }
 
+/** How many transactions are indexed. A count stays fast with `FINAL`, so it needs no `distinct`. */
+export async function countTransactions(chainId: number): Promise<number> {
+	const [counted] = await indexer(chainId, 'SELECT count() AS n FROM txs FINAL')
+	return Number(counted?.n ?? 0)
+}
+
 /** Indexed transactions, newest first, with their method and whether they failed. */
 export async function readTransactions(
 	chainId: number,
