@@ -4,10 +4,9 @@ import type { Hex } from 'ox'
 import * as OxHex from 'ox/Hex'
 import { numberToHex } from 'viem'
 import * as z from 'zod/mini'
-import { nvnmDevnet } from '#lib/chains'
-import { serverEnv, tempoApiUrl } from '#lib/server/env'
 import { checkRateLimit } from '#lib/server/rate-limit'
 import { zAddress, zHash } from '#lib/zod'
+import { getTempoChain } from '#wagmi.config'
 
 export const MAX_SIMULATION_CALLDATA_BYTES = 64 * 1024
 const MAX_REQUEST_BYTES = MAX_SIMULATION_CALLDATA_BYTES * 2 + 16 * 1024
@@ -101,39 +100,15 @@ export type SerializedSimulationResult = {
 	}
 }
 
-/**
- * Tracing is the most expensive traffic the explorer sends, so it goes through
- * the authenticated Tempo API rather than the shared public proxy — the same
- * preference the RPC transport makes server-side (`wagmi.config.ts`).
- *
- * Without a key (local dev) or on chains the API does not front, fall back to
- * the public proxy.
- */
-function getRpcTarget(chainId: number): {
-	url: string
-	headers: Record<string, string>
-} {
-	const apiKey = serverEnv.TEMPO_API_KEY
-	if (apiKey)
-		return {
-			url: `${tempoApiUrl}/rpc/${chainId}`,
-			headers: { 'tempo-api-key': apiKey },
-		}
-	// No hosted RPC proxy fronts our chain — go straight to it. Tracing needs
-	// the debug namespace, which the public NVNM endpoint serves.
-	return { url: nvnmDevnet.rpcUrls.default.http[0], headers: {} }
-}
-
+/** Straight to the chain's RPC: tracing needs the debug namespace, which the public NVNM endpoint serves. */
 async function rpcRequest<T>(args: {
-	chainId: number
 	method: string
 	params: unknown[]
 	signal: AbortSignal
 }): Promise<T> {
-	const target = getRpcTarget(args.chainId)
-	const response = await fetch(target.url, {
+	const response = await fetch(getTempoChain().rpcUrls.default.http[0], {
 		method: 'POST',
-		headers: { 'content-type': 'application/json', ...target.headers },
+		headers: { 'content-type': 'application/json' },
 		body: JSON.stringify({
 			jsonrpc: '2.0',
 			id: 1,
@@ -206,7 +181,6 @@ async function traceCallManyContext(
 	if (input.block === 'latest') return { blockNumber: 'latest' }
 
 	const block = await rpcRequest<{ number?: Hex.Hex } | null>({
-		chainId: input.chainId,
 		method: 'eth_getBlockByHash',
 		params: [input.block, false],
 		signal,
@@ -234,7 +208,6 @@ async function tracePanel(
 			: { tracer, tracerConfig: { diffMode: true } }
 
 	const result = await rpcRequest<unknown[][]>({
-		chainId: input.chainId,
 		method: 'debug_traceCallMany',
 		params: [
 			[{ transactions: rpcCalls(input) }],
@@ -278,7 +251,6 @@ export async function fetchExecutionPanel(
 	}
 
 	const result = await rpcRequest<RpcBlockResult[]>({
-		chainId: input.chainId,
 		method: 'eth_simulateV1',
 		params: [
 			{

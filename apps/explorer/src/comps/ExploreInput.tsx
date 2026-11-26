@@ -1,4 +1,5 @@
 import { keepPreviousData, queryOptions, useQuery } from '@tanstack/react-query'
+import { useNavigate } from '@tanstack/react-router'
 import * as Address from 'ox/Address'
 import * as Hex from 'ox/Hex'
 import * as React from 'react'
@@ -12,6 +13,7 @@ import { getApiUrl } from '#lib/env.ts'
 import { normalizeSearchInput } from '#lib/tempo-address'
 import type {
 	AddressSearchResult,
+	AnchoringSearchResult,
 	BlockSearchResult,
 	SearchApiResponse,
 	SearchResult,
@@ -41,6 +43,8 @@ function parseBlockInput(raw: string): string | null {
 function getSearchResultKey(result: SearchResult): string {
 	if (result.type === 'block') return `block-${result.blockNumber}`
 	if (result.type === 'transaction') return `tx-${result.hash.toLowerCase()}`
+	if (result.type === 'anchoring')
+		return `anchoring-${result.registryId}-${result.recordId ?? ''}`
 	return `${result.type}-${result.address.toLowerCase()}`
 }
 
@@ -62,6 +66,14 @@ function isPersistedSearchResult(value: unknown): value is SearchResult {
 		Hex.validate(result.hash) &&
 		Hex.size(result.hash) === 32 &&
 		(result.timestamp === undefined || typeof result.timestamp === 'number')
+	)
+		return true
+
+	if (
+		result.type === 'anchoring' &&
+		Number.isSafeInteger(result.registryId) &&
+		(result.recordId === undefined || Number.isSafeInteger(result.recordId)) &&
+		typeof result.label === 'string'
 	)
 		return true
 
@@ -158,6 +170,7 @@ export function ExploreInput(props: ExploreInput.Props) {
 		tabIndex,
 		autoFocus,
 	} = props
+	const navigate = useNavigate()
 	const formRef = React.useRef<HTMLFormElement>(null)
 	const rootRef = React.useRef<HTMLDivElement>(null)
 	const resultsRef = React.useRef<HTMLDivElement>(null)
@@ -217,6 +230,7 @@ export function ExploreInput(props: ExploreInput.Props) {
 		const tokens: TokenSearchResult[] = []
 		const addresses: AddressSearchResult[] = []
 		const blocks: BlockSearchResult[] = []
+		const anchoring: AnchoringSearchResult[] = []
 
 		for (const suggestion of suggestions) {
 			if (suggestion.type === 'transaction')
@@ -227,6 +241,7 @@ export function ExploreInput(props: ExploreInput.Props) {
 			if (suggestion.type === 'token') tokens.push(suggestion)
 			else if (suggestion.type === 'address') addresses.push(suggestion)
 			else if (suggestion.type === 'block') blocks.push(suggestion)
+			else if (suggestion.type === 'anchoring') anchoring.push(suggestion)
 		}
 
 		const groups: ExploreInput.SuggestionGroup[] = []
@@ -243,6 +258,9 @@ export function ExploreInput(props: ExploreInput.Props) {
 
 		if (tokens.length > 0)
 			groups.push({ type: 'token', title: 'Tokens', items: tokens })
+
+		if (anchoring.length > 0)
+			groups.push({ type: 'anchoring', title: 'Anchoring', items: anchoring })
 
 		return groups
 	}, [query.length, recentSearches, suggestions])
@@ -384,8 +402,20 @@ export function ExploreInput(props: ExploreInput.Props) {
 				onActivate?.({ type: 'hash', value: result.hash })
 				return
 			}
+
+			if (result.type === 'anchoring') {
+				onChange?.(result.label)
+				const registryId = String(result.registryId)
+				if (result.recordId === undefined)
+					navigate({ to: '/anchoring/$registryId', params: { registryId } })
+				else
+					navigate({
+						to: '/anchoring/$registryId/$recordId',
+						params: { registryId, recordId: String(result.recordId) },
+					})
+			}
 		},
-		[onChange, onActivate, rememberSearch, closeResults],
+		[onChange, onActivate, rememberSearch, closeResults, navigate],
 	)
 
 	return (
@@ -585,15 +615,9 @@ export function ExploreInput(props: ExploreInput.Props) {
 									</div>
 									{group.items.map((item) => {
 										const flatIndex = flatSuggestions.indexOf(item)
-										const key =
-											item.type === 'transaction'
-												? `tx-${item.hash}`
-												: item.type === 'block'
-													? `block-${item.blockNumber}`
-													: `${item.type}-${item.address}`
 										return (
 											<ExploreInput.SuggestionItem
-												key={key}
+												key={getSearchResultKey(item)}
 												suggestion={item}
 												isSelected={flatIndex === selectedIndex}
 												onSelect={handleSelect}
@@ -634,7 +658,7 @@ export namespace ExploreInput {
 	}
 
 	export type SuggestionGroup = {
-		type: 'recent' | 'token' | 'address' | 'transaction' | 'block'
+		type: 'recent' | 'token' | 'address' | 'transaction' | 'block' | 'anchoring'
 		title: string
 		items: SearchResult[]
 	}
@@ -724,6 +748,18 @@ export namespace ExploreInput {
 								{suggestion.description}
 							</span>
 						)}
+					</>
+				)}
+				{suggestion.type === 'anchoring' && (
+					<>
+						<span className="text-[15px] text-base-content truncate min-w-0 flex-1">
+							{suggestion.label}
+						</span>
+						<span className="text-[12px] text-tertiary shrink-0 tabular-nums">
+							{suggestion.recordId === undefined
+								? `Registry #${suggestion.registryId}`
+								: `Record #${suggestion.recordId} · registry #${suggestion.registryId}`}
+						</span>
 					</>
 				)}
 				{suggestion.type === 'transaction' && (

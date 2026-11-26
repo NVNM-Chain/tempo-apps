@@ -35,7 +35,8 @@ export default defineConfig({
 		tsconfigPaths: true,
 	},
 	test: {
-		testTimeout: 10_000,
+		// A worker's first RPC call starts its own Tempo node, ~15 s on CI.
+		testTimeout: 30_000,
 		include: ['**/e2e.test.ts', '**/*.test.ts'],
 		globalSetup: [join(import.meta.dirname, './test/setup.global.ts')],
 	},

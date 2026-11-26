@@ -4,9 +4,8 @@ import { createPublicClient } from 'viem'
 import { tempoLocalnet } from 'viem/chains'
 import { tempoActions } from 'viem/tempo'
 import { loadBalance, rateLimit } from '@tempo/rpc-utils'
-import { nvnmDevnet } from './lib/chains'
+import { nvnmChainByEnv } from './lib/chains'
 import { getTempoEnv } from './lib/env'
-import { serverEnv, tempoApiUrl } from './lib/server/env'
 import {
 	cookieStorage,
 	cookieToInitialState,
@@ -21,12 +20,13 @@ export type WagmiConfig = ReturnType<typeof getWagmiConfig>
 let wagmiConfigSingleton: ReturnType<typeof createConfig> | null = null
 
 /**
- * This build serves exactly one chain. Kept behind createIsomorphicFn so the
- * call sites (and the client/server split) stay identical to upstream.
+ * The one chain this deployment serves, by its env. Kept behind
+ * createIsomorphicFn so the call sites (and the client/server split) stay
+ * identical to upstream.
  */
 export const getTempoChain = createIsomorphicFn()
-	.client(() => nvnmDevnet)
-	.server(() => nvnmDevnet)
+	.client(() => nvnmChainByEnv[getTempoEnv()])
+	.server(() => nvnmChainByEnv[getTempoEnv()])
 
 /**
  * Browser RPC target.
@@ -36,7 +36,7 @@ export const getTempoChain = createIsomorphicFn()
  * 404 — a page that is right on first paint and wrong a moment later.
  */
 function getRpcProxyUrl() {
-	return { http: nvnmDevnet.rpcUrls.default.http[0] }
+	return { http: getTempoChain().rpcUrls.default.http[0] }
 }
 
 const getFallbackUrls = createIsomorphicFn()
@@ -64,15 +64,6 @@ const getTempoTransport = createIsomorphicFn()
 		])
 	})
 	.server(() => {
-		const chain = getTempoChain()
-
-		// tapimo RPC passthrough, when an API key is configured.
-		const apiKey = serverEnv.TEMPO_API_KEY
-		if (apiKey)
-			return http(`${tempoApiUrl}/rpc/${chain.id}`, {
-				fetchOptions: { headers: { 'tempo-api-key': apiKey } },
-			})
-
 		const proxy = getRpcProxyUrl()
 		const fallbackUrls = getFallbackUrls()
 		return loadBalance([

@@ -176,6 +176,34 @@ describe('parseKnownEvents', () => {
 		expect(knownEvents[0]?.type).toBe('approval')
 	})
 
+	it('reads fees distributed to whoever claims them', () => {
+		const hash = `0x${'5'.repeat(64)}` as const
+		const logs = [
+			mockLog(
+				{
+					address: Addresses.feeManager,
+					topics: encodeEventTopics({
+						abi: Abis.feeManager,
+						eventName: 'FeesDistributed',
+						args: { validator: recipientAddress, token: userTokenAddress },
+					}) as [Hex.Hex, ...Hex.Hex[]],
+					data: encodeAbiParameters([{ type: 'uint256' }], [6_146n]),
+				},
+				hash,
+			),
+		]
+
+		const [event] = parseKnownEvents(mockReceipt(logs, accountAddress, hash), {
+			getTokenMetadata,
+		})
+
+		expect(event?.type).toBe('fees distributed')
+		expect(event?.parts.at(-1)).toEqual({
+			type: 'account',
+			value: recipientAddress,
+		})
+	})
+
 	it('labels Zone E deposits', () => {
 		const hash = `0x${'3'.repeat(64)}` as const
 		const amount = 500_000n

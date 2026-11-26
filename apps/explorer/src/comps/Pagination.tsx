@@ -207,6 +207,7 @@ export namespace Pagination {
 	const uncountable = new Set(['data'])
 	const irregulars: Record<string, string> = {
 		txns: 'txn',
+		registries: 'registry',
 	}
 
 	export function pluralize(count: number | string, label: string) {

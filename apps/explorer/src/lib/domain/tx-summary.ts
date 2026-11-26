@@ -299,6 +299,8 @@ function formatKnownEventPart(part: KnownEventPart): string {
 			return part.value
 		case 'amount':
 			return formatTokenAmount(part.value.value, part.value)
+		case 'anchoring':
+			return part.value.recordId ?? part.value.registryId
 		case 'contractCall':
 			return `call ${HexFormatter.truncate(part.value.address)}`
 		case 'duration':

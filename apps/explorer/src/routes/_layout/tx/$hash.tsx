@@ -8,12 +8,12 @@ import {
 	useNavigate,
 } from '@tanstack/react-router'
 import type { Address as OxAddress, Hex } from 'ox'
+import type { SignatureEnvelope } from 'ox/tempo'
 import * as OxAddressUtil from 'ox/Address'
 import * as Json from 'ox/Json'
 import * as Value from 'ox/Value'
 import * as React from 'react'
 import type { Log, TransactionReceipt } from 'viem'
-import { useChains } from 'wagmi'
 import * as z from 'zod/mini'
 import { Address } from '#comps/Address'
 import { BreadcrumbsSlot } from '#comps/Breadcrumbs'
@@ -43,7 +43,6 @@ import {
 } from '#lib/domain/tx-event-groups'
 import type { FeeBreakdownItem } from '#lib/domain/receipt'
 import { isTip20Address } from '#lib/domain/tip20'
-import { activitiesToKnownEvents } from '#lib/domain/transaction-activities'
 import { PriceFormatter } from '#lib/formatting'
 import { useKeyboardShortcut, useMediaQuery } from '#lib/hooks'
 import { buildOgImageUrl, buildTxDescription, OG_BASE_URL } from '#lib/og'
@@ -61,9 +60,9 @@ import {
 	traceQueryOptions,
 } from '#lib/queries/trace'
 import { withLoaderTiming } from '#lib/profiling'
+import { signatureTypeLabel } from '#lib/domain/signature-type'
 import { zHash } from '#lib/zod'
 import { fetchBalanceChanges } from '#routes/api/tx/balance-changes/$hash'
-import { fetchTransactionActivities } from '#lib/server/transaction-activities'
 import ChevronDownIcon from '~icons/lucide/chevron-down'
 
 const defaultSearchValues = {
@@ -110,22 +109,19 @@ export const Route = createFileRoute('/_layout/tx/$hash')({
 			try {
 				const offset = (page - 1) * LIMIT
 
-				const [txData, balanceChangesData, traceData, activities] =
-					await Promise.all([
-						context.queryClient.ensureQueryData(txQueryOptions({ hash })),
-						fetchBalanceChanges({ hash, limit: LIMIT, offset }).catch(() => ({
-							changes: [],
-							tokenMetadata: {},
-							total: 0,
-						})),
-						context.queryClient
-							.ensureQueryData(traceQueryOptions({ hash }))
-							.catch(() => ({ trace: null, prestate: null })),
-						fetchTransactionActivities({ data: { hash } }),
-					])
+				const [txData, balanceChangesData, traceData] = await Promise.all([
+					context.queryClient.ensureQueryData(txQueryOptions({ hash })),
+					fetchBalanceChanges({ hash, limit: LIMIT, offset }).catch(() => ({
+						changes: [],
+						tokenMetadata: {},
+						total: 0,
+					})),
+					context.queryClient
+						.ensureQueryData(traceQueryOptions({ hash }))
+						.catch(() => ({ trace: null, prestate: null })),
+				])
 
-				const activityEvents = activitiesToKnownEvents(activities)
-				return { ...txData, balanceChangesData, traceData, activityEvents }
+				return { ...txData, balanceChangesData, traceData }
 			} catch (error) {
 				console.error(error)
 				throw notFound({
@@ -146,10 +142,7 @@ export const Route = createFileRoute('/_layout/tx/$hash')({
 			? buildTxDescription({
 					timestamp: Number(loaderData.block.timestamp) * 1000,
 					from: loaderData.receipt.from,
-					events:
-						loaderData.activityEvents.length > 0
-							? loaderData.activityEvents
-							: (loaderData.knownEvents ?? []),
+					events: loaderData.knownEvents ?? [],
 				})
 			: 'View transaction details on Tempo Explorer.'
 
@@ -176,7 +169,6 @@ function RouteComponent() {
 	const { tab, page } = Route.useSearch()
 	const {
 		balanceChangesData,
-		activityEvents,
 		traceData,
 		block,
 		feeBreakdown,
@@ -198,8 +190,6 @@ function RouteComponent() {
 			!event.meta?.to ||
 			!OxAddressUtil.isEqual(event.meta.to, RECEIVE_POLICY_GUARD),
 	)
-	const descriptionEvents =
-		activityEvents.length > 0 ? activityEvents : displayKnownEvents
 
 	useKeyboardShortcut({
 		t: () =>
@@ -223,18 +213,11 @@ function RouteComponent() {
 			buildTxSummary({
 				receipt,
 				transaction,
-				knownEvents: activityEvents.length > 0 ? activityEvents : knownEvents,
+				knownEvents,
 				trace: traceData.trace,
 				balanceChangesData,
 			}),
-		[
-			receipt,
-			knownEvents,
-			activityEvents,
-			traceData.trace,
-			balanceChangesData,
-			transaction,
-		],
+		[receipt, knownEvents, traceData.trace, balanceChangesData, transaction],
 	)
 
 	const setActiveSection = (newIndex: number) => {
@@ -258,7 +241,7 @@ function RouteComponent() {
 				receipt={receipt}
 				transaction={transaction}
 				block={block}
-				knownEvents={descriptionEvents}
+				knownEvents={displayKnownEvents}
 				feeBreakdown={feeBreakdown}
 				balanceChangesData={balanceChangesData}
 			/>
@@ -368,9 +351,6 @@ function OverviewSection(props: {
 		balanceChangesData,
 	} = props
 
-	const [chain] = useChains()
-	const { decimals, symbol } = chain.nativeCurrency
-
 	const gasUsed = receipt.gasUsed
 	const gasLimit = transaction.gas
 	const gasUsedPercentage =
@@ -385,6 +365,11 @@ function OverviewSection(props: {
 			? (transaction.nonceKey as bigint | undefined)
 			: undefined
 	const isExpiringNonce = nonceKey === 2n ** 256n - 1n
+	const signatureType = signatureTypeLabel(
+		'signature' in transaction
+			? (transaction.signature as SignatureEnvelope.SignatureEnvelope)
+			: undefined,
+	)
 	const positionInBlock = receipt.transactionIndex
 	const input = transaction.input
 	const feePayer =
@@ -445,11 +430,9 @@ function OverviewSection(props: {
 					</div>
 				) : (
 					<span className="text-primary">
-						{Value.format(
+						{PriceFormatter.formatGasCost(
 							receipt.effectiveGasPrice * receipt.gasUsed,
-							decimals,
-						)}{' '}
-						{symbol}
+						)}
 					</span>
 				)}
 			</InfoRow>
@@ -467,26 +450,39 @@ function OverviewSection(props: {
 				</span>
 			</InfoRow>
 			<InfoRow label="Gas Price">
-				<span className="text-primary">{gasPrice}</span>
+				<span className="text-primary">
+					{PriceFormatter.formatGasPrice(gasPrice)}
+				</span>
 			</InfoRow>
 			{baseFee !== undefined && baseFee !== null && (
 				<InfoRow label="Base Fee">
-					<span className="text-primary">{baseFee}</span>
+					<span className="text-primary">
+						{PriceFormatter.formatGasPrice(baseFee)}
+					</span>
 				</InfoRow>
 			)}
 			{maxFee !== undefined && (
 				<InfoRow label="Max Fee">
-					<span className="text-primary">{maxFee}</span>
+					<span className="text-primary">
+						{PriceFormatter.formatGasPrice(maxFee)}
+					</span>
 				</InfoRow>
 			)}
 			{maxPriorityFee !== undefined && (
 				<InfoRow label="Max Priority Fee">
-					<span className="text-primary">{maxPriorityFee}</span>
+					<span className="text-primary">
+						{PriceFormatter.formatGasPrice(maxPriorityFee)}
+					</span>
 				</InfoRow>
 			)}
 			<InfoRow label="Transaction Type">
 				<span className="text-primary">{receipt.type}</span>
 			</InfoRow>
+			{signatureType && (
+				<InfoRow label="Signature Type">
+					<span className="text-primary">{signatureType}</span>
+				</InfoRow>
+			)}
 			{isExpiringNonce ? (
 				<>
 					<InfoRow label="Nonce Key">
@@ -843,10 +839,22 @@ function EventGroupCell(props: {
 	return (
 		<div className="flex flex-col gap-[4px] w-full">
 			{knownEvent ? (
-				<TxEventDescription
-					event={knownEvent}
-					className="flex flex-row items-center gap-[6px] leading-[18px]"
-				/>
+				<>
+					<TxEventDescription
+						event={knownEvent}
+						className="flex flex-row items-center gap-[6px] leading-[18px]"
+					/>
+					{Array.isArray(knownEvent.note) && (
+						<div className="flex flex-wrap gap-x-[12px] text-[12px]">
+							{knownEvent.note.map(([label, part]) => (
+								<span key={label} className="flex items-center gap-[4px]">
+									<span className="text-tertiary">{label}:</span>
+									<TxEventDescription.Part part={part} />
+								</span>
+							))}
+						</div>
+					)}
+				</>
 			) : (
 				<span className="text-primary">
 					{logs[0].topics[0] ? (

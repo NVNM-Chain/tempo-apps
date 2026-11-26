@@ -128,7 +128,7 @@ export namespace TxRawTransaction {
 	const linkableFields: Record<string, (value: string) => string> = {
 		blockNumber: (v) => `/block/${v}`,
 		blockHash: (v) => `/block/${v}`,
-		hash: (v) => `/receipt/${v}`,
+		hash: (v) => `/tx/${v}`,
 		from: (v) => `/address/${v}`,
 		to: (v) => `/address/${v}`,
 		contractAddress: (v) => `/address/${v}`,

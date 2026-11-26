@@ -126,7 +126,8 @@ jobs:
           body-includes: "Bundle Size Report"
 
       - name: Post or update PR comment
-        if: github.event_name == 'pull_request'
+        # A fork's token is read-only; the report stays in the job log.
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         uses: peter-evans/create-or-update-comment@e8674b075228eee787fea43ef493e45ece1004c9
         with:
           comment-id: ${{ steps.find-comment.outputs.comment-id }}

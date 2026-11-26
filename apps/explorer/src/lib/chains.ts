@@ -1,5 +1,6 @@
 import { defineChain } from 'viem'
 import { tempoDevnet as tempoDevnet_ } from 'viem/chains'
+import type { TempoEnv } from './env'
 
 /**
  * nvnm-tempo-devnet-1 — MANTRA's fork of Tempo v1.12.0. EVM chain id 787222.
@@ -29,11 +30,24 @@ export const nvnmDevnet = defineChain({
 	testnet: true,
 })
 
-/**
- * Every chain this explorer serves.
- *
- * Tempo's own mainnet/testnet/devnet/nextfork are deliberately absent: this
- * build is for NVNM chains only, and the hosted api.tempo.xyz does not serve
- * chain 787222 anyway.
- */
-export const nvnmChains = [nvnmDevnet] as const
+/** nvnm-mainnet, EVM chain id 7872; spread from `tempoDevnet_` as {@link nvnmDevnet} is. */
+export const nvnmMainnet = defineChain({
+	...tempoDevnet_,
+	id: 7872,
+	name: 'NVNM Mainnet',
+	rpcUrls: {
+		default: {
+			http: ['https://rpc.nvnm.mainnet.nvnmchain.io'],
+			webSocket: ['wss://rpc.nvnm.mainnet.nvnmchain.io'],
+		},
+	},
+	// nvnm-mainnet's genesis holds this one TIP-20.
+	feeToken: '0x20c0000000000000000000000000000000000000',
+	testnet: false,
+})
+
+/** The chain each deployment serves. */
+export const nvnmChainByEnv = {
+	nvnm: nvnmDevnet,
+	'nvnm-mainnet': nvnmMainnet,
+} as const satisfies Record<TempoEnv, unknown>

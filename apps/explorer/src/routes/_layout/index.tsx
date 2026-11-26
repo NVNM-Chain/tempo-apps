@@ -1,10 +1,14 @@
+import { useQuery } from '@tanstack/react-query'
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import type { Address, Hex } from 'ox'
 import * as React from 'react'
 import * as z from 'zod/mini'
 import { ExploreInput } from '#comps/ExploreInput'
+import { HomeDashboard } from '#comps/HomeDashboard'
 import { cx } from '#lib/css'
 import { getTempoEnv } from '#lib/env'
+import { homeStatsQueryOptions } from '#lib/queries'
+import AnchorIcon from '~icons/lucide/anchor'
 import BoxIcon from '~icons/lucide/box'
 import CoinsIcon from '~icons/lucide/coins'
 import FileIcon from '~icons/lucide/file'
@@ -37,6 +41,9 @@ export const Route = createFileRoute('/_layout/')({
 	validateSearch: z.object({
 		q: z.optional(z.coerce.string()),
 	}).parse,
+	// Without an indexer the page is the search box alone.
+	loader: ({ context }) =>
+		context.queryClient.prefetchQuery(homeStatsQueryOptions()),
 })
 
 function Component() {
@@ -44,6 +51,7 @@ function Component() {
 	const { q } = Route.useSearch()
 	const query = q?.trim() ?? ''
 	const [inputValue, setInputValue] = React.useState(query)
+	const { data: stats } = useQuery(homeStatsQueryOptions())
 
 	React.useEffect(() => {
 		setInputValue(query)
@@ -51,7 +59,12 @@ function Component() {
 
 	return (
 		<div className="flex flex-1 w-full flex-col text-[16px]">
-			<div className="flex min-h-[42svh] flex-col justify-end">
+			<div
+				className={cx(
+					'flex flex-col justify-end',
+					stats ? 'min-h-[18svh]' : 'min-h-[42svh]',
+				)}
+			>
 				<div className="flex justify-center select-none [@media(max-height:360px)]:hidden">
 					<LandingWords />
 				</div>
@@ -75,7 +88,7 @@ function Component() {
 							}
 							if (data.type === 'hash') {
 								navigate({
-									to: '/receipt/$hash',
+									to: '/tx/$hash',
 									params: { hash: data.value },
 								})
 								return
@@ -98,6 +111,7 @@ function Component() {
 					/>
 				</div>
 				<SpotlightLinks />
+				{stats && <HomeDashboard stats={stats} />}
 			</div>
 		</div>
 	)
@@ -148,6 +162,12 @@ function SpotlightLinks() {
 					icon={<CoinsIcon className="size-[14px] text-accent" />}
 				>
 					Tokens
+				</SpotlightPill>
+				<SpotlightPill
+					to="/anchoring"
+					icon={<AnchorIcon className="size-[14px] text-accent" />}
+				>
+					Anchoring
 				</SpotlightPill>
 			</div>
 		</section>

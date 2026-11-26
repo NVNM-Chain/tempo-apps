@@ -36,6 +36,14 @@ export function Footer(): React.JSX.Element {
 					>
 						Feedback
 					</Footer.Link>
+					{__BUILD_COMMIT__ && (
+						<Footer.Link
+							to={`https://github.com/NVNM-Chain/tempo-apps/commit/${__BUILD_COMMIT__}`}
+							external
+						>
+							{__BUILD_COMMIT__.slice(0, 7)}
+						</Footer.Link>
+					)}
 				</ul>
 			</div>
 		</footer>

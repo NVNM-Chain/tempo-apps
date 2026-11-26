@@ -1,11 +1,13 @@
 import { createServerFn } from '@tanstack/react-start'
-import { type InferResponseType, parseResponse } from 'hono/client'
 import type { Address } from 'ox'
 import { VirtualAddress } from 'ox/tempo'
+import { pad, toEventSelector } from 'viem'
+import { Addresses } from 'viem/tempo'
 import { getCode } from 'viem/actions'
 import { type AccountType, getAccountType } from '#lib/account'
+import { TOKEN_CREATED_EVENT } from '#lib/abis'
 import { isTip20Address } from '#lib/domain/tip20'
-import { api } from '#lib/server/tempo-api'
+import { indexer } from '#lib/server/dex-indexer'
 import {
 	fetchTokenTransferBoundaries,
 	fetchVirtualAddressTransferStats,
@@ -14,30 +16,35 @@ import { parseTimestamp } from '#lib/timestamp'
 import { zAddress } from '#lib/zod'
 import { getBatchedClient, getTempoChain } from '#wagmi.config.ts'
 
-/**
- * Token header stats: exact `holderCount` and the `TokenCreated` timestamp.
- * Transfer boundaries stay on the SQL lane (`fetchTokenTransferBoundaries`) —
- * the API's `include=transferStats` aggregates are silently omitted upstream
- * for the largest tokens.
- */
+/** A token's holder count and the time the factory created it; a genesis token has none. */
 export async function fetchTokenHeaderStats(
 	chainId: number,
 	token: Address.Address,
-): Promise<
-	InferResponseType<(typeof api.v1.tokens)[':token']['$get'], 200> | undefined
-> {
-	return parseResponse(
-		api.v1.tokens[':token'].$get({
-			param: { token },
-			query: {
-				chainId: String(chainId),
-				include: 'createdAt,holderCount',
-			},
+): Promise<{ holderCount?: number; createdAt?: number } | undefined> {
+	const address = token.toLowerCase()
+	return Promise.all([
+		indexer(
+			chainId,
+			`SELECT holder_count FROM token_holder_counts WHERE token = '${address}'`,
+		),
+		indexer(
+			chainId,
+			`SELECT toUnixTimestamp(block_timestamp) AS at FROM logs
+			WHERE address = '${Addresses.tip20Factory.toLowerCase()}'
+				AND topic0 = '${toEventSelector(TOKEN_CREATED_EVENT)}'
+				AND topic1 = '${pad(address as Address.Address)}'
+			LIMIT 1`,
+		),
+	]).then(
+		([[counted], [created]]) => ({
+			holderCount: counted ? Number(counted.holder_count) : undefined,
+			createdAt: created ? Number(created.at) : undefined,
 		}),
-	).catch((error) => {
-		console.error(`Failed to fetch token header stats for ${token}:`, error)
-		return undefined
-	})
+		(error) => {
+			console.error(`Failed to fetch token header stats for ${token}:`, error)
+			return undefined
+		},
+	)
 }
 
 type AddressTxAggregate = {
@@ -77,43 +84,38 @@ export function buildAddressTxMetadata(aggregate: AddressTxAggregate): {
 	}
 }
 
-/** Address activity boundaries and count from structured Tempo API pages. */
+/**
+ * Address activity boundaries and count, from tidx's ClickHouse: its Postgres
+ * times out counting a busy address's transactions.
+ */
 export async function fetchAddressTxMetadata(
 	chainId: number,
 	address: Address.Address,
 ): Promise<AddressTxAggregate> {
-	const [oldestPage, latestPage] = await Promise.all([
-		parseResponse(
-			api.v1.transactions.$get({
-				query: {
-					address,
-					chainId: String(chainId),
-					include: 'totalCount',
-					limit: '5',
-					order: 'asc',
-				},
-			}),
+	const account = address.toLowerCase()
+	const involved = `("from" = '${account}' OR "to" = '${account}')`
+	const [[stats], [oldest]] = await Promise.all([
+		indexer(
+			chainId,
+			`SELECT count() AS n, toUnixTimestamp(min(block_timestamp)) AS first_at,
+				toUnixTimestamp(max(block_timestamp)) AS last_at
+			FROM receipts WHERE ${involved}`,
 		),
-		parseResponse(
-			api.v1.transactions.$get({
-				query: {
-					address,
-					chainId: String(chainId),
-					limit: '5',
-					order: 'desc',
-				},
-			}),
+		indexer(
+			chainId,
+			`SELECT tx_hash, "from" FROM receipts WHERE ${involved}
+			ORDER BY block_num, tx_idx LIMIT 1`,
 		),
 	])
-	const oldest = oldestPage.data[0]
-	const latest = latestPage.data[0]
+	const count = Number(stats?.n ?? 0)
 
 	return {
-		count: oldestPage.meta?.totalCount,
-		latestTxsBlockTimestamp: latest?.timestamp,
-		oldestTxsBlockTimestamp: oldest?.timestamp,
-		oldestTxHash: oldest?.hash,
-		oldestTxFrom: oldest?.sender,
+		count,
+		// An empty aggregate answers the epoch, not null.
+		latestTxsBlockTimestamp: count ? stats?.last_at : undefined,
+		oldestTxsBlockTimestamp: count ? stats?.first_at : undefined,
+		oldestTxHash: oldest && String(oldest.tx_hash),
+		oldestTxFrom: oldest && String(oldest.from),
 	}
 }
 
@@ -224,8 +226,6 @@ async function loadAddressMetadata(
 			}),
 		}
 	} else {
-		// Structured Tempo API pages provide the first and latest indexed activity
-		// without the historical RPC binary search previously used for contracts.
 		const [bytecode, stats] = await Promise.all([
 			bytecodePromise,
 			fetchAddressTxMetadata(chainId, address),

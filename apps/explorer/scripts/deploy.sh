@@ -29,12 +29,12 @@ while (($#)); do
 done
 
 if [[ -z "$env_name" ]]; then
-	echo "Deploy requires --env nvnm" >&2
+	echo "Deploy requires --env nvnm|nvnm-mainnet" >&2
 	exit 1
 fi
 
 case "$env_name" in
-	nvnm) ;;
+	nvnm | nvnm-mainnet) ;;
 	*)
 		echo "Unsupported env: $env_name" >&2
 		exit 1
