@@ -1,7 +1,7 @@
 import type { Abi } from 'viem'
 import { allAbis } from '#lib/abis'
 import { getAbiItem } from '#lib/domain/contracts'
-import { indexer, list } from '#lib/server/dex-indexer'
+import { distinct, indexer, list } from '#lib/server/dex-indexer'
 
 export type ListedTransaction = {
 	hash: `0x${string}`
@@ -26,10 +26,13 @@ export async function readTransactions(
 	limit: number,
 	offset = 0,
 ): Promise<ListedTransaction[]> {
-	const rows = await indexer(
-		chainId,
-		`SELECT hash, block_num, toUnixTimestamp(block_timestamp) AS at, "from", "to", input FROM txs
-		ORDER BY block_num DESC, idx DESC LIMIT ${limit} OFFSET ${offset}`,
+	const rows = distinct(
+		await indexer(
+			chainId,
+			`SELECT hash, block_num, toUnixTimestamp(block_timestamp) AS at, "from", "to", input FROM txs
+			ORDER BY block_num DESC, idx DESC LIMIT ${limit} OFFSET ${offset}`,
+		),
+		'hash',
 	)
 	const receipts = rows.length
 		? await indexer(

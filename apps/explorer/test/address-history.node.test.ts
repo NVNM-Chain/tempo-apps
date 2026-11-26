@@ -148,6 +148,25 @@ describe('fetchAddressHistoryData', () => {
 		expect(queries.at(-1)).toContain('(block_num, tx_idx) < (9, 1)')
 	})
 
+	it('lists a transaction tidx holds twice once, and still pages on', async () => {
+		const twice = { tx_hash: HASH, block_num: 9, tx_idx: 1, timestamp: 1 }
+		answer([
+			twice,
+			twice,
+			{ tx_hash: HASH, block_num: 8, tx_idx: 0, timestamp: 1 },
+		])
+
+		const first = await fetchAddressHistoryData({
+			address: ADDRESS,
+			chainId: 4217,
+			includeKnownEvents: false,
+			searchParams: { include: 'all', limit: 2, sort: 'desc' },
+		})
+
+		expect(first.transactions).toHaveLength(2)
+		expect(first.nextCursor).toBe(btoa('[8,0]'))
+	})
+
 	it('fetches and reverses the oldest edge without counting', async () => {
 		const olderHash = `0x${'1'.repeat(64)}`
 		const oldestHash = `0x${'2'.repeat(64)}`

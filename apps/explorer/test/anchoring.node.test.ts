@@ -36,7 +36,10 @@ vi.mock('#wagmi.config', () => ({
 		request,
 	}),
 }))
-vi.mock('#lib/server/dex-indexer', () => ({ indexer }))
+vi.mock('#lib/server/dex-indexer', async (importOriginal) => ({
+	...(await importOriginal<typeof import('#lib/server/dex-indexer')>()),
+	indexer,
+}))
 
 /** `_recordCount[1]` and `[2]`: `keccak256(abi.encode(id, 5))`, worked out apart from the code. */
 const RECORD_COUNTS: Record<string, bigint> = {
@@ -350,6 +353,17 @@ describe('anchoring', () => {
 		expect(without?.events).toEqual([])
 		expect(without?.unlisted).toHaveLength(5)
 		expect(without?.records).toHaveLength(25)
+	})
+
+	it('lists an event tidx holds twice once', async () => {
+		const row = { tx_hash: '0x9', block_num: 5, log_idx: 0, caller: '0xc' }
+		indexer.mockImplementation(async (_chainId: number, sql: string) =>
+			sql.includes('FROM AddRegistry') ? [row, row] : [],
+		)
+		const found = await fetchAnchoringRegistry({
+			data: { registryId: 1, page: 1 },
+		})
+		expect(found?.events).toHaveLength(1)
 	})
 
 	it('lists the events the indexer answered for when another times out', async () => {

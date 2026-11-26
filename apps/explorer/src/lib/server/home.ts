@@ -90,7 +90,8 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 				FROM blocks WHERE toUnixTimestamp(timestamp) > ${start} AND num <= ${newestNum}
 				GROUP BY minute`,
 			),
-			indexer(chainId, 'SELECT count() AS n FROM txs'),
+			// Counts stay fast with `FINAL`, so they need no `distinct`.
+			indexer(chainId, 'SELECT count() AS n FROM txs FINAL'),
 			// Refreshed on a schedule: `token_metadata` would aggregate every transfer.
 			indexer(chainId, 'SELECT count() AS n FROM token_holder_counts'),
 			indexer(
@@ -109,12 +110,12 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 		const [txMinutes, counts, codes] = await Promise.all([
 			indexer(
 				chainId,
-				`SELECT ${minute('block_timestamp')} AS minute, count() AS txs FROM txs
+				`SELECT ${minute('block_timestamp')} AS minute, count() AS txs FROM txs FINAL
 				WHERE block_num >= ${firstInHour} AND block_num <= ${newestNum} GROUP BY minute`,
 			),
 			indexer(
 				chainId,
-				`SELECT block_num, count() AS n FROM txs WHERE block_num >= ${lowest} GROUP BY block_num`,
+				`SELECT block_num, count() AS n FROM txs FINAL WHERE block_num >= ${lowest} GROUP BY block_num`,
 			),
 			// A recipient's code, as the address page reads it to offer a contract tab.
 			Promise.all(

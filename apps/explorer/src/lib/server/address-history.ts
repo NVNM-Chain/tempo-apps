@@ -9,7 +9,7 @@ import {
 	type TransactionLike,
 } from '#lib/domain/known-events'
 import { type GetTip20MetadataFn, metadataForTokens } from '#lib/domain/tip20'
-import { indexer, sqlTime } from '#lib/server/dex-indexer'
+import { distinct, indexer, sqlTime } from '#lib/server/dex-indexer'
 import { getBatchedClient } from '#wagmi.config'
 
 export const [MAX_LIMIT, DEFAULT_LIMIT] = [10, 10]
@@ -226,11 +226,11 @@ export async function fetchAddressHistoryData(params: {
 		: undefined
 	if (requestedTotal) cacheHistoryTotal(totalKey, requestedTotal)
 
-	const [rows, total] = await Promise.all([
+	const [found, total] = await Promise.all([
 		rowsPromise,
 		cachedTotal ?? requestedTotal,
 	])
-	const page = rows.slice(0, limit)
+	const page = distinct(found, 'block_num', 'tx_idx').slice(0, limit)
 
 	const client = getBatchedClient()
 	const fetched = await Promise.all(
@@ -264,7 +264,7 @@ export async function fetchAddressHistoryData(params: {
 		transactions,
 		total: total ?? null,
 		limit,
-		nextCursor: rows.length > limit && last ? historyCursor(last) : null,
+		nextCursor: found.length > limit && last ? historyCursor(last) : null,
 		reverseCursor: page[0] ? historyCursor(page[0]) : null,
 		countCapped: false,
 		error: null,

@@ -40,6 +40,20 @@ export function sqlTime(ms: number): string {
 	return new Date(ms).toISOString().replace('T', ' ').slice(0, 19)
 }
 
+/**
+ * `rows` with one row per value of `columns`: a tidx restart can insert a row twice, and
+ * `FINAL`, which would merge them, times out on the busiest addresses and tokens.
+ */
+export function distinct(rows: Row[], ...columns: string[]): Row[] {
+	const seen = new Set<string>()
+	return rows.filter((row) => {
+		const key = columns.map((column) => String(row[column])).join(':')
+		if (seen.has(key)) return false
+		seen.add(key)
+		return true
+	})
+}
+
 export function list(values: Iterable<string>): string {
 	return [...values].map((value) => `'${value}'`).join(', ')
 }

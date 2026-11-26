@@ -10,7 +10,7 @@ import {
 	type AnchoringRecord,
 	type AnchoringRegistry,
 } from '#lib/domain/anchoring'
-import { indexer } from '#lib/server/dex-indexer'
+import { distinct, indexer } from '#lib/server/dex-indexer'
 import { zPositiveInt } from '#lib/zod'
 import { getBatchedClient } from '#wagmi.config'
 
@@ -234,7 +234,7 @@ async function fetchRegistryEvents(
 				ORDER BY block_num DESC, log_idx DESC LIMIT ${limit}`,
 				formatAbiItem(event).replace(/^event /, ''),
 			)
-			return rows.map(
+			return distinct(rows, 'tx_hash', 'log_idx').map(
 				(row): AnchoringEvent => ({
 					event: event.name,
 					recordId: withRecord ? Number(row.recordId) : undefined,
