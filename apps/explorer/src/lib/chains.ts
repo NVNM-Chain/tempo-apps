@@ -84,3 +84,7 @@ export const nvnmChainByEnv = {
 	'nvnm-testnet': nvnmTestnet,
 	'nvnm-mainnet': nvnmMainnet,
 } as const satisfies Record<TempoEnv, unknown>
+
+export function nvnmChainById(chainId: number) {
+	return Object.values(nvnmChainByEnv).find((chain) => chain.id === chainId)
+}

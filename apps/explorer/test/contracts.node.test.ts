@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import type { Abi } from 'viem'
+import { getAccountTag } from '#lib/account'
 import {
 	getContractAbi,
 	getContractInfo,
@@ -125,18 +126,8 @@ describe('anchoring contract', () => {
 	})
 })
 
-describe('NVNM testnet token metadata', () => {
-	afterEach(() => {
-		vi.unstubAllEnvs()
-		vi.resetModules()
-	})
-
-	it('uses the testnet genesis token rather than Tempo token labels', async () => {
-		vi.stubEnv('VITE_TEMPO_ENV', 'nvnm-testnet')
-		vi.resetModules()
-		const { getContractInfo } = await import('#lib/domain/contracts')
-		const { getAccountTag } = await import('#lib/account')
-
+describe('NVNM genesis token metadata', () => {
+	it('names the genesis token nUSD and lists no Tempo tokens', () => {
 		expect(
 			getContractInfo('0x20c0000000000000000000000000000000000000')?.name,
 		).toBe('nUSD')

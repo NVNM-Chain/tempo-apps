@@ -12,10 +12,10 @@ not change the chain served by the current deployment.
 | `src/lib/env.ts` | `VITE_TEMPO_ENV` selects the chain at build time. An unrecognised value throws, and the request hostname cannot override the selection. |
 | `src/wagmi.config.ts` | Wallets and browser RPC queries use only the selected chain. |
 | `src/comps/ConnectWallet.tsx` | The wallet names the selected chain; testnet hides the Fund action because its RPC does not expose `tempo_fundAddress`. |
-| `src/lib/account.ts`, `src/lib/domain/contracts.ts` | Testnet uses its nUSD genesis token instead of Tempo's genesis-token labels. |
+| `src/lib/account.ts`, `src/lib/domain/contracts.ts` | The genesis token is nUSD, the only TIP-20 in every NVNM genesis; Tempo's genesis-token labels are gone. |
 | `src/routes/api/simulate.ts` | Simulations accept only the selected chain and use its RPC. |
 | `src/lib/server/*` | No Tempo API (tapimo), whose npm package ships only the client since 0.21.0: pages read the RPC and tidx. SQL double-quotes `"from"`/`"to"`, as the public indexer's WAF refuses ``SELECT `from` ``. |
-| `src/lib/server/tempo-queries-provider.ts` | Testnet uses the indexer's ClickHouse engine by default; its default engine does not respond. |
+| `src/lib/server/tempo-queries-provider.ts` | Queries use the indexer's ClickHouse engine by default; testnet's default engine does not respond. |
 | `src/lib/explorer-network.ts` | Switcher links to the separate NVNM explorers. |
 | `src/lib/explorer-indexing.ts` | NVNM hosts; the internal devnet is `noindex`, mainnet is indexed. |
 | `wrangler.json` | A Cloudflare environment per network, each with its own route, indexer setting, rate-limit namespaces, and browser binding. |
