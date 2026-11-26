@@ -119,7 +119,7 @@
 			"routes": [
 				{
 					"custom_domain": true,
-					"zone_name": "nvnmchain.io",
+					"zone_name": "testnet.nvnmchain.io",
 					"pattern": "scan.nvnm.testnet.nvnmchain.io"
 				}
 			],
@@ -187,7 +187,7 @@
 			"routes": [
 				{
 					"custom_domain": true,
-					"zone_name": "nvnmchain.io",
+					"zone_name": "mainnet.nvnmchain.io",
 					"pattern": "scan.nvnm.mainnet.nvnmchain.io"
 				}
 			],
