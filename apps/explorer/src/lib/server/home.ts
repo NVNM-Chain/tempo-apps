@@ -3,6 +3,7 @@ import { getChainId } from 'wagmi/actions'
 import { getAccountType } from '#lib/account'
 import { indexer } from '#lib/server/dex-indexer'
 import {
+	countTransactions,
 	type ListedTransaction,
 	readTransactions,
 } from '#lib/server/transaction-list'
@@ -81,7 +82,7 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 		const start = newestAt - HOME_MINUTES * 60
 		const minute = (column: string) =>
 			`intDiv(toUnixTimestamp(${column}) - ${start} - 1, 60)`
-		const [blockMinutes, [txns], [tokens], blocks, txs] = await Promise.all([
+		const [blockMinutes, txns, [tokens], blocks, txs] = await Promise.all([
 			indexer(
 				chainId,
 				`SELECT ${minute('timestamp')} AS minute, count() AS blocks, sum(gas_used) AS gas,
@@ -90,8 +91,7 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 				FROM blocks WHERE toUnixTimestamp(timestamp) > ${start} AND num <= ${newestNum}
 				GROUP BY minute`,
 			),
-			// Counts stay fast with `FINAL`, so they need no `distinct`.
-			indexer(chainId, 'SELECT count() AS n FROM txs FINAL'),
+			countTransactions(chainId),
 			// Refreshed on a schedule: `token_metadata` would aggregate every transfer.
 			indexer(chainId, 'SELECT count() AS n FROM token_holder_counts'),
 			indexer(
@@ -108,6 +108,7 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 		)
 		const lowest = Number(blocks.at(-1)?.num ?? 0)
 		const [txMinutes, counts, codes] = await Promise.all([
+			// `FINAL` as `countTransactions` counts.
 			indexer(
 				chainId,
 				`SELECT ${minute('block_timestamp')} AS minute, count() AS txs FROM txs FINAL
@@ -161,7 +162,7 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 			tps: spanMs > 0 ? (sum(txPerMinute) * 1000) / spanMs : null,
 			gasUtilization:
 				gasLimit > 0 ? (sum(gasPerMinute) * 100) / gasLimit : null,
-			totalTxns: Number(txns?.n ?? 0),
+			totalTxns: txns,
 			tokens: Number(tokens?.n ?? 0),
 			txPerMinute,
 			gasPerMinute,

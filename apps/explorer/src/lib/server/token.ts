@@ -4,7 +4,7 @@ import { erc20Abi } from 'viem'
 import { getChainId } from 'wagmi/actions'
 import * as z from 'zod/mini'
 import { TOKEN_COUNT_MAX } from '#lib/constants'
-import { distinct, indexer } from '#lib/server/dex-indexer'
+import { indexer } from '#lib/server/dex-indexer'
 import { getTokensMetadata } from '#lib/server/verified-tokens'
 import { zAddress } from '#lib/zod'
 import { getBatchedClient, getWagmiConfig } from '#wagmi.config.ts'
@@ -198,7 +198,7 @@ async function indexedTransfers(params: {
 	const [rows, [counted]] = await Promise.all([
 		indexer(
 			params.chainId,
-			`SELECT token, "from", "to", toString(amount) AS value, tx_hash, block_num, log_idx,
+			`SELECT token, "from", "to", toString(amount) AS value, tx_hash, block_num,
 				toUnixTimestamp(block_timestamp) AS timestamp
 			FROM token_transfers ${where}
 			ORDER BY block_num DESC, log_idx DESC
@@ -210,7 +210,7 @@ async function indexedTransfers(params: {
 		),
 	])
 	return {
-		transfers: distinct(rows, 'tx_hash', 'log_idx').map((row) => ({
+		transfers: rows.map((row) => ({
 			token: String(row.token) as Address.Address,
 			from: String(row.from) as Address.Address,
 			to: String(row.to) as Address.Address,
