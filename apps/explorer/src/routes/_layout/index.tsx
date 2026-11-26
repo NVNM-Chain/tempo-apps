@@ -1,40 +1,18 @@
 import { useQuery } from '@tanstack/react-query'
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
-import type { Address, Hex } from 'ox'
 import * as React from 'react'
 import * as z from 'zod/mini'
 import { ExploreInput } from '#comps/ExploreInput'
 import { HomeDashboard } from '#comps/HomeDashboard'
 import { cx } from '#lib/css'
-import { getTempoEnv } from '#lib/env'
 import { homeStatsQueryOptions } from '#lib/queries'
+import type { ListedTransaction } from '#lib/server/transaction-list'
 import AnchorIcon from '~icons/lucide/anchor'
 import BoxIcon from '~icons/lucide/box'
 import CoinsIcon from '~icons/lucide/coins'
 import FileIcon from '~icons/lucide/file'
 import ReceiptIcon from '~icons/lucide/receipt'
 import UserIcon from '~icons/lucide/user'
-
-const SPOTLIGHT_DATA: Record<
-	string,
-	{
-		accountAddress: Address.Address
-		contractAddress: Address.Address
-		receiptHash: Hex.Hex
-	}
-> = {
-	// Real values from tidx_787222.txs. Re-pick if the chain is regenerated.
-	nvnm: {
-		accountAddress: '0x9493feed391b9d1875731c8a4b5e492db8505843',
-		contractAddress: '0x20c000000000000000000000566f8b4a921dcd3a',
-		receiptHash:
-			'0x4dc23799c4f7474c29de45e62ec533c6cd3026f3ac0c5993483487d3b2fc7f72',
-	},
-}
-
-function getSpotlightData() {
-	return SPOTLIGHT_DATA[getTempoEnv()]
-}
 
 export const Route = createFileRoute('/_layout/')({
 	component: Component,
@@ -110,33 +88,31 @@ function Component() {
 						}}
 					/>
 				</div>
-				<SpotlightLinks />
+				<SpotlightLinks example={stats?.example} />
 				{stats && <HomeDashboard stats={stats} />}
 			</div>
 		</div>
 	)
 }
 
-function SpotlightLinks() {
-	const spotlightData = getSpotlightData()
+function SpotlightLinks(props: { example?: ListedTransaction }) {
+	const tx = props.example
 
 	return (
 		<section className="text-center max-w-[500px] px-4">
 			<div className="group/pills flex items-center gap-2 text-[13px] flex-wrap justify-center">
-				{spotlightData && (
+				{tx?.to && (
 					<>
 						<SpotlightPill
 							to="/address/$address"
-							params={{ address: spotlightData.accountAddress }}
+							params={{ address: tx.from }}
 							icon={<UserIcon className="size-[14px] text-accent" />}
 						>
 							Account
 						</SpotlightPill>
 						<SpotlightPill
 							to="/address/$address"
-							params={{
-								address: spotlightData.contractAddress,
-							}}
+							params={{ address: tx.to }}
 							search={{ tab: 'contract' }}
 							icon={<FileIcon className="size-[14px] text-accent" />}
 						>
@@ -144,7 +120,7 @@ function SpotlightLinks() {
 						</SpotlightPill>
 						<SpotlightPill
 							to="/receipt/$hash"
-							params={{ hash: spotlightData.receiptHash }}
+							params={{ hash: tx.hash }}
 							icon={<ReceiptIcon className="size-[14px] text-accent" />}
 						>
 							Receipt
