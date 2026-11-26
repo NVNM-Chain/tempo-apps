@@ -51,11 +51,11 @@ export const Route = createFileRoute('/_layout/anchoring/$registryId/')({
 })
 
 function RegistryPage(): React.JSX.Element {
-	const { registry, records, total, events } = Route.useLoaderData()
+	const { registry, records, total, events, unlisted } = Route.useLoaderData()
 	const { page } = Route.useSearch()
 	const mode = useMediaQuery('(max-width: 799px)') ? 'stacked' : 'tabs'
 	const [activeSection, setActiveSection] = React.useState(0)
-	const eventsMore = (events?.length ?? 0) > ANCHORING_PER_PAGE
+	const eventsMore = events.length > ANCHORING_PER_PAGE
 
 	return (
 		<div className="max-[800px]:flex max-[800px]:flex-col max-[800px]:pt-10 max-[800px]:pb-8 grid w-full grid-cols-[auto_1fr] gap-[14px] px-4 pt-20 pb-16 min-w-0 min-[1240px]:max-w-[1280px]">
@@ -109,11 +109,19 @@ function RegistryPage(): React.JSX.Element {
 					},
 					{
 						title: eventsMore ? 'Latest transactions' : 'Transactions',
-						totalItems: eventsMore
-							? `${ANCHORING_PER_PAGE}+`
-							: (events?.length ?? 0),
+						totalItems: eventsMore ? `${ANCHORING_PER_PAGE}+` : events.length,
 						autoCollapse: false,
-						content: <EventsGrid events={events} />,
+						content: (
+							<>
+								{unlisted.length > 0 && events.length > 0 && (
+									<p className="px-[16px] pt-[12px] text-[13px] text-tertiary">
+										The indexer did not answer for {unlisted.join(', ')}; those
+										are missing.
+									</p>
+								)}
+								<EventsGrid events={events} unlisted={unlisted} />
+							</>
+						),
 					},
 				]}
 			/>
@@ -174,8 +182,8 @@ function RecordsGrid(props: {
 	)
 }
 
-function EventsGrid(props: { events: AnchoringEvent[] | null }) {
-	const events = props.events?.slice(0, ANCHORING_PER_PAGE) ?? []
+function EventsGrid(props: { events: AnchoringEvent[]; unlisted: string[] }) {
+	const events = props.events.slice(0, ANCHORING_PER_PAGE)
 	const columns: DataGrid.Column[] = [
 		{ label: 'Event', width: 'max-content' },
 		{ label: 'Transaction', width: '2fr', minWidth: 160 },
@@ -220,9 +228,9 @@ function EventsGrid(props: { events: AnchoringEvent[] | null }) {
 			pages={1}
 			itemsLabel="transactions"
 			emptyState={
-				props.events
-					? 'No transaction for this registry. One seeded at genesis has none.'
-					: 'The indexer could not list this registry’s transactions.'
+				props.unlisted.length > 0
+					? 'The indexer could not list this registry’s transactions.'
+					: 'No transaction for this registry. One seeded at genesis has none.'
 			}
 		/>
 	)
