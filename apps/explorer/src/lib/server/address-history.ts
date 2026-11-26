@@ -15,6 +15,8 @@ import { getBatchedClient } from '#wagmi.config'
 export const [MAX_LIMIT, DEFAULT_LIMIT] = [10, 10]
 const HISTORY_TOTAL_CACHE_TTL = 60_000
 const HISTORY_TOTAL_CACHE_MAX_ENTRIES = 50
+/** The most receipts a total is recounted for with `FINAL`, which takes seconds on a busier address. */
+const EXACT_TOTAL_MAX = 100_000
 
 export type EnrichedTransaction = {
 	hash: `0x${string}`
@@ -225,14 +227,18 @@ export async function fetchAddressHistoryData(params: {
 		'block_num',
 		'tx_idx',
 	)
+	const count = (table: string) =>
+		indexer(
+			chainId,
+			`SELECT count() AS n FROM ${table} WHERE ${filters.join(' AND ')}`,
+		).then(([row]) => Number(row?.n ?? 0))
 	const requestedTotal = includeTotal
-		? indexer(
-				chainId,
-				`SELECT count() AS n FROM receipts WHERE ${filters.join(' AND ')}`,
-			).then(
-				([row]) => (row ? Number(row.n) : undefined),
-				() => undefined,
-			)
+		? count('receipts')
+				// `FINAL` leaves out the rows tidx holds twice, as the pages do.
+				.then((n) =>
+					n > EXACT_TOTAL_MAX ? n : count('receipts FINAL').catch(() => n),
+				)
+				.catch(() => undefined)
 		: undefined
 	if (requestedTotal) cacheHistoryTotal(totalKey, requestedTotal)
 
