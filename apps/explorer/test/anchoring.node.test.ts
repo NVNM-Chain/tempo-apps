@@ -332,7 +332,7 @@ describe('anchoring', () => {
 			data: { registryId: 1, page: 1 },
 		})
 		expect(
-			found?.events?.map((e) => [e.event, e.recordId, e.blockNumber]),
+			found?.events.map((e) => [e.event, e.recordId, e.blockNumber]),
 		).toEqual([
 			['AddRecord', 2, 9],
 			['AddRecord', 1, 7],
@@ -347,7 +347,23 @@ describe('anchoring', () => {
 		const without = await fetchAnchoringRegistry({
 			data: { registryId: 1, page: 1 },
 		})
-		expect(without?.events).toBeNull()
+		expect(without?.events).toEqual([])
+		expect(without?.unlisted).toHaveLength(5)
 		expect(without?.records).toHaveLength(25)
+	})
+
+	it('lists the events the indexer answered for when another times out', async () => {
+		indexer.mockImplementation(async (_chainId: number, sql: string) => {
+			if (sql.includes('FROM AddRecord'))
+				throw new Error('Indexer query failed (422): Timeout exceeded')
+			return sql.includes('FROM AddRegistry')
+				? [{ tx_hash: '0x9', block_num: 5, log_idx: 0, caller: '0xc' }]
+				: []
+		})
+		const found = await fetchAnchoringRegistry({
+			data: { registryId: 1, page: 1 },
+		})
+		expect(found?.events.map((e) => e.event)).toEqual(['AddRegistry'])
+		expect(found?.unlisted).toEqual(['AddRecord'])
 	})
 })

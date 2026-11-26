@@ -216,44 +216,51 @@ export const searchAnchoringPage = createServerFn({ method: 'POST' })
 	})
 
 /**
- * A registry's latest events, newest first, decoded by the indexer; `null` when the indexer
- * cannot answer.
+ * A registry's latest events, newest first, decoded by the indexer, and the events it did not
+ * answer for: each is its own query, and one past the indexer's time limit fails alone.
  */
 async function fetchRegistryEvents(
 	chainId: number,
 	registryId: number,
 	limit: number,
-): Promise<AnchoringEvent[] | null> {
-	try {
-		const found = await Promise.all(
-			registryEvents.map(async (event) => {
-				const withRecord = event.inputs.some(
-					(input) => input.name === 'recordId',
-				)
-				const rows = await indexer(
-					chainId,
-					`SELECT tx_hash, block_num, log_idx, caller${withRecord ? ', recordId' : ''}
-					FROM ${event.name} WHERE address = '${ANCHORING_ADDRESS}' AND registryId = ${registryId}
-					ORDER BY block_num DESC, log_idx DESC LIMIT ${limit}`,
-					formatAbiItem(event).replace(/^event /, ''),
-				)
-				return rows.map((row) => ({
+) {
+	const found = await Promise.allSettled(
+		registryEvents.map(async (event) => {
+			const withRecord = event.inputs.some((input) => input.name === 'recordId')
+			const rows = await indexer(
+				chainId,
+				`SELECT tx_hash, block_num, log_idx, caller${withRecord ? ', recordId' : ''}
+				FROM ${event.name} WHERE address = '${ANCHORING_ADDRESS}' AND registryId = ${registryId}
+				ORDER BY block_num DESC, log_idx DESC LIMIT ${limit}`,
+				formatAbiItem(event).replace(/^event /, ''),
+			)
+			return rows.map(
+				(row): AnchoringEvent => ({
 					event: event.name,
 					recordId: withRecord ? Number(row.recordId) : undefined,
 					caller: String(row.caller),
 					transactionHash: String(row.tx_hash),
 					blockNumber: Number(row.block_num),
 					logIndex: Number(row.log_idx),
-				}))
-			}),
-		)
-		return found
-			.flat()
+				}),
+			)
+		}),
+	)
+	const events: AnchoringEvent[] = []
+	const unlisted: string[] = []
+	found.forEach((result, i) => {
+		const { name } = registryEvents[i]
+		if (result.status === 'fulfilled') events.push(...result.value)
+		else {
+			unlisted.push(name)
+			console.error(`Failed to read ${name} events:`, result.reason)
+		}
+	})
+	return {
+		events: events
 			.sort((a, b) => b.blockNumber - a.blockNumber || b.logIndex - a.logIndex)
-			.slice(0, limit)
-	} catch (error) {
-		console.error('Failed to read anchoring events:', error)
-		return null
+			.slice(0, limit),
+		unlisted,
 	}
 }
 
@@ -274,7 +281,7 @@ export const fetchAnchoringRegistry = createServerFn({ method: 'POST' })
 		if (data.registryId < 1 || data.registryId > count) return null
 		const ids = newestFirst(total, data.page, ANCHORING_PER_PAGE)
 		const oldest = ids.at(-1)
-		const [[registries], records, events] = await Promise.all([
+		const [[registries], records, { events, unlisted }] = await Promise.all([
 			client.readContract({
 				...contract,
 				functionName: 'registries',
@@ -307,7 +314,7 @@ export const fetchAnchoringRegistry = createServerFn({ method: 'POST' })
 		])
 		const registry = registries[0]
 		if (!registry) throw new Error(`registry ${data.registryId} not returned`)
-		return { registry: registryOf(registry), records, total, events }
+		return { registry: registryOf(registry), records, total, events, unlisted }
 	})
 
 /** A record's latest version, and its versions newest first. The latest's `index` is how many there are. */
