@@ -2,7 +2,7 @@ import * as z from 'zod/mini'
 
 const enabledSchema = z.stringbool()
 
-const canonicalTempoEnvSchema = z.enum(['nvnm', 'nvnm-mainnet'])
+const canonicalTempoEnvSchema = z.enum(['nvnm', 'nvnm-testnet', 'nvnm-mainnet'])
 
 // Tempo's `moderato`/`presto` aliases are gone with their networks.
 export const tempoEnvSchema = z.prefault(

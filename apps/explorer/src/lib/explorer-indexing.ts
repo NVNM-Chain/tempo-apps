@@ -4,6 +4,7 @@ export const EXPLORER_ORGANIZATION_ID = 'https://mantrachain.io/#organization'
 
 const CANONICAL_EXPLORER_ORIGINS: Partial<Record<TempoEnv, string>> = {
 	nvnm: 'https://scan.nvnm.canary.mantrachain.dev',
+	'nvnm-testnet': 'https://scan.nvnm.testnet.nvnmchain.io',
 	'nvnm-mainnet': 'https://scan.nvnm.mainnet.nvnmchain.io',
 }
 

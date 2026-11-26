@@ -2,18 +2,21 @@
 
 ## Getting Started
 
-To run this application (defaults to `testnet` chain):
+To run this application (defaults to NVNM devnet):
 
 ```bash
 pnpm install
 pnpm dev
 ```
 
-To run `devnet` chain:
+To run NVNM testnet:
 
 ```sh
-pnpm dev:devnet
+pnpm dev:nvnm-testnet
 ```
+
+For network selection and Cloudflare Workers Builds configuration, see
+[NVNM.md](./NVNM.md).
 
 ### Styling
 

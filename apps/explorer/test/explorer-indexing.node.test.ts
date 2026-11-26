@@ -11,7 +11,9 @@ const NVNM_HOST = 'scan.nvnm.canary.mantrachain.dev'
 describe('explorer host policy', () => {
 	it('redirects the chain-id alias to the canonical host', () => {
 		expect(
-			getExplorerHostPolicy(`https://scan.787222.nvnm.canary.mantrachain.dev/blocks`),
+			getExplorerHostPolicy(
+				`https://scan.787222.nvnm.canary.mantrachain.dev/blocks`,
+			),
 		).toEqual({
 			type: 'redirect',
 			location: `https://${NVNM_HOST}/blocks`,
@@ -23,9 +25,7 @@ describe('explorer host policy', () => {
 	})
 
 	it('no longer recognises Tempo public hosts', () => {
-		expect(
-			getExplorerHostPolicy('https://explore.tempo.xyz/'),
-		).toBeUndefined()
+		expect(getExplorerHostPolicy('https://explore.tempo.xyz/')).toBeUndefined()
 		expect(
 			getExplorerHostPolicy('https://explore.testnet.tempo.xyz/'),
 		).toBeUndefined()
@@ -46,6 +46,12 @@ describe('canonical urls and schema.org payload', () => {
 	it('builds canonical urls for the nvnm env', () => {
 		expect(getCanonicalExplorerUrl('nvnm', '/tokens')).toBe(
 			`https://${NVNM_HOST}/tokens`,
+		)
+	})
+
+	it('builds canonical urls for the testnet deployment', () => {
+		expect(getCanonicalExplorerUrl('nvnm-testnet', '/tokens')).toBe(
+			'https://scan.nvnm.testnet.nvnmchain.io/tokens',
 		)
 	})
 

@@ -15,17 +15,6 @@ jobs:
     name: Verify
     uses: ./.github/workflows/verify.yml
 
-  deploy-explorer:
-    name: Deploy Explorer
-    needs: verify
-    uses: ./.github/workflows/deploy.yml
-    secrets:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-    with:
-      app: explorer
-      environments: '["testnet","mainnet","devnet","nextfork"]'
-
   deploy-fee-payer:
     name: Deploy Fee Payer
     needs: verify

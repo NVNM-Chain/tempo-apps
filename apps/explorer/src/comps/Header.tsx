@@ -231,7 +231,7 @@ export namespace Header {
 					<div
 						id={menuId}
 						role="menu"
-						aria-label="Tempo network"
+						aria-label="NVNM networks"
 						className="absolute left-0 top-[calc(100%+8px)] z-50 w-[156px] overflow-hidden rounded-[10px] border border-base-border bg-base-background/95 p-[4px] shadow-[0_16px_40px_rgba(0,0,0,0.35)] backdrop-blur"
 					>
 						{EXPLORER_NETWORK_OPTIONS.map((option) => {

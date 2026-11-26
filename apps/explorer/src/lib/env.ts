@@ -13,42 +13,15 @@ export const clientEnv = clientEnvSchema.parse(import.meta.env)
 
 /**
  * Environments this build serves, one per deployment: `nvnm` is the devnet.
- * NVNM chains only — Tempo's own networks were removed deliberately, so adding
- * an env means adding a chain definition, a wrangler env and a network-switcher
- * entry too.
+ * The selected build environment is authoritative for both client and server.
  */
-export type TempoEnv = 'nvnm' | 'nvnm-mainnet'
+export type TempoEnv = 'nvnm' | 'nvnm-testnet' | 'nvnm-mainnet'
 
 const TEMPO_ENVS = [
 	'nvnm',
+	'nvnm-testnet',
 	'nvnm-mainnet',
 ] as const satisfies readonly TempoEnv[]
-
-export function inferTempoEnvFromHostname(
-	hostname: string | undefined,
-): TempoEnv | undefined {
-	if (!hostname) return undefined
-
-	const host = hostname.toLowerCase()
-
-	// Before the devnet's patterns, which mainnet's hosts also contain.
-	if (
-		host.includes('explorer-nvnm-mainnet') ||
-		host.includes('scan.nvnm.mainnet.')
-	) {
-		return 'nvnm-mainnet'
-	}
-
-	if (
-		host.includes('explorer-nvnm') ||
-		host.includes('scan.nvnm.') ||
-		host.includes('scan.787222.')
-	) {
-		return 'nvnm'
-	}
-
-	return undefined
-}
 
 function normalizeTempoEnv(value: string | undefined): TempoEnv {
 	// Unset falls back (vitest and other tooling never inject it). A *wrong*
@@ -56,19 +29,11 @@ function normalizeTempoEnv(value: string | undefined): TempoEnv {
 	// upstream behaviour turned a typo into an explorer showing the wrong
 	// chain's data while looking perfectly healthy.
 	if (value === undefined || value === '') return 'nvnm'
-	if ((TEMPO_ENVS as readonly string[]).includes(value))
-		return value as TempoEnv
+	const env = TEMPO_ENVS.find((candidate) => candidate === value)
+	if (env) return env
 	throw new Error(
 		`VITE_TEMPO_ENV must be one of ${TEMPO_ENVS.join(' | ')} — got '${value}'`,
 	)
-}
-
-function getRequestUrlIfAvailable(): URL | undefined {
-	try {
-		return getRequestUrl()
-	} catch {
-		return undefined
-	}
 }
 
 export const getRequestURL = createIsomorphicFn()
@@ -94,23 +59,11 @@ export function getApiUrl(path: string, searchParams?: URLSearchParams): URL {
 	return url
 }
 
-export const getTempoEnv = createIsomorphicFn()
-	.client(() => {
-		const inferred = inferTempoEnvFromHostname(window.location.hostname)
-		return inferred ?? normalizeTempoEnv(import.meta.env.VITE_TEMPO_ENV)
-	})
-	.server(() => {
-		// Some modules read the active chain at import time before TanStack Start has
-		// established request AsyncLocalStorage. Fall back to Vite env there. In
-		// Cloudflare/Vite dev, `process.env` may not include the command env inside
-		// the worker runtime.
-		const inferred = inferTempoEnvFromHostname(
-			getRequestUrlIfAvailable()?.hostname,
-		)
-		return inferred ?? normalizeTempoEnv(import.meta.env.VITE_TEMPO_ENV)
-	})
+export function getTempoEnv(): TempoEnv {
+	return normalizeTempoEnv(import.meta.env.VITE_TEMPO_ENV)
+}
 
 /** True for every NVNM chain but mainnet; the UI gates testnet-only affordances on it (see comps/Header.tsx). */
-export const isTestnet = createIsomorphicFn()
-	.client(() => getTempoEnv() !== 'nvnm-mainnet')
-	.server(() => getTempoEnv() !== 'nvnm-mainnet')
+export function isTestnet(): boolean {
+	return getTempoEnv() !== 'nvnm-mainnet'
+}
