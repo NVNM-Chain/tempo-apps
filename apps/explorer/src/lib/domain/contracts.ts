@@ -20,7 +20,9 @@ import {
 	ANCHORING_ADDRESS,
 	ANCHORING_IMPLEMENTATION,
 } from '#lib/domain/anchoring.ts'
+import { nvnmTestnet } from '#lib/chains'
 import { isTip20Address } from '#lib/domain/tip20.ts'
+import { getTempoEnv } from '#lib/env'
 import { getWagmiConfig } from '#wagmi.config.ts'
 
 const validatorConfigV2Address =
@@ -179,7 +181,7 @@ export function isPrecompile(address: Address.Address): boolean {
 /**
  * Known TIP-20 Token contracts registry mapping addresses to their metadata and ABIs.
  */
-export const tip20ContractRegistry = new Map<Address.Address, ContractInfo>(<
+const tempoTip20ContractRegistry = new Map<Address.Address, ContractInfo>(<
 	const
 >[
 	// TIP-20 Tokens
@@ -229,6 +231,23 @@ export const tip20ContractRegistry = new Map<Address.Address, ContractInfo>(<
 		},
 	],
 ])
+
+export const tip20ContractRegistry =
+	getTempoEnv() === 'nvnm-testnet'
+		? new Map<Address.Address, ContractInfo>([
+				[
+					nvnmTestnet.feeToken,
+					{
+						name: 'nUSD',
+						description: 'NVNM Testnet stablecoin',
+						abi: Abis.tip20,
+						code: '0xef',
+						category: 'token',
+						address: nvnmTestnet.feeToken,
+					},
+				],
+			])
+		: tempoTip20ContractRegistry
 
 /**
  * Known System contracts registry mapping addresses to their metadata and ABIs.

@@ -13,6 +13,12 @@ export const EXPLORER_NETWORK_OPTIONS = [
 		dotClassName: 'bg-positive',
 	},
 	{
+		env: 'nvnm-testnet',
+		label: 'NVNM Testnet',
+		host: 'https://scan.nvnm.testnet.nvnmchain.io',
+		dotClassName: 'bg-amber-400',
+	},
+	{
 		env: 'nvnm',
 		label: 'NVNM Devnet',
 		host: 'https://scan.nvnm.canary.mantrachain.dev',
@@ -21,10 +27,11 @@ export const EXPLORER_NETWORK_OPTIONS = [
 ] as const
 
 export function getActiveExplorerNetworkOption(tempoEnv: TempoEnv) {
-	return (
-		EXPLORER_NETWORK_OPTIONS.find((option) => option.env === tempoEnv) ??
-		EXPLORER_NETWORK_OPTIONS[0]
+	const option = EXPLORER_NETWORK_OPTIONS.find(
+		(candidate) => candidate.env === tempoEnv,
 	)
+	if (!option) throw new Error(`Unknown explorer network: ${tempoEnv}`)
+	return option
 }
 
 export function buildExplorerNetworkHref(

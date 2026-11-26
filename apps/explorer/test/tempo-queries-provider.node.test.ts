@@ -36,4 +36,20 @@ describe('Tempo query provider', () => {
 			expect.objectContaining({ chainId: 4217, engine: 'clickhouse' }),
 		)
 	})
+
+	it('uses the working ClickHouse engine by default for NVNM testnet', () => {
+		provider.tempoQueryBuilder(787223)
+
+		expect(mocks.from).toHaveBeenLastCalledWith(
+			expect.objectContaining({ chainId: 787223, engine: 'clickhouse' }),
+		)
+	})
+
+	it('does not override an explicitly selected engine', () => {
+		provider.tempoQueryBuilder(787223, { engine: 'postgres' })
+
+		expect(mocks.from).toHaveBeenLastCalledWith(
+			expect.objectContaining({ chainId: 787223, engine: 'postgres' }),
+		)
+	})
 })

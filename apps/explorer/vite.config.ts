@@ -28,6 +28,15 @@ export default defineConfig((config) => {
 	} = buildEnvSchema.safeParse({ ...env, ...process.env })
 	if (!success) throw new Error(z.prettifyError(error))
 
+	if (!config.isPreview) {
+		const cloudflareEnv = process.env.CLOUDFLARE_ENV ?? env.CLOUDFLARE_ENV
+		if (cloudflareEnv && cloudflareEnv !== envConfig.VITE_TEMPO_ENV)
+			throw new Error(
+				`CLOUDFLARE_ENV and VITE_TEMPO_ENV mismatch: ${cloudflareEnv} !== ${envConfig.VITE_TEMPO_ENV}`,
+			)
+		process.env.CLOUDFLARE_ENV = envConfig.VITE_TEMPO_ENV
+	}
+
 	const wranglerVars = wranglerJSON.env[envConfig.VITE_TEMPO_ENV].vars
 	const datadogEnv = {
 		VITE_DATADOG_ALLOWED_TRACING_URLS:

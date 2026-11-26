@@ -25,7 +25,33 @@ export const nvnmDevnet = defineChain({
 			webSocket: ['wss://ws.nvnm.canary.mantrachain.dev'],
 		},
 	},
+	blockExplorers: {
+		default: {
+			name: 'NVNM Devnet Explorer',
+			url: 'https://scan.nvnm.canary.mantrachain.dev',
+		},
+	},
 	// nvnm-genesis/genesis.json
+	feeToken: '0x20c0000000000000000000000000000000000000',
+	testnet: true,
+})
+
+export const nvnmTestnet = defineChain({
+	...tempoDevnet_,
+	id: 787223,
+	name: 'NVNM Testnet',
+	rpcUrls: {
+		default: {
+			http: ['https://rpc.nvnm.testnet.nvnmchain.io'],
+			webSocket: ['wss://rpc.nvnm.testnet.nvnmchain.io'],
+		},
+	},
+	blockExplorers: {
+		default: {
+			name: 'NVNM Testnet Explorer',
+			url: 'https://scan.nvnm.testnet.nvnmchain.io',
+		},
+	},
 	feeToken: '0x20c0000000000000000000000000000000000000',
 	testnet: true,
 })
@@ -41,6 +67,12 @@ export const nvnmMainnet = defineChain({
 			webSocket: ['wss://rpc.nvnm.mainnet.nvnmchain.io'],
 		},
 	},
+	blockExplorers: {
+		default: {
+			name: 'NVNM Mainnet Explorer',
+			url: 'https://scan.nvnm.mainnet.nvnmchain.io',
+		},
+	},
 	// nvnm-mainnet's genesis holds this one TIP-20.
 	feeToken: '0x20c0000000000000000000000000000000000000',
 	testnet: false,
@@ -49,5 +81,6 @@ export const nvnmMainnet = defineChain({
 /** The chain each deployment serves. */
 export const nvnmChainByEnv = {
 	nvnm: nvnmDevnet,
+	'nvnm-testnet': nvnmTestnet,
 	'nvnm-mainnet': nvnmMainnet,
 } as const satisfies Record<TempoEnv, unknown>

@@ -76,13 +76,7 @@ jobs:
         env:
           NODE_ENV: production
           CLOUDFLARE_ENV: ${{ matrix.env || '' }}
-          APP_NAME: ${{ inputs.app }}
-        run: |
-          if [[ "$APP_NAME" == "explorer" ]]; then
-            bash scripts/build.sh
-          else
-            pnpm build
-          fi
+        run: pnpm build
 
       - name: Deploy Workers
         if: steps.changes.outputs.relevant == 'true'

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { searchKnownContracts, searchTokens } from '../src/routes/api/search.ts'
 
 describe('searchKnownContracts', () => {
@@ -9,6 +9,28 @@ describe('searchKnownContracts', () => {
 			'Validator Config',
 			'Validator Config V1 (legacy)',
 		])
+	})
+
+	it('searches testnet genesis tokens without listing Tempo-only tokens', async () => {
+		vi.stubEnv('VITE_TEMPO_ENV', 'nvnm-testnet')
+		vi.resetModules()
+		try {
+			const { searchKnownContracts } = await import(
+				'../src/routes/api/search.ts'
+			)
+			expect(searchKnownContracts('nUSD')).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						address: '0x20C0000000000000000000000000000000000000',
+						label: 'nUSD',
+					}),
+				]),
+			)
+			expect(searchKnownContracts('AlphaUSD')).toEqual([])
+		} finally {
+			vi.unstubAllEnvs()
+			vi.resetModules()
+		}
 	})
 })
 

@@ -87,7 +87,7 @@ export function parseForm(
 	 */
 	blockGasLimit?: string | undefined,
 ): SimulationInput | null {
-	if (chainId !== 4217 && chainId !== 42431 && chainId !== 31318) return null
+	if (!Number.isSafeInteger(chainId) || chainId < 1) return null
 	const from = form.from.trim() === '' ? zeroAddress : form.from.trim()
 	if (
 		!OxAddress.validate(from) ||

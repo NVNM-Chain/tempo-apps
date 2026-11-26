@@ -114,6 +114,74 @@
 				"enabled": true
 			}
 		},
+		"nvnm-testnet": {
+			"name": "explorer-nvnm-testnet",
+			"routes": [
+				{
+					"custom_domain": true,
+					"zone_name": "nvnmchain.io",
+					"pattern": "scan.nvnm.testnet.nvnmchain.io"
+				}
+			],
+			"vars": {
+				"VITE_TEMPO_ENV": "nvnm-testnet",
+				"TIDX_URL": "https://indexer.nvnm.testnet.nvnmchain.io",
+				"VITE_DATADOG_ENABLED": "false",
+				"VITE_DATADOG_ALLOWED_TRACING_URLS": "",
+				"VITE_DATADOG_ENV": "nvnm-testnet",
+				"VITE_DATADOG_SERVICE": "explorer",
+				"VITE_DATADOG_SESSION_REPLAY_SAMPLE_RATE": "0",
+				"VITE_DATADOG_SESSION_SAMPLE_RATE": "100",
+				"VITE_DATADOG_TRACE_SAMPLE_RATE": "20",
+				"SENTRY_TRACES_SAMPLE_RATE": "0",
+				"VITE_SENTRY_TRACES_SAMPLE_RATE": "0",
+				"VITE_CONTRACT_VERIFICATION_API_BASE_URL": "https://contracts.tempo.xyz"
+			},
+			"browser": {
+				"binding": "BROWSER"
+			},
+			"ratelimits": [
+				{
+					"name": "REQUESTS_RATE_LIMITER",
+					"namespace_id": "1201",
+					"simple": {
+						"limit": 100,
+						"period": 10
+					}
+				},
+				{
+					"name": "SIMULATE_RATE_LIMITER",
+					"namespace_id": "1205",
+					"simple": {
+						"limit": 30,
+						"period": 10
+					}
+				},
+				{
+					"name": "ASN_RATE_LIMITER",
+					"namespace_id": "1203",
+					"simple": {
+						"limit": 2000,
+						"period": 10
+					}
+				},
+				{
+					"name": "GLOBAL_RATE_LIMITER",
+					"namespace_id": "1204",
+					"simple": {
+						"limit": 10000,
+						"period": 10
+					}
+				}
+			],
+			"version_metadata": {
+				"binding": "CF_VERSION_METADATA"
+			},
+			"workers_dev": true,
+			"observability": {
+				"enabled": true
+			}
+		},
 		"nvnm-mainnet": {
 			"name": "explorer-nvnm-mainnet",
 			"routes": [

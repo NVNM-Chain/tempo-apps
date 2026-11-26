@@ -1,7 +1,6 @@
 import { createIsomorphicFn, createServerFn } from '@tanstack/react-start'
 import { getRequestHeader } from '@tanstack/react-start/server'
 import { createPublicClient } from 'viem'
-import { tempoLocalnet } from 'viem/chains'
 import { tempoActions } from 'viem/tempo'
 import { loadBalance, rateLimit } from '@tempo/rpc-utils'
 import { nvnmChainByEnv } from './lib/chains'
@@ -80,12 +79,11 @@ export function getWagmiConfig() {
 	wagmiConfigSingleton = createConfig({
 		ssr: true,
 		multiInjectedProviderDiscovery: true,
-		chains: [chain, tempoLocalnet],
+		chains: [chain],
 		connectors: [tempoWallet()],
 		storage: createStorage({ storage: cookieStorage }),
 		transports: {
 			[chain.id]: transport,
-			[tempoLocalnet.id]: http(undefined, { batch: true }),
 		} as never,
 	})
 

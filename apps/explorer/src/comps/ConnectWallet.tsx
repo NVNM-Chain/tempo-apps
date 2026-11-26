@@ -15,7 +15,7 @@ import { Actions } from 'viem/tempo'
 import { Hooks } from 'wagmi/tempo'
 import { useTokenListMembership } from '#comps/TokenListMembership'
 import { cx } from '#lib/css'
-import { getApiUrl, isTestnet } from '#lib/env.ts'
+import { getApiUrl, getTempoEnv } from '#lib/env.ts'
 import { getFeeTokenForChain } from '#lib/fee-token'
 import { filterSupportedInjectedConnectors } from '#lib/wallets.ts'
 import { getTempoChain } from '#wagmi.config.ts'
@@ -132,7 +132,8 @@ function ConnectWalletInner({
 	return (
 		<div className="flex items-stretch gap-2 justify-end min-w-0 flex-1">
 			<ConnectedAddress />
-			{isTestnet() && <FundAccountButton />}
+			{/* Testnet's RPC does not expose the faucet method. */}
+			{getTempoEnv() === 'nvnm' && <FundAccountButton />}
 			{showAddChain && !isSupported && (
 				<Button
 					className="w-fit"
@@ -149,12 +150,12 @@ function ConnectWalletInner({
 						})
 					}
 				>
-					Add Tempo to {connector?.name ?? 'Wallet'}
+					Add {chains[0].name} to {connector?.name ?? 'Wallet'}
 				</Button>
 			)}
 			{switchChain.isSuccess && (
 				<span className="text-[12px] font-normal text-tertiary whitespace-nowrap">
-					Added Tempo to {connector?.name ?? 'Wallet'}!
+					Added {chains[0].name} to {connector?.name ?? 'Wallet'}!
 				</span>
 			)}
 			<SignOut />

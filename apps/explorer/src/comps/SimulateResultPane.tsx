@@ -17,6 +17,7 @@ import type { Log } from 'viem'
 import { Address } from '#comps/Address'
 import { TokenIcon } from '#comps/TokenIcon'
 import { TxEventDescription } from '#comps/TxEventDescription'
+import { nvnmTestnet } from '#lib/chains'
 import { cx } from '#lib/css'
 import type { parseKnownEvents } from '#lib/domain/known-events'
 import { preferredEventsFilter } from '#lib/domain/known-events'
@@ -170,6 +171,7 @@ function verdictHeadline(execution: SimulationExecutionResult): string {
 
 function networkName(chainId: number): string {
 	if (chainId === 787222) return 'nvnm-tempo-devnet-1'
+	if (chainId === nvnmTestnet.id) return nvnmTestnet.name
 	return `chain-${chainId}`
 }
 

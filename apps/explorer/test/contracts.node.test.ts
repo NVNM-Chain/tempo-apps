@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Abi } from 'viem'
 import {
 	getContractAbi,
@@ -122,5 +122,29 @@ describe('anchoring contract', () => {
 						getFunctionSelector(item) === selector,
 				),
 			).toBe(true)
+	})
+})
+
+describe('NVNM testnet token metadata', () => {
+	afterEach(() => {
+		vi.unstubAllEnvs()
+		vi.resetModules()
+	})
+
+	it('uses the testnet genesis token rather than Tempo token labels', async () => {
+		vi.stubEnv('VITE_TEMPO_ENV', 'nvnm-testnet')
+		vi.resetModules()
+		const { getContractInfo } = await import('#lib/domain/contracts')
+		const { getAccountTag } = await import('#lib/account')
+
+		expect(
+			getContractInfo('0x20c0000000000000000000000000000000000000')?.name,
+		).toBe('nUSD')
+		expect(
+			getAccountTag('0x20c0000000000000000000000000000000000000')?.label,
+		).toBe('nUSD')
+		expect(
+			getAccountTag('0x20c0000000000000000000000000000000000001'),
+		).toBeUndefined()
 	})
 })

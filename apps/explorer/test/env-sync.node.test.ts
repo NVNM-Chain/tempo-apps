@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { buildEnvSchema } from '../src/lib/build-env'
 import { serverEnvSchema } from '../src/lib/server/env'
+import wrangler from '../wrangler.json' with { type: 'json' }
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -61,5 +62,34 @@ describe('env sync', () => {
 			unknown,
 			`Unknown vars in .env.example: ${unknown.join(', ')}`,
 		).toEqual([])
+	})
+
+	it('configures the testnet worker to use its own indexer and domain', () => {
+		expect(wrangler.env['nvnm-testnet']).toMatchObject({
+			name: 'explorer-nvnm-testnet',
+			vars: {
+				VITE_TEMPO_ENV: 'nvnm-testnet',
+				TIDX_URL: 'https://indexer.nvnm.testnet.nvnmchain.io',
+			},
+			routes: [
+				{
+					custom_domain: true,
+					pattern: 'scan.nvnm.testnet.nvnmchain.io',
+				},
+			],
+			browser: { binding: 'BROWSER' },
+		})
+	})
+
+	it('does not deploy the explorer through GitHub Actions', () => {
+		const workflows = resolve(__dirname, '../../../.github/workflows')
+		const main = readFileSync(resolve(workflows, 'main.yml'), 'utf-8')
+		const pullRequest = readFileSync(
+			resolve(workflows, 'pull-request.yml'),
+			'utf-8',
+		)
+
+		expect(main).not.toMatch(/^ {2}deploy-explorer:/m)
+		expect(pullRequest).not.toMatch(/^\s*-\s+app:\s*explorer\s*$/m)
 	})
 })
