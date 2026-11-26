@@ -88,16 +88,15 @@ function Component() {
 						}}
 					/>
 				</div>
-				<SpotlightLinks transactions={stats?.transactions} />
+				<SpotlightLinks example={stats?.example} />
 				{stats && <HomeDashboard stats={stats} />}
 			</div>
 		</div>
 	)
 }
 
-/** Account, Contract and Receipt are the newest successful call the indexer lists. */
-function SpotlightLinks(props: { transactions?: ListedTransaction[] }) {
-	const tx = props.transactions?.find((tx) => tx.to && !tx.failed)
+function SpotlightLinks(props: { example?: ListedTransaction }) {
+	const tx = props.example
 
 	return (
 		<section className="text-center max-w-[500px] px-4">

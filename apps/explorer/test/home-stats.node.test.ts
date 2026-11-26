@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fetchHomeStats, HOME_MINUTES } from '#lib/server/home'
 
-const { indexer, getBlockNumber } = vi.hoisted(() => ({
+const { indexer, getBlockNumber, getCode } = vi.hoisted(() => ({
 	indexer: vi.fn(),
 	getBlockNumber: vi.fn(),
+	getCode: vi.fn(),
 }))
 
 vi.mock('@tanstack/react-start', async (importOriginal) => ({
@@ -22,7 +23,7 @@ vi.mock('#lib/server/dex-indexer', async (importOriginal) => ({
 }))
 vi.mock('#wagmi.config', () => ({
 	getWagmiConfig: () => ({ state: { chainId: 31318 } }),
-	getBatchedClient: () => ({ getBlockNumber }),
+	getBatchedClient: () => ({ getBlockNumber, getCode }),
 }))
 
 const TX = `0x${'ab'.repeat(32)}`
@@ -109,6 +110,7 @@ beforeEach(() => {
 		answer(sql),
 	)
 	getBlockNumber.mockResolvedValue(101n)
+	getCode.mockResolvedValue('0xef')
 })
 
 describe('home stats', () => {
@@ -181,5 +183,15 @@ describe('home stats', () => {
 				failed: true,
 			}),
 		])
+	})
+
+	it('takes its example from the newest successful call to a contract', async () => {
+		expect((await fetchHomeStats()).example).toMatchObject({ hash: TX })
+		expect(getCode).toHaveBeenCalledExactlyOnceWith({ address: TOKEN })
+
+		// Without code the recipient is an account, whatever it was sent.
+		getCode.mockResolvedValue('0x')
+		later()
+		expect((await fetchHomeStats()).example).toBeUndefined()
 	})
 })

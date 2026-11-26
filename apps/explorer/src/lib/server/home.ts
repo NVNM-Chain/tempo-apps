@@ -1,5 +1,6 @@
 import { createServerFn } from '@tanstack/react-start'
 import { getChainId } from 'wagmi/actions'
+import { getAccountType } from '#lib/account'
 import { indexer } from '#lib/server/dex-indexer'
 import {
 	type ListedTransaction,
@@ -38,6 +39,8 @@ export type HomeStats = {
 		gasLimit: number
 	}[]
 	transactions: ListedTransaction[]
+	/** The newest of them that succeeded on a contract. */
+	example?: ListedTransaction
 }
 
 /**
@@ -64,12 +67,13 @@ function snapshotted<T>(load: () => Promise<T>, ms: number) {
 export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 	snapshotted(async (): Promise<HomeStats> => {
 		const chainId = getChainId(getWagmiConfig())
+		const client = getBatchedClient()
 		const [[newest], head] = await Promise.all([
 			indexer(
 				chainId,
 				'SELECT max(num) AS num, toUnixTimestamp(max(timestamp)) AS at, count() AS n FROM blocks',
 			),
-			getBatchedClient().getBlockNumber(),
+			client.getBlockNumber(),
 		])
 		// The window ends here, though tidx may index more blocks while the page is read.
 		const newestNum = Number(newest?.num ?? 0)
@@ -102,7 +106,7 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 			...blockMinutes.map((row) => Number(row.first_num)),
 		)
 		const lowest = Number(blocks.at(-1)?.num ?? 0)
-		const [txMinutes, counts] = await Promise.all([
+		const [txMinutes, counts, codes] = await Promise.all([
 			indexer(
 				chainId,
 				`SELECT ${minute('block_timestamp')} AS minute, count() AS txs FROM txs
@@ -111,6 +115,14 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 			indexer(
 				chainId,
 				`SELECT block_num, count() AS n FROM txs WHERE block_num >= ${lowest} GROUP BY block_num`,
+			),
+			// A recipient's code, as the address page reads it to offer a contract tab.
+			Promise.all(
+				txs.map((tx) =>
+					tx.to && !tx.failed
+						? client.getCode({ address: tx.to }).catch(() => undefined)
+						: undefined,
+				),
 			),
 		])
 
@@ -161,6 +173,7 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 				gasLimit: Number(row.gas_limit),
 			})),
 			transactions: txs,
+			example: txs.find((_, i) => getAccountType(codes[i]) === 'contract'),
 		}
 	}, 2_000),
 )
