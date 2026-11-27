@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fetchHomeStats, HOME_MINUTES } from '#lib/server/home'
 
-const { indexer, getBlockNumber, getCode } = vi.hoisted(() => ({
+const { indexer, readBlockNumber, getCode } = vi.hoisted(() => ({
 	indexer: vi.fn(),
-	getBlockNumber: vi.fn(),
+	readBlockNumber: vi.fn(),
 	getCode: vi.fn(),
 }))
 
@@ -21,9 +21,10 @@ vi.mock('#lib/server/dex-indexer', async (importOriginal) => ({
 	...(await importOriginal<typeof import('#lib/server/dex-indexer')>()),
 	indexer,
 }))
+vi.mock('#lib/server/block-number', () => ({ readBlockNumber }))
 vi.mock('#wagmi.config', () => ({
 	getWagmiConfig: () => ({ state: { chainId: 31318 } }),
-	getBatchedClient: () => ({ getBlockNumber, getCode }),
+	getBatchedClient: () => ({ getCode }),
 }))
 
 const TX = `0x${'ab'.repeat(32)}`
@@ -109,7 +110,7 @@ beforeEach(() => {
 	indexer.mockImplementation(async (_chainId: number, sql: string) =>
 		answer(sql),
 	)
-	getBlockNumber.mockResolvedValue(101n)
+	readBlockNumber.mockResolvedValue(101n)
 	getCode.mockResolvedValue('0xef')
 })
 
@@ -146,7 +147,7 @@ describe('home stats', () => {
 	it('flags an index whose newest block the head has left behind', async () => {
 		// The newest indexed block is block 100, at 10_000 s.
 		expect((await fetchHomeStats()).indexStaleSince).toBe(10_000)
-		getBlockNumber.mockResolvedValue(100n)
+		readBlockNumber.mockResolvedValue(100n)
 		later()
 		expect((await fetchHomeStats()).indexStaleSince).toBeNull()
 	})
@@ -162,7 +163,7 @@ describe('home stats', () => {
 		// Two seconds old: one poll reloads it, and the next does not wait for that.
 		vi.setSystemTime(clock + 2_000)
 		const head = Promise.withResolvers<bigint>()
-		getBlockNumber.mockReturnValue(head.promise)
+		readBlockNumber.mockReturnValue(head.promise)
 		const reload = fetchHomeStats()
 		expect(await fetchHomeStats()).toBe(first)
 		expect(loads()).toBe(2)

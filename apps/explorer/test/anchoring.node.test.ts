@@ -355,6 +355,34 @@ describe('anchoring', () => {
 		expect(without?.records).toHaveLength(25)
 	})
 
+	it('reads no further back than the block that created the registry', async () => {
+		const since = () =>
+			Object.fromEntries(
+				indexer.mock.calls.map(([, sql]) => [
+					/FROM (\w+)/.exec(sql)?.[1],
+					Number(/block_num >= (\d+)/.exec(sql)?.[1]),
+				]),
+			)
+		indexer.mockImplementation(async (_chainId: number, sql: string) =>
+			sql.includes('FROM AddRegistry')
+				? [{ tx_hash: '0x9', block_num: 5, log_idx: 0, caller: '0xc' }]
+				: [],
+		)
+		await fetchAnchoringRegistry({ data: { registryId: 1, page: 1 } })
+		expect(since()).toEqual({
+			AddRegistry: 0,
+			AddRecord: 5,
+			GrantRole: 5,
+			RevokeRole: 5,
+			UpdateRecordStatus: 5,
+		})
+
+		// A registry seeded at genesis has no AddRegistry, so every query reads back to block 0.
+		indexer.mockReset().mockResolvedValue([])
+		await fetchAnchoringRegistry({ data: { registryId: 1, page: 1 } })
+		expect(Object.values(since())).toEqual([0, 0, 0, 0, 0])
+	})
+
 	it('reads on past the events tidx holds twice', async () => {
 		// 30 AddRecord events, each stored twice and newest first, over an older AddRegistry.
 		const records = Array.from({ length: 30 }, (_, i) => ({

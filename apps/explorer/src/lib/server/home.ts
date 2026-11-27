@@ -1,6 +1,7 @@
 import { createServerFn } from '@tanstack/react-start'
 import { getChainId } from 'wagmi/actions'
 import { getAccountType } from '#lib/account'
+import { readBlockNumber } from '#lib/server/block-number'
 import { indexer } from '#lib/server/dex-indexer'
 import {
 	countTransactions,
@@ -74,7 +75,7 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 				chainId,
 				'SELECT max(num) AS num, toUnixTimestamp(max(timestamp)) AS at, count() AS n FROM blocks',
 			),
-			client.getBlockNumber(),
+			readBlockNumber(client),
 		])
 		// The window ends here, though tidx may index more blocks while the page is read.
 		const newestNum = Number(newest?.num ?? 0)
