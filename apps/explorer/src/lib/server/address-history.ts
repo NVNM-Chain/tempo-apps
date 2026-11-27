@@ -242,10 +242,7 @@ export async function fetchAddressHistoryData(params: {
 		: undefined
 	if (requestedTotal) cacheHistoryTotal(totalKey, requestedTotal)
 
-	const [rows, total] = await Promise.all([
-		rowsPromise,
-		cachedTotal ?? requestedTotal,
-	])
+	const rows = await rowsPromise
 	const page = rows.slice(0, limit)
 
 	const client = getBatchedClient()
@@ -278,7 +275,8 @@ export async function fetchAddressHistoryData(params: {
 	const last = page.at(-1)
 	return {
 		transactions,
-		total: total ?? null,
+		// Counted while the node read the page.
+		total: (await (cachedTotal ?? requestedTotal)) ?? null,
 		limit,
 		nextCursor: rows.length > limit && last ? historyCursor(last) : null,
 		reverseCursor: page[0] ? historyCursor(page[0]) : null,
