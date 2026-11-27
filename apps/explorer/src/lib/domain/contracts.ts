@@ -1,15 +1,18 @@
 import { loaders, whatsabi } from '@shazow/whatsabi'
+import { formatAbiItem } from 'abitype'
 import type { Address, Hex } from 'ox'
 import type { Abi, AbiEvent, AbiFunction, AbiParameter } from 'viem'
 import {
 	decodeEventLog,
 	getAbiItem as getAbiItem_viem,
 	stringify,
+	toEventSelector,
 	toFunctionSelector,
 } from 'viem'
 import { Addresses } from 'viem/tempo'
 import {
 	Abis,
+	allAbis,
 	stablecoinDexAbi,
 	streamChannelAbi,
 	tip20ChannelReserveAbi,
@@ -883,6 +886,23 @@ const defaultSignatureLookup = new loaders.MultiSignatureLookup([
 	new loaders.SamczunSignatureLookup(),
 ])
 
+let knownSignatures: Map<string, string> | undefined
+
+/** A selector's or topic's signature in the explorer's own ABIs, which need no public directory. */
+export function knownSignature(selector: Hex.Hex): string | undefined {
+	knownSignatures ??= new Map(
+		allAbis
+			.filter((item) => item.type === 'function' || item.type === 'event')
+			.map((item) => [
+				item.type === 'function'
+					? toFunctionSelector(item)
+					: toEventSelector(item),
+				formatAbiItem(item).replace(/^(function|event) /, ''),
+			]),
+	)
+	return knownSignatures.get(selector.toLowerCase())
+}
+
 /**
  * Lookup a function or event signature by selector/topic hash.
  * Returns the first matching signature string or null.
@@ -891,6 +911,8 @@ export async function lookupSignature(
 	selector: Hex.Hex,
 ): Promise<string | null> {
 	const key = selector.toLowerCase() as Hex.Hex
+	const known = knownSignature(key)
+	if (known) return known
 	const cached = signatureLookupCache.get(key)
 	if (cached) return cached
 

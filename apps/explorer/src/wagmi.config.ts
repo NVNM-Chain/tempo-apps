@@ -1,4 +1,4 @@
-import { createIsomorphicFn, createServerFn } from '@tanstack/react-start'
+import { createIsomorphicFn } from '@tanstack/react-start'
 import { getRequestHeader } from '@tanstack/react-start/server'
 import { createPublicClient } from 'viem'
 import { tempoActions } from 'viem/tempo'
@@ -90,11 +90,17 @@ export function getWagmiConfig() {
 	return wagmiConfigSingleton
 }
 
-export const getWagmiStateSSR = createServerFn().handler(() => {
-	const cookie = getRequestHeader('cookie')
-	const initialState = cookieToInitialState(getWagmiConfig(), cookie)
+// The root route's loader runs again on every preload, so read the cookie
+// where it already is instead of calling a server function: the request
+// header on the server and document.cookie in the browser.
+const getWagmiCookie = createIsomorphicFn()
+	.client(() => document.cookie)
+	.server(() => getRequestHeader('cookie'))
+
+export function getWagmiState() {
+	const initialState = cookieToInitialState(getWagmiConfig(), getWagmiCookie())
 	return serialize(initialState || {})
-})
+}
 
 // Batched HTTP client for bulk RPC operations
 export function getBatchedClient() {

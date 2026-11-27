@@ -33,7 +33,7 @@ import {
 	ProfileEvents,
 } from '#lib/profiling'
 import { initDatadogRum } from '#lib/telemetry/datadog'
-import { getWagmiConfig, getWagmiStateSSR } from '#wagmi.config.ts'
+import { getWagmiConfig, getWagmiState } from '#wagmi.config.ts'
 import css from './styles.css?url'
 
 function getCurrentCanonicalExplorerUrl(): string | undefined {
@@ -180,7 +180,7 @@ export const Route = createRootRouteWithContext<{
 			<ErrorBoundary {...props} />
 		</RootDocument>
 	),
-	loader: () => getWagmiStateSSR(),
+	loader: () => getWagmiState(),
 	shellComponent: RootDocument,
 })
 
