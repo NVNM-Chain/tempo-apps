@@ -21,17 +21,17 @@ export function Footer(): React.JSX.Element {
 			<div className="relative flex min-h-[34px] flex-wrap items-center justify-center gap-5 @max-[399px]:flex-col-reverse">
 				<Footer.ThemeToggle />
 				<ul className="text-ui-meta flex items-center justify-center gap-5 sm:gap-6 select-none">
-					<Footer.Link to="https://tempo.xyz" external>
+					<Footer.Link to="https://nvnmchain.io" external>
 						About
 					</Footer.Link>
-					<Footer.Link to="https://docs.tempo.xyz" external>
+					<Footer.Link to="https://docs.nvnmchain.io" external>
 						Docs
 					</Footer.Link>
-					<Footer.Link to="https://github.com/tempoxyz" external>
+					<Footer.Link to="https://github.com/NVNM-Chain" external>
 						GitHub
 					</Footer.Link>
 					<Footer.Link
-						to="https://github.com/tempoxyz/tempo-apps/discussions/categories/explorer"
+						to="https://github.com/NVNM-Chain/tempo-apps/issues"
 						external
 					>
 						Feedback
