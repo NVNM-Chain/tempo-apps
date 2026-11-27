@@ -1,6 +1,10 @@
 import { queryOptions, useQuery } from '@tanstack/react-query'
 import type { Address, Hex } from 'viem'
-import { autoloadAbi, lookupSignature } from '#lib/domain/contracts'
+import {
+	autoloadAbi,
+	knownSignature,
+	lookupSignature,
+} from '#lib/domain/contracts'
 import { getApiUrl } from '#lib/env.ts'
 import type { BatchAbiResponse } from '#routes/api/abi/batch'
 
@@ -114,6 +118,8 @@ let signatureBatchTimer: ReturnType<typeof setTimeout> | undefined
  * the batch endpoint so transaction lists do not fan out to OpenChain.
  */
 function lookupSignatureBatched(selector: Hex): Promise<string | null> {
+	const known = knownSignature(selector)
+	if (known) return Promise.resolve(known)
 	if (typeof window === 'undefined') return lookupSignature(selector)
 
 	return new Promise((resolve, reject) => {

@@ -1,9 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import type { Abi } from 'viem'
+import {
+	parseAbiItem,
+	toEventSelector,
+	toFunctionSelector,
+	type Abi,
+} from 'viem'
 import { getAccountTag } from '#lib/account'
 import {
 	getContractAbi,
 	getContractInfo,
+	knownSignature,
 	getFunctionSelector,
 	getReadFunctions,
 	getWriteFunctions,
@@ -137,5 +143,32 @@ describe('NVNM genesis token metadata', () => {
 		expect(
 			getAccountTag('0x20c0000000000000000000000000000000000001'),
 		).toBeUndefined()
+	})
+})
+
+describe('known signatures', () => {
+	it.each([
+		['function', '0x64d25295'], // addRecord, as a transaction page asked for it
+		[
+			'event',
+			'0x1a3295fa8cc0e28c95d21912c9e6958f3bc740231781f7640ad885c972a352fd',
+		], // AddRecord
+		[
+			'event',
+			'0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef',
+		], // Transfer
+	] as const)('answers a %s selector the explorer knows: %s', (kind, selector) => {
+		const signature = knownSignature(selector)
+		expect(signature).toBeDefined()
+		const item = parseAbiItem(`${kind} ${signature}`)
+		expect(
+			item.type === 'function'
+				? toFunctionSelector(item)
+				: toEventSelector(item as never),
+		).toBe(selector)
+	})
+
+	it('leaves an unknown selector to the public directories', () => {
+		expect(knownSignature('0xdeadbeef')).toBeUndefined()
 	})
 })
