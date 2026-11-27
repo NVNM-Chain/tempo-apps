@@ -139,7 +139,7 @@ function createWagmiConfig(): ReturnType<typeof createConfig> {
 		ssr: true,
 		multiInjectedProviderDiscovery: true,
 		chains: [chain],
-		connectors: [tempoWallet()],
+		connectors: [tempoWallet({ name: 'NVNMChain Wallet' })],
 		storage: createStorage({ storage: cookieStorage }),
 		transports: {
 			[chain.id]: transport,
