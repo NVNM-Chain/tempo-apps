@@ -8,7 +8,7 @@ import { TXS_PER_PAGE } from '#lib/constants'
 
 export const Route = createFileRoute('/_layout/txs')({
 	component: TransactionsPage,
-	head: () => ({ meta: [{ title: 'Transactions – Tempo Explorer' }] }),
+	head: () => ({ meta: [{ title: 'Transactions – NVNMChain Explorer' }] }),
 	validateSearch: z.object({ page: z.optional(z.number()) }),
 	loaderDeps: ({ search: { page } }) => ({ page: page ?? 1 }),
 	loader: ({ deps, context }) =>

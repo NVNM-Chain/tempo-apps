@@ -71,21 +71,21 @@ export const Route = createRootRouteWithContext<{
 				content: 'width=device-width, initial-scale=1',
 			},
 			{
-				title: 'Explore - Tempo',
+				title: 'Explore - NVNMChain',
 			},
 			{
 				name: 'og:title',
-				content: 'Explore - Tempo',
+				content: 'Explore - NVNMChain',
 			},
 			{
 				name: 'description',
 				content:
-					'Explore and analyze blocks, transactions, contracts and more on Tempo.',
+					'Explore and analyze blocks, transactions, contracts and more on NVNMChain.',
 			},
 			{
 				name: 'og:description',
 				content:
-					'Explore and analyze blocks, transactions, contracts and more on Tempo.',
+					'Explore and analyze blocks, transactions, contracts and more on NVNMChain.',
 			},
 			{
 				name: 'og:image',

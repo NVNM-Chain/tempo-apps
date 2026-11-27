@@ -376,7 +376,7 @@ export const Route = createFileRoute('/_layout/receipt/$hash')({
 		),
 	}),
 	head: ({ params, loaderData }) => {
-		const title = `Receipt ${params.hash.slice(0, 10)}…${params.hash.slice(-6)} ⋅ Tempo Explorer`
+		const title = `Receipt ${params.hash.slice(0, 10)}…${params.hash.slice(-6)} ⋅ NVNMChain Explorer`
 		const presentation = loaderData
 			? getReceiptPresentation(loaderData, () => true)
 			: null

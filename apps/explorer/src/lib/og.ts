@@ -238,7 +238,7 @@ export function buildTxDescription(
 	txData: { timestamp: number; from: string; events: KnownEvent[] } | null,
 ): string {
 	if (!txData) {
-		return 'View transaction details on Tempo Explorer.'
+		return 'View transaction details on NVNMChain Explorer.'
 	}
 
 	const date = formatDate(txData.timestamp)
@@ -253,18 +253,18 @@ export function buildTxDescription(
 
 		if (eventCount === 1) {
 			return truncateOgText(
-				`A ${action} on ${date} from ${HexFormatter.truncate(txData.from as Address.Address)}. View full details on Tempo Explorer.`,
+				`A ${action} on ${date} from ${HexFormatter.truncate(txData.from as Address.Address)}. View full details on NVNMChain Explorer.`,
 				160,
 			)
 		}
 		return truncateOgText(
-			`A ${action} and ${eventCount - 1} other action${eventCount > 2 ? 's' : ''} on ${date}. View full details on Tempo Explorer.`,
+			`A ${action} and ${eventCount - 1} other action${eventCount > 2 ? 's' : ''} on ${date}. View full details on NVNMChain Explorer.`,
 			160,
 		)
 	}
 
 	return truncateOgText(
-		`Transaction on ${date} from ${HexFormatter.truncate(txData.from as Address.Address)}. View details on Tempo Explorer.`,
+		`Transaction on ${date} from ${HexFormatter.truncate(txData.from as Address.Address)}. View details on NVNMChain Explorer.`,
 		160,
 	)
 }
@@ -273,7 +273,7 @@ export function buildTokenDescription(
 	tokenData: { name: string; symbol?: string; supply?: string } | null,
 ): string {
 	if (!tokenData || tokenData.name === '—') {
-		return 'View token details and activity on Tempo Explorer.'
+		return 'View token details and activity on NVNMChain Explorer.'
 	}
 
 	const name = truncateOgText(tokenData.name, 30)
@@ -286,13 +286,13 @@ export function buildTokenDescription(
 
 	if (tokenData.supply && tokenData.supply !== '—') {
 		return truncateOgText(
-			`${namePart} · ${tokenData.supply} total supply. View token activity on Tempo Explorer.`,
+			`${namePart} · ${tokenData.supply} total supply. View token activity on NVNMChain Explorer.`,
 			160,
 		)
 	}
 
 	return truncateOgText(
-		`${namePart}. View token activity on Tempo Explorer.`,
+		`${namePart}. View token activity on NVNMChain Explorer.`,
 		160,
 	)
 }
@@ -302,7 +302,7 @@ export function buildAddressDescription(
 	_address: string,
 ): string {
 	if (!addressData) {
-		return 'View address activity & holdings on Tempo Explorer.'
+		return 'View address activity & holdings on NVNMChain Explorer.'
 	}
 
 	const parts: string[] = []
@@ -315,12 +315,12 @@ export function buildAddressDescription(
 
 	if (parts.length > 0) {
 		return truncateOgText(
-			`${parts.join(' · ')}. View full activity on Tempo Explorer.`,
+			`${parts.join(' · ')}. View full activity on NVNMChain Explorer.`,
 			160,
 		)
 	}
 
-	return 'View address activity & holdings on Tempo Explorer.'
+	return 'View address activity & holdings on NVNMChain Explorer.'
 }
 
 export function buildTokenOgImageUrl(params: {

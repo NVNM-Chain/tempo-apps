@@ -5,6 +5,9 @@ import type { TempoEnv } from './env'
 /**
  * nvnm-tempo-devnet-1 — MANTRA's fork of Tempo v1.12.0. EVM chain id 787222.
  *
+ * Displayed as "NVNM Devnet", the label the header switcher and this chain's
+ * block explorer use.
+ *
  * Spread from `tempoDevnet_` so the chain inherits Tempo's block and
  * transaction `formatters`/`serializers`. Our blocks carry
  * `mainBlockGeneralGasLimit`, `sharedGasLimit` and `timestampMillisPart`, and
@@ -18,7 +21,7 @@ import type { TempoEnv } from './env'
 export const nvnmDevnet = defineChain({
 	...tempoDevnet_,
 	id: 787222,
-	name: 'NVNM Tempo Devnet',
+	name: 'NVNM Devnet',
 	rpcUrls: {
 		default: {
 			http: ['https://rpc.nvnm.canary.mantrachain.dev'],

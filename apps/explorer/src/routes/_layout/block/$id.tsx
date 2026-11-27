@@ -133,8 +133,8 @@ export const Route = createFileRoute('/_layout/block/$id')({
 	head: ({ params, loaderData }) => {
 		const blockNumber = loaderData?.block?.number
 		const title = blockNumber
-			? `Block ${blockNumber} \u22c5 Tempo Explorer`
-			: `Block ${params.id} \u22c5 Tempo Explorer`
+			? `Block ${blockNumber} \u22c5 NVNMChain Explorer`
+			: `Block ${params.id} \u22c5 NVNMChain Explorer`
 
 		const search = new URLSearchParams()
 		if (loaderData?.block) {
@@ -162,7 +162,7 @@ export const Route = createFileRoute('/_layout/block/$id')({
 
 		const ogImageUrl = `${OG_BASE_URL}/block/${params.id}?${search.toString()}`
 
-		let description = `View block ${params.id} on Tempo.`
+		let description = `View block ${params.id} on NVNMChain.`
 		if (loaderData?.block) {
 			const block = loaderData.block
 			const txCount = block.transactions.length
@@ -170,7 +170,7 @@ export const Route = createFileRoute('/_layout/block/$id')({
 			const gasLimit = Number(block.gasLimit)
 			const gasPercent =
 				gasLimit > 0 ? `${((gasUsed / gasLimit) * 100).toFixed(1)}%` : '0%'
-			description = `Block ${block.number ?? params.id} · ${txCount} transaction${txCount !== 1 ? 's' : ''} · ${gasPercent} gas used. Explore block details on Tempo.`
+			description = `Block ${block.number ?? params.id} · ${txCount} transaction${txCount !== 1 ? 's' : ''} · ${gasPercent} gas used. Explore block details on NVNMChain.`
 		}
 
 		return {

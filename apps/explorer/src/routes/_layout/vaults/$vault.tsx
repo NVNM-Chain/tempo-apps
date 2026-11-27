@@ -48,7 +48,7 @@ export const Route = createFileRoute('/_layout/vaults/$vault')({
 			</Link>
 		</div>
 	),
-	head: () => ({ meta: [{ title: 'Vault – Tempo Explorer' }] }),
+	head: () => ({ meta: [{ title: 'Vault – NVNMChain Explorer' }] }),
 	loader: async ({ context }) => {
 		await Promise.race([
 			context.queryClient.prefetchQuery(vaultsQueryOptions()),

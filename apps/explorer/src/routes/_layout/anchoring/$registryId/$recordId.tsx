@@ -41,7 +41,7 @@ export const Route = createFileRoute(
 	head: ({ params }) => ({
 		meta: [
 			{
-				title: `Record ${params.registryId}/${params.recordId} – Tempo Explorer`,
+				title: `Record ${params.registryId}/${params.recordId} – NVNMChain Explorer`,
 			},
 		],
 	}),

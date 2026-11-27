@@ -24,7 +24,9 @@ it.skipIf(!process.env.EXPLORER_TEST_ORIGIN)(
 			...html.matchAll(/<meta property="og:image" content="([^"]+)"/g),
 		]
 		expect(images).toHaveLength(1)
-		expect(html).toContain('content="Zone Portal Proxy #1 ⋅ Tempo Explorer"')
+		expect(html).toContain(
+			'content="Zone Portal Proxy #1 ⋅ NVNMChain Explorer"',
+		)
 		expect(html).toContain('deposits, withdrawals, batches, and token balances')
 		const imageContent = images[0]?.[1]
 		if (!imageContent) throw new Error('Missing OG image metadata')

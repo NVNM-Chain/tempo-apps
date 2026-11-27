@@ -18,11 +18,11 @@ export const Route = createFileRoute('/_layout/tokens')({
 	component: TokensPage,
 	head: () => ({
 		meta: [
-			{ title: 'Tokens – Tempo Explorer' },
-			{ property: 'og:title', content: 'Tokens – Tempo Explorer' },
+			{ title: 'Tokens – NVNMChain Explorer' },
+			{ property: 'og:title', content: 'Tokens – NVNMChain Explorer' },
 			{
 				property: 'og:description',
-				content: 'Browse all tokens on Tempo.',
+				content: 'Browse all tokens on NVNMChain.',
 			},
 			{
 				property: 'og:image',

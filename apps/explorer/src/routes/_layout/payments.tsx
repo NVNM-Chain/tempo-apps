@@ -29,12 +29,12 @@ export const Route = createFileRoute('/_layout/payments')({
 	component: PaymentsPage,
 	head: () => ({
 		meta: [
-			{ title: 'Payments – Tempo Explorer' },
-			{ property: 'og:title', content: 'Payments – Tempo Explorer' },
+			{ title: 'Payments – NVNMChain Explorer' },
+			{ property: 'og:title', content: 'Payments – NVNMChain Explorer' },
 			{
 				property: 'og:description',
 				content:
-					'Total Payments Volume and Assets on Platform on Tempo, in USD.',
+					'Total Payments Volume and Assets on Platform on NVNMChain, in USD.',
 			},
 			{ property: 'og:image', content: `${OG_BASE_URL}/payments` },
 			{ property: 'og:image:type', content: 'image/webp' },
@@ -237,8 +237,8 @@ function PaymentsPage(): React.JSX.Element {
 					<header {...styles.header()}>
 						<h1 {...styles.title()}>Payments</h1>
 						<p {...styles.description()}>
-							Total Payments Volume (TPV) and Assets on Platform (AOP) on Tempo,
-							in USD.
+							Total Payments Volume (TPV) and Assets on Platform (AOP) on
+							NVNMChain, in USD.
 						</p>
 					</header>
 
@@ -333,9 +333,9 @@ function PaymentsPage(): React.JSX.Element {
 
 							<p {...styles.note()}>
 								Total Payments Volume is the volume of every transfer of the
-								stablecoins on Tempo, excluding mints and burns. Assets on
+								stablecoins on NVNMChain, excluding mints and burns. Assets on
 								Platform is the value of the stablecoins, tokenized assets and
-								crypto held on Tempo at the end of each day. Lifetime Total
+								crypto held on NVNMChain at the end of each day. Lifetime Total
 								Payments Volume adds up each month since launch, and each
 								period's Assets on Platform is the value at the period's close.
 								Days are UTC and charts count full days only, so the latest week

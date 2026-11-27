@@ -101,7 +101,7 @@ export function Sphere(): React.JSX.Element {
 			<div className="absolute top-0 w-full flex justify-center">
 				<button
 					type="button"
-					aria-label="Rotate Tempo globe rings"
+					aria-label="Rotate NVNMChain globe rings"
 					onClick={() => setTurn((value) => value + 1)}
 					className="pointer-events-auto cursor-pointer w-[656px] max-w-[120vw] aspect-[656/285] rounded-body focus-visible:outline-focus focus-visible:outline-2 focus-visible:outline-offset-[-4px]"
 				>

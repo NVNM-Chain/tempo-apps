@@ -37,7 +37,7 @@ export const Route = createFileRoute('/_layout/fee-amm')({
 	),
 	validateSearch: feeAmmSearchSchema,
 	search: { middlewares: [stripSearchParams({ page: 1, limit: 10 })] },
-	head: () => ({ meta: [{ title: 'Fee AMM – Tempo Explorer' }] }),
+	head: () => ({ meta: [{ title: 'Fee AMM – NVNMChain Explorer' }] }),
 	loaderDeps: ({ search }) => search,
 	// Prefetch caches failures too, letting the page render its retry state.
 	loader: ({ context, deps }) =>
