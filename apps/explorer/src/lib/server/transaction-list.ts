@@ -1,6 +1,4 @@
-import type { Abi } from 'viem'
-import { allAbis } from '#lib/abis'
-import { getAbiItem } from '#lib/domain/contracts'
+import { knownSignature } from '#lib/domain/contracts'
 import { distinct, indexer, list } from '#lib/server/dex-indexer'
 
 export type ListedTransaction = {
@@ -17,7 +15,7 @@ export type ListedTransaction = {
 function method(input: string): string | null {
 	const selector = input.slice(0, 10) as `0x${string}`
 	if (selector.length < 10) return null
-	return getAbiItem({ abi: allAbis as Abi, selector })?.name ?? selector
+	return knownSignature(selector)?.split('(')[0] ?? selector
 }
 
 /** How many transactions are indexed. A count stays fast with `FINAL`, so it needs no `distinct`. */
