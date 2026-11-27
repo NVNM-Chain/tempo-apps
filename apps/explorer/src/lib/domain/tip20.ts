@@ -89,14 +89,19 @@ export async function metadataForTokens(
 	const config = getWagmiConfig()
 
 	// TODO: investigate & consider batch/multicall
+	// One token's failed read leaves only that token unnamed.
 	const metadataResults = await Promise.all(
 		tip20Addresses.map((token) =>
-			Actions.token.getMetadata(config as Config, { token }),
+			Actions.token
+				.getMetadata(config as Config, { token })
+				.catch(() => undefined),
 		),
 	)
 	const map = new Map<string, Metadata>()
-	for (const [index, address] of tip20Addresses.entries())
-		map.set(address.toLowerCase(), metadataResults[index])
+	for (const [index, address] of tip20Addresses.entries()) {
+		const metadata = metadataResults[index]
+		if (metadata) map.set(address.toLowerCase(), metadata)
+	}
 
 	return (address: Address.Address) => map.get(address.toLowerCase())
 }

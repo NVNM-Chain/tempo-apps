@@ -184,16 +184,40 @@ async function normalizeRows(
 ) {
 	if (options.kind === 'transactions') {
 		const client = getBatchedClient()
-		const fetched = await Promise.all(
-			rows.map(async (row) => {
-				const hash = String(row.hash)
-				Hex.assert(hash)
-				return Promise.all([
-					client.getTransaction({ hash }),
-					client.getTransactionReceipt({ hash }),
-				])
-			}),
-		)
+		const blocks = new Map<bigint, Promise<number>>()
+		const timestamp = (blockNumber: bigint) => {
+			if (!blocks.has(blockNumber))
+				blocks.set(
+					blockNumber,
+					client
+						.getBlock({ blockNumber })
+						.then((block) => Number(block.timestamp)),
+				)
+			return blocks.get(blockNumber) as Promise<number>
+		}
+		// tidx can stream a block before the node serves it: wait briefly, then
+		// leave out a transaction the node still can't return.
+		const fetched = (
+			await Promise.all(
+				rows.map(async (row) => {
+					const hash = String(row.hash)
+					Hex.assert(hash)
+					try {
+						const receipt = await client.waitForTransactionReceipt({
+							hash,
+							timeout: 10_000,
+						})
+						const [transaction, at] = await Promise.all([
+							client.getTransaction({ hash }),
+							timestamp(receipt.blockNumber),
+						])
+						return [transaction, receipt, at] as const
+					} catch {
+						return null
+					}
+				}),
+			)
+		).filter((row) => row !== null)
 		const filtered = fetched.filter(([transaction, receipt]) => {
 			if (options.status && receipt.status !== options.status) return false
 			if (
@@ -226,42 +250,37 @@ async function normalizeRows(
 		const getTokenMetadata = await metadataForTokens(
 			filtered.flatMap(([, receipt]) => receipt.logs.map((log) => log.address)),
 		)
-		const blocks = new Map<bigint, Promise<number>>()
-		const timestamp = (blockNumber: bigint) => {
-			if (!blocks.has(blockNumber))
-				blocks.set(
-					blockNumber,
-					client
-						.getBlock({ blockNumber })
-						.then((block) => Number(block.timestamp)),
-				)
-			return blocks.get(blockNumber) as Promise<number>
-		}
-		return Promise.all(
-			filtered.map(async ([transaction, receipt]) =>
-				toEnrichedTransaction(transaction, receipt as TransactionReceipt, {
-					timestamp: await timestamp(receipt.blockNumber),
-					includeKnownEvents: true,
-					getTokenMetadata,
-				}),
-			),
+		return filtered.map(([transaction, receipt, at]) =>
+			toEnrichedTransaction(transaction, receipt as TransactionReceipt, {
+				timestamp: at,
+				includeKnownEvents: true,
+				getTokenMetadata,
+			}),
 		)
 	}
-	return Promise.all(
+	const transfers = await Promise.all(
 		rows.map(async (row) => {
 			const tokenAddress = String(row.address)
 			Address.assert(tokenAddress)
 			const hash = String(row.tx_hash)
 			Hex.assert(hash)
-			const decoded = decodeEventLog({
-				abi: transferAbi,
-				data: String(row.data) as Hex.Hex,
-				topics: [
-					String(row.topic0),
-					String(row.topic1),
-					String(row.topic2),
-				] as [Hex.Hex, Hex.Hex, Hex.Hex],
-			})
+			// An ERC-721 Transfer has the same topic but no amount.
+			const decoded = (() => {
+				try {
+					return decodeEventLog({
+						abi: transferAbi,
+						data: String(row.data) as Hex.Hex,
+						topics: [
+							String(row.topic0),
+							String(row.topic1),
+							String(row.topic2),
+						] as [Hex.Hex, Hex.Hex, Hex.Hex],
+					})
+				} catch {
+					return undefined
+				}
+			})()
+			if (!decoded) return null
 			const transfer = {
 				id: `${hash}-${row.log_idx}`,
 				from: decoded.args.from,
@@ -275,14 +294,17 @@ async function normalizeRows(
 			if (!metadata.has(tokenAddress))
 				metadata.set(
 					tokenAddress,
-					getTokensMetadata([tokenAddress]).then(([token]) => ({
-						address: tokenAddress,
-						symbol: token?.symbol ?? '',
-						decimals: token?.decimals ?? 0,
-						currency: token?.currency ?? '',
-					})),
+					getTokensMetadata([tokenAddress])
+						.catch(() => [])
+						.then(([token]) => ({
+							address: tokenAddress,
+							symbol: token?.symbol ?? '',
+							decimals: token?.decimals ?? 0,
+							currency: token?.currency ?? '',
+						})),
 				)
 			return { ...transfer, token: await metadata.get(tokenAddress) }
 		}),
 	)
+	return transfers.filter((transfer) => transfer !== null)
 }
