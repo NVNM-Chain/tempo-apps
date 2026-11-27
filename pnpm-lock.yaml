@@ -476,9 +476,6 @@ importers:
       abitype:
         specifier: 'catalog:'
         version: 1.2.4(typescript@6.0.3)(zod@4.6.7)
-      accounts:
-        specifier: 'catalog:'
-        version: 0.18.0(@modelcontextprotocol/sdk@1.32.2(@cfworker/json-schema@4.1.1)(zod@4.6.7))(@types/react@19.2.14)(@wagmi/core@3.6.5)(express@5.2.1)(immer@11.2.9)(react@19.2.5)(typescript@6.0.3)(use-sync-external-store@1.7.0(react@19.2.5))(viem@0.0.0-pr-5325-621d5f9(bufferutil@4.1.0)(typescript@6.0.3)(utf-8-validate@5.0.10)(zod@4.6.7))(wagmi@3.7.7)
       animejs:
         specifier: 'catalog:'
         version: 4.3.6
@@ -10078,6 +10075,7 @@ snapshots:
       - next
       - typescript
       - use-sync-external-store
+    optional: true
 
   acorn@8.16.0: {}
 
@@ -11550,6 +11548,7 @@ snapshots:
       hono: 4.13.14
     transitivePeerDependencies:
       - typescript
+    optional: true
 
   mrmime@2.0.1: {}
 
@@ -11699,6 +11698,7 @@ snapshots:
       typescript: 6.0.3
     transitivePeerDependencies:
       - zod
+    optional: true
 
   ox@0.14.34(typescript@6.0.2)(zod@4.6.7):
     dependencies:
@@ -13070,6 +13070,7 @@ snapshots:
       react: 19.2.5
     transitivePeerDependencies:
       - typescript
+    optional: true
 
   wcwidth@1.0.1:
     dependencies:
@@ -13092,6 +13093,7 @@ snapshots:
     transitivePeerDependencies:
       - typescript
       - zod
+    optional: true
 
   webidl-conversions@3.0.1: {}
 

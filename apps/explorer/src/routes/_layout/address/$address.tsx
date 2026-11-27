@@ -373,7 +373,7 @@ export const Route = createFileRoute('/_layout/address/$address')({
 					: 'Address'
 		const contractInfo = loaderData?.contractInfo
 		const contractName = !isToken ? contractInfo?.name : undefined
-		const title = `${contractName ?? `${label} ${HexFormatter.truncate(params.address as Hex.Hex)}`} ⋅ Tempo Explorer`
+		const title = `${contractName ?? `${label} ${HexFormatter.truncate(params.address as Hex.Hex)}`} ⋅ NVNMChain Explorer`
 
 		let description: string
 		let ogImageUrl: string
@@ -414,12 +414,12 @@ export const Route = createFileRoute('/_layout/address/$address')({
 			})
 		} else if (isZonePortalAddress(params.address as Address.Address)) {
 			description =
-				'View Zone Portal deposits, withdrawals, batches, and token balances on Tempo Explorer.'
+				'View Zone Portal deposits, withdrawals, batches, and token balances on NVNMChain Explorer.'
 			ogImageUrl = buildZonePortalOgImageUrl(params.address)
 		} else {
 			// Activity and balances load after hydration. Missing data is not zero.
 			description = contractInfo?.description
-				? `${contractInfo.description}. View contract activity on Tempo Explorer.`
+				? `${contractInfo.description}. View contract activity on NVNMChain Explorer.`
 				: buildAddressDescription(null, params.address)
 
 			ogImageUrl = buildAddressOgImageUrl({
@@ -1751,7 +1751,7 @@ function SectionsWrapper(props: {
 			label: (
 				<InfoColumnLabel
 					label="Processed in"
-					info="The checkpoint that proves this withdrawal and queues it for processing on Tempo."
+					info="The checkpoint that proves this withdrawal and queues it for processing on NVNMChain."
 				/>
 			),
 			align: 'start',
@@ -1766,7 +1766,7 @@ function SectionsWrapper(props: {
 			label: (
 				<InfoColumnLabel
 					label="Checkpoint"
-					info="A checkpoint proves the zone’s execution progress to Tempo without publishing its transaction data."
+					info="A checkpoint proves the zone’s execution progress to NVNMChain without publishing its transaction data."
 				/>
 			),
 			align: 'start',

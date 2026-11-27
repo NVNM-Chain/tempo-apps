@@ -55,10 +55,10 @@ describe('canonical urls and schema.org payload', () => {
 		)
 	})
 
-	it('describes the application as the NVNM explorer', () => {
+	it('describes the application as the NVNMChain explorer', () => {
 		expect(getExplorerWebApplication('nvnm')).toMatchObject({
 			'@id': `https://${NVNM_HOST}/#application`,
-			name: 'NVNM Explorer',
+			name: 'NVNMChain Explorer',
 			url: `https://${NVNM_HOST}/`,
 		})
 	})

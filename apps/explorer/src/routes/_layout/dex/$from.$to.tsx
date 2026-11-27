@@ -61,7 +61,7 @@ export const Route = createFileRoute('/_layout/dex/$from/$to')({
 			</Link>
 		</div>
 	),
-	head: () => ({ meta: [{ title: 'Stablecoin DEX – Tempo Explorer' }] }),
+	head: () => ({ meta: [{ title: 'Stablecoin DEX – NVNMChain Explorer' }] }),
 	loaderDeps: ({ search }) => search,
 	loader: ({ context, deps, params }) =>
 		context.queryClient.prefetchQuery(

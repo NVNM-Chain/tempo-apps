@@ -173,11 +173,11 @@ export const Route = createFileRoute('/_layout/simulate')({
 	search: { middlewares: [stripSearchParams(defaultSearch)] },
 	head: () => ({
 		meta: [
-			{ title: 'Simulate Transaction ⋅ Tempo Explorer' },
+			{ title: 'Simulate Transaction ⋅ NVNMChain Explorer' },
 			{
 				name: 'description',
 				content:
-					'Simulate a Tempo contract call and inspect its trace, revert reason, events, and state changes.',
+					'Simulate an NVNMChain contract call and inspect its trace, revert reason, events, and state changes.',
 			},
 		],
 	}),

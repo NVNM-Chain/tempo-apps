@@ -43,7 +43,7 @@ export const Route = createFileRoute('/_layout/vaults/')({
 	component: VaultsPage,
 	validateSearch: vaultSearchSchema,
 	search: { middlewares: [stripSearchParams(defaultVaultSearch)] },
-	head: () => ({ meta: [{ title: 'Vaults – Tempo Explorer' }] }),
+	head: () => ({ meta: [{ title: 'Vaults – NVNMChain Explorer' }] }),
 	loader: async ({ context }) => {
 		await Promise.race([
 			context.queryClient.prefetchQuery(vaultsQueryOptions()),
@@ -214,8 +214,8 @@ function VaultsPage(): React.JSX.Element {
 					<div {...styles.header()}>
 						<h1 {...styles.title()}>Vaults</h1>
 						<p {...styles.intro()}>
-							Tempo Earn and ERC-4626 vaults on Tempo, by asset, with the value
-							each one holds.
+							Tempo Earn and ERC-4626 vaults on NVNMChain, by asset, with the
+							value each one holds.
 						</p>
 					</div>
 

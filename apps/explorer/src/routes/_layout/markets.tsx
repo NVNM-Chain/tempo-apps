@@ -72,11 +72,11 @@ export const Route = createFileRoute('/_layout/markets')({
 	search: { middlewares: [stripSearchParams(defaultMarketsSearch)] },
 	head: () => ({
 		meta: [
-			{ title: 'Markets – Tempo Explorer' },
-			{ property: 'og:title', content: 'Markets – Tempo Explorer' },
+			{ title: 'Markets – NVNMChain Explorer' },
+			{ property: 'og:title', content: 'Markets – NVNMChain Explorer' },
 			{
 				property: 'og:description',
-				content: 'Exchange trading volume and liquidity on Tempo.',
+				content: 'Exchange trading volume and liquidity on NVNMChain.',
 			},
 			{ property: 'og:image', content: `${OG_BASE_URL}/markets` },
 			{ property: 'og:image:type', content: 'image/webp' },
@@ -460,7 +460,7 @@ function MarketsPage(): React.JSX.Element {
 						<div {...styles.heading()}>
 							<h1 {...styles.title()}>Markets</h1>
 							<p {...styles.intro()}>
-								Exchange trading volume and liquidity on Tempo
+								Exchange trading volume and liquidity on NVNMChain
 							</p>
 						</div>
 						<Tabs.Root

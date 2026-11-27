@@ -13,7 +13,7 @@ import {
 	http,
 	serialize,
 } from 'wagmi'
-import { tempoWallet } from 'wagmi/connectors'
+import { injected } from 'wagmi/connectors'
 
 export type WagmiConfig = ReturnType<typeof getWagmiConfig>
 let wagmiConfigSingleton: ReturnType<typeof createConfig> | null = null
@@ -139,7 +139,7 @@ function createWagmiConfig(): ReturnType<typeof createConfig> {
 		ssr: true,
 		multiInjectedProviderDiscovery: true,
 		chains: [chain],
-		connectors: [tempoWallet({ name: 'NVNMChain Wallet' })],
+		connectors: [injected()],
 		storage: createStorage({ storage: cookieStorage }),
 		transports: {
 			[chain.id]: transport,

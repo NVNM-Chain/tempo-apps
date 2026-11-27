@@ -1,6 +1,6 @@
-# Tempo Explorer
+# NVNMChain Explorer
 
-> The official block explorer for the Tempo blockchain. View blocks, transactions, receipts, addresses, contracts, tokens, TIP-403 policies, Fee AMM pools, and network activity.
+> The official block explorer for the NVNMChain blockchain. View blocks, transactions, receipts, addresses, contracts, tokens, TIP-403 policies, Fee AMM pools, and network activity.
 
 For a full reference, see [`/llms-full.txt`](/llms-full.txt).
 

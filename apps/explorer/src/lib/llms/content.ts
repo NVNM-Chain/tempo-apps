@@ -178,7 +178,7 @@ export const docs = {
 	'/payments': {
 		title: 'Payments',
 		description:
-			'Total payment volume (TPV) and assets on platform (AOP) on Tempo: daily, weekly and lifetime TPV, end-of-day AOP, and charts of daily and weekly TPV and of daily AOP split into stablecoins, tokenized assets (RWAs) and crypto. TPV counts every transfer of an in-scope stablecoin minus mints and burns; AOP is the value of the assets held on Tempo. Days are UTC.',
+			'Total payment volume (TPV) and assets on platform (AOP) on NVNMChain: daily, weekly and lifetime TPV, end-of-day AOP, and charts of daily and weekly TPV and of daily AOP split into stablecoins, tokenized assets (RWAs) and crypto. TPV counts every transfer of an in-scope stablecoin minus mints and burns; AOP is the value of the assets held on NVNMChain. Days are UTC.',
 	},
 	'/markets': {
 		title: 'Markets',
@@ -197,7 +197,7 @@ export const docs = {
 	'/vaults/': {
 		title: 'Vaults',
 		description:
-			'Tempo Earn vaults and ERC-4626 vaults on Tempo, listed by asset and kind without naming who runs them: total value locked in US dollars and first deposit or deployment date, with TVL, funded-vault and asset totals that count money one vault deposits into another once. Each vault links to its page.',
+			'Tempo Earn vaults and ERC-4626 vaults on NVNMChain, listed by asset and kind without naming who runs them: total value locked in US dollars and first deposit or deployment date, with TVL, funded-vault and asset totals that count money one vault deposits into another once. Each vault links to its page.',
 		params: {
 			kind: 'Show `all` vaults, only Tempo `earn` vaults, or only `erc4626` vaults.',
 			asset:

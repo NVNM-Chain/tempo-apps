@@ -498,16 +498,16 @@ app.get(
 
 // Listing and fallback cards use the same renderer as detail cards.
 for (const [path, title, subtitle] of [
-	['/explorer', 'Search. Explore. Discover.', 'Tempo Explorer'],
-	['/blocks', 'Blocks', 'Explore activity on Tempo'],
-	['/tokens', 'Tokens', 'Explore assets on Tempo'],
-	['/markets', 'Markets', 'Exchange trading volume and liquidity on Tempo'],
+	['/explorer', 'Search. Explore. Discover.', 'NVNMChain Explorer'],
+	['/blocks', 'Blocks', 'Explore activity on NVNMChain'],
+	['/tokens', 'Tokens', 'Explore assets on NVNMChain'],
+	['/markets', 'Markets', 'Exchange trading volume and liquidity on NVNMChain'],
 	[
 		'/payments',
 		'Payments',
-		'Total Payments Volume and Assets on Platform on Tempo',
+		'Total Payments Volume and Assets on Platform on NVNMChain',
 	],
-	['/tx', 'Transactions', 'Explore payments on Tempo'],
+	['/tx', 'Transactions', 'Explore payments on NVNMChain'],
 ] as const) {
 	app.get(path, async (context) => {
 		const [fonts, images] = await Promise.all([

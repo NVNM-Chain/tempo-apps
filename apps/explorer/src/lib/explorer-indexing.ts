@@ -80,7 +80,7 @@ export function getExplorerWebApplication(tempoEnv: TempoEnv) {
 	const origin = CANONICAL_EXPLORER_ORIGINS[tempoEnv]
 	if (!origin) return undefined
 
-	const name = 'NVNM Explorer'
+	const name = 'NVNMChain Explorer'
 
 	return {
 		'@context': 'https://schema.org',
@@ -88,7 +88,7 @@ export function getExplorerWebApplication(tempoEnv: TempoEnv) {
 		'@type': 'WebApplication',
 		applicationCategory: 'DeveloperApplication',
 		description:
-			'Explore and analyze blocks, transactions, contracts, and tokens on Tempo.',
+			'Explore and analyze blocks, transactions, contracts, and tokens on NVNMChain.',
 		isPartOf: { '@id': 'https://mantrachain.io/#website' },
 		name,
 		operatingSystem: 'Web',

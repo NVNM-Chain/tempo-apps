@@ -141,7 +141,7 @@ export const Route = createFileRoute('/_layout/tx/$hash')({
 		hash: zHash(),
 	}),
 	head: ({ params, loaderData }) => {
-		const title = `Transaction ${params.hash.slice(0, 10)}…${params.hash.slice(-6)} ⋅ Tempo Explorer`
+		const title = `Transaction ${params.hash.slice(0, 10)}…${params.hash.slice(-6)} ⋅ NVNMChain Explorer`
 		const descriptionEvents = loaderData
 			? selectTransactionDescriptionEvents({
 					activityEvents: loaderData.activityEvents,
@@ -158,7 +158,7 @@ export const Route = createFileRoute('/_layout/tx/$hash')({
 					from: loaderData.receipt.from,
 					events: descriptionEvents,
 				})
-			: 'View transaction details on Tempo Explorer.'
+			: 'View transaction details on NVNMChain Explorer.'
 
 		return {
 			title,

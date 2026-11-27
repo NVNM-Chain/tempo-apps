@@ -72,7 +72,7 @@ export function Receipt(props: Receipt.Props): React.JSX.Element {
 		).toString()
 		if (navigator.share) {
 			try {
-				await navigator.share({ title: 'Tempo receipt', url })
+				await navigator.share({ title: 'NVNMChain receipt', url })
 				return
 			} catch (error) {
 				if (error instanceof DOMException && error.name === 'AbortError') return

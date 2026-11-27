@@ -52,7 +52,6 @@
 		"@tempo/rpc-utils": "workspace:*",
 		"@tempoxyz/ds": "catalog:",
 		"abitype": "catalog:",
-		"accounts": "catalog:",
 		"animejs": "catalog:",
 		"cva": "catalog:",
 		"lucide-react": "catalog:",

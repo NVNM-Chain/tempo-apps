@@ -65,14 +65,14 @@ export const Route = createFileRoute('/_layout/policy/$id')({
 	},
 	head: ({ params, loaderData }) => {
 		const policyId = loaderData?.policyId ?? params.id
-		const title = `TIP-403 Policy #${policyId} ⋅ Tempo Explorer`
+		const title = `TIP-403 Policy #${policyId} ⋅ NVNMChain Explorer`
 		return {
 			title,
 			meta: [
 				{ title },
 				{
 					name: 'description',
-					content: `View TIP-403 transfer policy ${policyId} on Tempo.`,
+					content: `View TIP-403 transfer policy ${policyId} on NVNMChain.`,
 				},
 			],
 		}

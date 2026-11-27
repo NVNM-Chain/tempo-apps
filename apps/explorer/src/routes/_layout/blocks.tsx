@@ -31,11 +31,11 @@ export const Route = createFileRoute('/_layout/blocks')({
 	component: RouteComponent,
 	head: () => ({
 		meta: [
-			{ title: 'Blocks – Tempo Explorer' },
-			{ property: 'og:title', content: 'Blocks – Tempo Explorer' },
+			{ title: 'Blocks – NVNMChain Explorer' },
+			{ property: 'og:title', content: 'Blocks – NVNMChain Explorer' },
 			{
 				property: 'og:description',
-				content: 'View the latest blocks on Tempo.',
+				content: 'View the latest blocks on NVNMChain.',
 			},
 			{
 				property: 'og:image',

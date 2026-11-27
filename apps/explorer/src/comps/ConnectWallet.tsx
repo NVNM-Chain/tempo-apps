@@ -78,19 +78,11 @@ function ConnectWalletInner({
 			(candidate) =>
 				candidate.id !== 'injected' && candidate.name !== 'Injected',
 		)
-		const prioritizedConnectors = [
-			...(brandedConnectors.length > 0
+		const prioritizedConnectors = (
+			brandedConnectors.length > 0
 				? brandedConnectors
-				: injectedConnectors.filter(
-						(candidate) => candidate.id === 'injected',
-					)),
-		]
-			.sort((a, b) => {
-				if (a.id === 'xyz.tempo') return -1
-				if (b.id === 'xyz.tempo') return 1
-				return 0
-			})
-			.slice(0, 2)
+				: injectedConnectors.filter((candidate) => candidate.id === 'injected')
+		).slice(0, 2)
 
 		return (
 			<div className="flex items-center gap-1.5">

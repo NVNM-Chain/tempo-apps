@@ -23,7 +23,7 @@ export function CardBackground(props: {
 }) {
 	const [headline, description] = messages[props.title] ?? [
 		props.title,
-		'Explore activity on Tempo',
+		'Explore activity on NVNMChain',
 	]
 	return (
 		<ReceiptBackground
@@ -95,7 +95,7 @@ export function ListingCard(props: {
 				height={40}
 				tw="absolute"
 				style={{ bottom: 44, left: 528 }}
-				alt="Tempo"
+				alt="NVNMChain"
 			/>
 		</div>
 	)
@@ -169,7 +169,7 @@ export function ReceiptBackground(props: {
 				height={50}
 				tw="absolute"
 				style={{ right: 62, bottom: 48 }}
-				alt="Tempo"
+				alt="NVNMChain"
 			/>
 		</div>
 	)

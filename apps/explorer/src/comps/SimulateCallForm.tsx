@@ -187,7 +187,7 @@ export function SimulateCallForm(
 							props.onStepChange(1)
 						}}
 						className="mt-[2px] w-fit border-solid"
-						title="Run several calls in order against each other's state, the way a Tempo batch transaction executes"
+						title="Run several calls in order against each other's state, the way an NVNMChain batch transaction executes"
 					>
 						<PlusIcon className="size-[12px]" />
 						Add a call
@@ -196,8 +196,8 @@ export function SimulateCallForm(
 
 				{isBatch && (
 					<p className="type-card text-content-dimmed">
-						Calls run in order against each other{'’'}s state, the way a Tempo
-						batch transaction executes.
+						Calls run in order against each other{'’'}s state, the way an
+						NVNMChain batch transaction executes.
 					</p>
 				)}
 

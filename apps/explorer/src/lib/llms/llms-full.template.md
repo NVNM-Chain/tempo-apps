@@ -1,8 +1,8 @@
-# Tempo Explorer — Full LLM Reference
+# NVNMChain Explorer — Full LLM Reference
 
-> Comprehensive reference for agents and AI systems using Tempo Explorer.
+> Comprehensive reference for agents and AI systems using NVNMChain Explorer.
 
-Tempo Explorer is a blockchain explorer for the Tempo network. It helps users inspect blocks, transactions, receipts, addresses, contracts, tokens, TIP-403 policies, balances, Fee AMM pools, and on-chain events.
+NVNMChain Explorer is a blockchain explorer for the NVNMChain network. It helps users inspect blocks, transactions, receipts, addresses, contracts, tokens, TIP-403 policies, balances, Fee AMM pools, and on-chain events.
 
 For a shorter overview, see [`/llms.txt`](/llms.txt).
 
@@ -132,4 +132,4 @@ Use:
 
 ## Current Limitations
 
-Tempo Explorer currently does not expose top-level network analytics, a top-level transaction list, validator or staking explorer pages, a public token/address verification workflow, or historical contract source diffs.
+NVNMChain Explorer currently does not expose top-level network analytics, a top-level transaction list, validator or staking explorer pages, a public token/address verification workflow, or historical contract source diffs.

@@ -45,7 +45,9 @@ export const Route = createFileRoute('/_layout/anchoring/$registryId/')({
 	},
 	head: ({ loaderData }) => ({
 		meta: [
-			{ title: `${loaderData?.registry.name ?? 'Registry'} – Tempo Explorer` },
+			{
+				title: `${loaderData?.registry.name ?? 'Registry'} – NVNMChain Explorer`,
+			},
 		],
 	}),
 })

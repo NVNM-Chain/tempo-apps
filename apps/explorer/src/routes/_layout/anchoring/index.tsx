@@ -45,7 +45,7 @@ export const Route = createFileRoute('/_layout/anchoring/')({
 		const listed = await fetchAnchoringRegistries({ data: { page } })
 		return { ...listed, records: [] as AnchoringRecord[], more: false }
 	},
-	head: () => ({ meta: [{ title: 'Anchoring – Tempo Explorer' }] }),
+	head: () => ({ meta: [{ title: 'Anchoring – NVNMChain Explorer' }] }),
 })
 
 function AnchoringPage(): React.JSX.Element {
