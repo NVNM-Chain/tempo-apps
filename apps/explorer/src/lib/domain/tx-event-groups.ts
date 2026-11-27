@@ -1,5 +1,5 @@
 import type { Log } from 'viem'
-import { toEventSelector } from 'viem'
+import { toEventSelector, zeroHash } from 'viem'
 import type { KnownEvent } from '#lib/domain/known-events'
 
 export type EventGroup = {
@@ -17,6 +17,9 @@ const eventSignatures = {
 	),
 	Mint: toEventSelector('event Mint(address indexed, uint256)'),
 	Burn: toEventSelector('event Burn(address indexed, uint256)'),
+	BurnAt: toEventSelector(
+		'event BurnAt(address indexed, address indexed, uint256 indexed)',
+	),
 	DepositMade: toEventSelector(
 		'event DepositMade(bytes32 indexed, address indexed, address, address, uint128, uint128, bytes32)',
 	),
@@ -25,6 +28,10 @@ const eventSignatures = {
 	),
 	WithdrawalProcessed: toEventSelector(
 		'event WithdrawalProcessed(address indexed, address, uint128, bool)',
+	),
+	// Private Zones' portals also index the withdrawal's sender tag.
+	PrivateWithdrawalProcessed: toEventSelector(
+		'event WithdrawalProcessed(address indexed, bytes32 indexed, address, uint128, bool)',
 	),
 	BounceBack: toEventSelector(
 		'event BounceBack(bytes32 indexed, address indexed, address, uint128)',
@@ -38,13 +45,45 @@ export function getEventName(log: Log): string | null {
 		return 'TransferWithMemo'
 	if (topic0 === eventSignatures.Mint.toLowerCase()) return 'Mint'
 	if (topic0 === eventSignatures.Burn.toLowerCase()) return 'Burn'
+	if (topic0 === eventSignatures.BurnAt.toLowerCase()) return 'BurnAt'
 	if (topic0 === eventSignatures.DepositMade.toLowerCase()) return 'DepositMade'
 	if (topic0 === eventSignatures.EncryptedDepositMade.toLowerCase())
 		return 'EncryptedDepositMade'
-	if (topic0 === eventSignatures.WithdrawalProcessed.toLowerCase())
+	if (
+		topic0 === eventSignatures.WithdrawalProcessed.toLowerCase() ||
+		topic0 === eventSignatures.PrivateWithdrawalProcessed.toLowerCase()
+	)
 		return 'WithdrawalProcessed'
 	if (topic0 === eventSignatures.BounceBack.toLowerCase()) return 'BounceBack'
 	return null
+}
+
+function isBurnAtTransferPair(transfer: Log, burn: Log): boolean {
+	return (
+		getEventName(transfer) === 'Transfer' &&
+		getEventName(burn) === 'BurnAt' &&
+		transfer.address.toLowerCase() === burn.address.toLowerCase() &&
+		transfer.topics[1]?.toLowerCase() === burn.topics[2]?.toLowerCase() &&
+		transfer.topics[2]?.toLowerCase() === zeroHash &&
+		transfer.data.toLowerCase() === burn.topics[3]?.toLowerCase()
+	)
+}
+
+/** Match one preceding zero-address transfer per burn, including repeated burns. */
+export function findBurnAtTransfers<T extends Log>(logs: readonly T[]): Set<T> {
+	const transfers = new Set<T>()
+	for (const [index, burn] of logs.entries()) {
+		if (getEventName(burn) !== 'BurnAt') continue
+		for (let transferIndex = index - 1; transferIndex >= 0; transferIndex--) {
+			const transfer = logs[transferIndex]
+			if (transfers.has(transfer)) continue
+			if (isBurnAtTransferPair(transfer, burn)) {
+				transfers.add(transfer)
+				break
+			}
+		}
+	}
+	return transfers
 }
 
 export function groupRelatedEvents(
@@ -68,6 +107,16 @@ export function groupRelatedEvents(
 		if (eventName === 'Transfer' || eventName === 'TransferWithMemo') {
 			const secondLog = logs[i + 1]
 			const secondEventName = secondLog ? getEventName(secondLog) : null
+
+			if (secondLog && isBurnAtTransferPair(log, secondLog)) {
+				groups.push({
+					logs: [log, secondLog],
+					startIndex: i,
+					knownEvent: knownEvents[i + 1],
+				})
+				i += 2
+				continue
+			}
 
 			if (secondEventName === 'Mint' || secondEventName === 'Burn') {
 				const thirdLog = logs[i + 2]

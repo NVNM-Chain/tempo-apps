@@ -186,7 +186,7 @@ export function SimulateCallForm(
 							}))
 							props.onStepChange(1)
 						}}
-						className="mt-[2px] w-fit border-dashed"
+						className="mt-[2px] w-fit border-solid"
 						title="Run several calls in order against each other's state, the way a Tempo batch transaction executes"
 					>
 						<PlusIcon className="size-[12px]" />
@@ -195,14 +195,14 @@ export function SimulateCallForm(
 				)}
 
 				{isBatch && (
-					<p className="text-[11px] text-content-dimmed">
+					<p className="type-card text-content-dimmed">
 						Calls run in order against each other{'’'}s state, the way a Tempo
 						batch transaction executes.
 					</p>
 				)}
 
 				{props.formError && (
-					<p className="text-[12px] text-negative">{props.formError}</p>
+					<p className="type-card text-negative">{props.formError}</p>
 				)}
 			</div>
 		</div>
@@ -243,7 +243,7 @@ function ContextBar(props: {
 	return (
 		<div className="flex flex-col gap-[8px] border-b border-card-border px-[16px] py-[10px]">
 			<div className="flex items-center justify-between gap-[8px]">
-				<span className="text-[11px] text-tertiary">Simulate against</span>
+				<span className="type-card text-tertiary">Simulate against</span>
 				<SegmentedControl
 					size="sm"
 					value={pinned ? 'pinned' : 'latest'}
@@ -295,8 +295,8 @@ function LoadTransaction(props: {
 }): React.JSX.Element {
 	const id = React.useId()
 	return (
-		<div className="flex flex-col gap-[5px] rounded-[8px] border border-dashed border-card-border px-[10px] py-[9px]">
-			<label className="text-[11px] text-tertiary" htmlFor={id}>
+		<div className="flex flex-col gap-[5px] rounded-body border border-solid border-card-border px-[10px] py-[9px]">
+			<label className="type-card text-tertiary" htmlFor={id}>
 				Replay an existing transaction
 			</label>
 			<div className="flex gap-[6px]">
@@ -314,7 +314,7 @@ function LoadTransaction(props: {
 				</Button>
 			</div>
 			{props.error && (
-				<span className="text-[11px] text-negative">{props.error}</span>
+				<span className="type-card text-negative">{props.error}</span>
 			)}
 		</div>
 	)
@@ -334,7 +334,7 @@ function StepTabs(props: {
 }): React.JSX.Element {
 	return (
 		<div className="flex flex-col gap-[6px]">
-			<span className="text-[11px] text-tertiary">
+			<span className="type-card text-tertiary">
 				Calls
 				<span className="ml-[6px] text-content-dimmed">
 					{props.calls.length} in order
@@ -350,13 +350,13 @@ function StepTabs(props: {
 								onClick={() => props.onSelect(index)}
 								title={call.to || `Call ${index + 1}`}
 								className={cx(
-									'flex h-[26px] items-center gap-[6px] rounded-[6px] border px-[8px] text-[11px] cursor-pointer press-down transition-colors',
+									'flex h-[28px] items-center gap-[6px] rounded-body border px-[8px] type-card cursor-pointer press-down transition-colors',
 									selected
 										? 'border-accent bg-accent/8 text-primary'
 										: 'border-card-border text-tertiary hover:text-secondary',
 								)}
 							>
-								<span className="flex size-[15px] shrink-0 items-center justify-center rounded-full bg-distinct text-[10px] text-tertiary">
+								<span className="flex size-[15px] shrink-0 items-center justify-center rounded-full bg-distinct label-12 text-tertiary">
 									{index + 1}
 								</span>
 								<span className="font-mono">
@@ -382,7 +382,7 @@ function StepTabs(props: {
 					type="button"
 					onClick={props.onAdd}
 					title="Add a call"
-					className="flex size-[26px] items-center justify-center rounded-[6px] border border-dashed border-card-border text-tertiary cursor-pointer press-down hover:border-accent hover:text-primary"
+					className="flex size-[26px] items-center justify-center rounded-body border border-solid border-card-border text-tertiary cursor-pointer press-down hover:border-accent hover:text-primary"
 				>
 					<PlusIcon className="size-[12px]" />
 				</button>
@@ -588,21 +588,21 @@ export function CalldataField(props: {
 					/>
 				) : props.hasTarget && !abi ? (
 					// No ABI is a fact, not an error — say it once and stay usable.
-					<span className="text-[11px] text-content-dimmed">
+					<span className="type-card text-content-dimmed">
 						no ABI · hex only
 					</span>
 				) : undefined
 			}
 		>
 			{mismatch && mode === 'decoded' && (
-				<div className="rounded-[6px] border border-warning/40 bg-warning-background px-[9px] py-[6px] text-[11px] text-secondary">
+				<div className="rounded-body border border-warning/40 bg-warning-background px-[9px] py-[6px] type-card text-secondary">
 					This calldata doesn{'’'}t match any function in the contract{'’'}s ABI
 					— showing hex.
 				</div>
 			)}
 
 			{showDecoded ? (
-				<div className="flex flex-col gap-[9px] rounded-[6px] border border-card-border bg-base-plane p-[9px]">
+				<div className="flex flex-col gap-[9px] rounded-body border border-card-border bg-base-plane p-[9px]">
 					<select
 						value={selector}
 						onChange={(event) => {
@@ -635,7 +635,7 @@ export function CalldataField(props: {
 							key={`${input.name}-${input.type}-${index}`}
 							className="flex flex-col gap-[4px]"
 						>
-							<span className="text-[11px] text-tertiary">
+							<span className="type-card text-tertiary">
 								{input.name || `arg ${index}`}
 								<span className="ml-[6px] font-mono text-content-dimmed">
 									{input.type}
@@ -685,8 +685,8 @@ export function CalldataField(props: {
 					))}
 
 					{data && data !== '0x' && (
-						<div className="flex items-center gap-[8px] border-t border-dashed border-card-border pt-[8px] text-[11px]">
-							<span className="min-w-0 flex-1 truncate font-mono text-tertiary">
+						<div className="flex items-center gap-[8px] border-t border-solid border-card-border pt-[8px] type-card">
+							<span className="min-w-0 flex-1 truncate type-card-data text-tertiary">
 								{data}
 							</span>
 							<span className="shrink-0 text-content-dimmed">
@@ -721,7 +721,7 @@ export function CalldataField(props: {
 						)}
 					/>
 					{byteLength > 0 && (
-						<span className="text-[11px] text-content-dimmed">
+						<span className="type-card text-content-dimmed">
 							{byteLength} bytes
 							{byteLength > MAX_URL_CALLDATA_BYTES &&
 								' · too long for a shareable link'}
@@ -756,12 +756,12 @@ export function OptionalRow(props: {
 				<button
 					type="button"
 					onClick={() => setOpen(true)}
-					className="flex min-w-0 flex-1 items-center gap-[8px] text-left text-[12px] text-tertiary cursor-pointer press-down hover:text-secondary"
+					className="flex min-w-0 flex-1 items-center gap-[8px] text-left type-card text-tertiary cursor-pointer press-down hover:text-secondary"
 				>
 					<span className="shrink-0 text-content-dimmed">{props.icon}</span>
 					<span className="shrink-0">{props.label}</span>
 					{set && (
-						<span className="min-w-0 truncate font-mono text-[11px] text-primary">
+						<span className="min-w-0 truncate type-card-data text-primary">
 							{props.summary}
 						</span>
 					)}
@@ -787,10 +787,10 @@ export function OptionalRow(props: {
 		)
 
 	return (
-		<div className="flex flex-col gap-[8px] rounded-[8px] border border-card-border bg-card-header p-[9px]">
+		<div className="flex flex-col gap-[8px] rounded-body border border-card-border bg-card-header p-[9px]">
 			<div className="flex items-center gap-[8px]">
 				<span className="shrink-0 text-content-dimmed">{props.icon}</span>
-				<span className="text-[12px] text-secondary">{props.label}</span>
+				<span className="type-card text-secondary">{props.label}</span>
 				<button
 					type="button"
 					onClick={() => setOpen(false)}

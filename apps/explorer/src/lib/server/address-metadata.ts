@@ -7,6 +7,7 @@ import { getCode } from 'viem/actions'
 import { type AccountType, getAccountType } from '#lib/account'
 import { TOKEN_CREATED_EVENT } from '#lib/abis'
 import { isTip20Address } from '#lib/domain/tip20'
+import { fetchContractCreationData } from '#lib/server/contract-creation'
 import { indexer } from '#lib/server/dex-indexer'
 import {
 	fetchTokenTransferBoundaries,
@@ -94,26 +95,23 @@ export async function fetchAddressTxMetadata(
 ): Promise<AddressTxAggregate> {
 	const account = address.toLowerCase()
 	const involved = `("from" = '${account}' OR "to" = '${account}')`
-	const [[stats], [oldest]] = await Promise.all([
+	// The first and last receipts in block order: `min()` and `max()` read every timestamp.
+	const edge = (order: string) =>
 		indexer(
 			chainId,
-			`SELECT count() AS n, toUnixTimestamp(min(block_timestamp)) AS first_at,
-				toUnixTimestamp(max(block_timestamp)) AS last_at
-			FROM receipts WHERE ${involved}`,
-		),
-		indexer(
-			chainId,
-			`SELECT tx_hash, "from" FROM receipts WHERE ${involved}
-			ORDER BY block_num, tx_idx LIMIT 1`,
-		),
+			`SELECT tx_hash, "from", toUnixTimestamp(block_timestamp) AS at FROM receipts
+			WHERE ${involved} ORDER BY ${order} LIMIT 1`,
+		)
+	const [[stats], [oldest], [newest]] = await Promise.all([
+		indexer(chainId, `SELECT count() AS n FROM receipts WHERE ${involved}`),
+		edge('block_num, tx_idx'),
+		edge('block_num DESC, tx_idx DESC'),
 	])
-	const count = Number(stats?.n ?? 0)
 
 	return {
-		count,
-		// An empty aggregate answers the epoch, not null.
-		latestTxsBlockTimestamp: count ? stats?.last_at : undefined,
-		oldestTxsBlockTimestamp: count ? stats?.first_at : undefined,
+		count: Number(stats?.n ?? 0),
+		latestTxsBlockTimestamp: newest?.at,
+		oldestTxsBlockTimestamp: oldest?.at,
 		oldestTxHash: oldest && String(oldest.tx_hash),
 		oldestTxFrom: oldest && String(oldest.from),
 	}
@@ -226,12 +224,27 @@ async function loadAddressMetadata(
 			}),
 		}
 	} else {
+		// Transaction history describes activity, not contract deployment.
 		const [bytecode, stats] = await Promise.all([
 			bytecodePromise,
 			fetchAddressTxMetadata(chainId, address),
 		])
 		const accountType = getAccountType(bytecode)
 		const metadata = buildAddressTxMetadata(stats)
+		if (accountType === 'contract') {
+			const creation = await fetchContractCreationData(address).catch(
+				(error) => {
+					console.error(
+						`Failed to fetch contract creation for ${address}:`,
+						error,
+					)
+					return null
+				},
+			)
+			metadata.createdTimestamp = parseTimestamp(creation?.timestamp)
+			metadata.createdTxHash = creation?.hash ?? undefined
+			metadata.createdBy = creation?.from ?? undefined
+		}
 
 		response = {
 			address,

@@ -1,3 +1,7 @@
+import { fetchSourceDocument, readDocumentText } from './document-fetch.js'
+import type { SearchInstance } from './search-instance.js'
+import { withTimeout } from './timeout.js'
+import { errorFields, log } from './log.js'
 import { codeMcpServer } from '@cloudflare/codemode/mcp'
 import type { Executor } from '@cloudflare/codemode'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -11,13 +15,21 @@ import {
 } from '@modelcontextprotocol/sdk/types.js'
 import { toMarkdownUrl } from './llms-txt.js'
 import {
+	isHtmlDocument,
+	MARKDOWN_ACCEPT,
+	normalizeDocsMarkdown,
+} from './markdown.js'
+import {
 	recordAiSearchRequest,
+	recordRetrieval,
+	metricToolName,
 	recordJsonRpcError,
 	recordToolCall,
 } from './metrics.js'
 import type { Source } from './sources.js'
+import { resolveSourcePageUrl, sourceIndexUrl } from './sources.js'
 
-type JsonRpcRequest = {
+export type JsonRpcRequest = {
 	jsonrpc?: string
 	id?: string | number | null
 	method?: string
@@ -61,6 +73,7 @@ type SourceIndexEntry = {
 	title: string
 	url: string
 	description?: string
+	section?: string
 }
 
 type LegacySearchOptions = {
@@ -76,26 +89,34 @@ type LegacySearchOptions = {
 }
 
 type McpContext = {
-	instance: AiSearchInstance
+	instanceForSources?: (sources: string[]) => SearchInstance
+	instance: SearchInstance
 	sources?: Source[]
 	executor?: Executor
 }
 
 const CODE_TOOL_NAME = 'code'
 const CODEMODE_TOOL_NAMES = new Set(['search', 'find_pages', 'read_page'])
+const MAX_CODE_TOOL_CALLS = 10
+const MAX_QUERY_LENGTH = 4096
+const MAX_QUERY_TOKENS = 128
 const DEFAULT_MAX_RESULTS = 5
 const DEFAULT_MATCH_THRESHOLD = 0.45
 const DEFAULT_MAX_CHARS_PER_CHUNK = 1200
 const DEFAULT_MAX_TOTAL_CHARS = 2400
 const FILTER_FALLBACK_TTL_MS = 10 * 60_000
+const AI_SEARCH_TIMEOUT_MS = 9000
+const DOC_FETCH_TIMEOUT_MS = 5000
+const SEARCH_TIMEOUT_MS = 25_000
 const SEARCH_RESULT_CACHE_TTL_MS = 60_000
 const SEARCH_RESULT_CACHE_MAX_ENTRIES = 128
 const PAGE_CACHE_TTL_MS = 60_000
 const PAGE_CACHE_MAX_ENTRIES = 128
 const SOURCE_INDEX_CACHE_TTL_MS = 10 * 60_000
 const SOURCE_INDEX_CACHE_MAX_ENTRIES = 64
+const SECTION_LOOKUP_TIMEOUT_MS = 500
 const DEFAULT_MAX_PAGE_CHARS = 12_000
-const RESOURCE_INDEX_MAX_ENTRIES = 50
+const RESOURCE_INDEX_MAX_ENTRIES = 500
 const SOURCES_RESOURCE_URI = 'tempo-docs://sources'
 const READ_ONLY_TOOL_ANNOTATIONS = {
 	destructiveHint: false,
@@ -105,12 +126,15 @@ const READ_ONLY_TOOL_ANNOTATIONS = {
 } as const
 
 type SearchResultChunk = AiSearchSearchResponse['chunks'][number]
+type SearchResult = AiSearchSearchResponse & {
+	retrieval?: 'ai_search' | 'source_index'
+}
 const sourceFilterFallbackUntil = new Map<string, number>()
 const searchResultCache = new Map<
 	string,
-	{ expiresAt: number; result: AiSearchSearchResponse }
+	{ expiresAt: number; serialized: string }
 >()
-const searchInFlight = new Map<string, Promise<AiSearchSearchResponse>>()
+const searchInFlight = new Map<string, Promise<SearchResult>>()
 const pageCache = new Map<string, { expiresAt: number; text: string }>()
 const pageInFlight = new Map<string, Promise<string>>()
 const sourceIndexCache = new Map<
@@ -119,33 +143,19 @@ const sourceIndexCache = new Map<
 >()
 const sourceIndexInFlight = new Map<string, Promise<SourceIndexEntry[]>>()
 
-const NOISE_LINE_PATTERNS = [
-	/^skip to content$/i,
-	/^\[skip to content\]\(/i,
-	/^search\.\.\.$/i,
-	/^\[\]\(\/\)$/i,
-	/^⌘$/i,
-	/^k$/i,
-	/^i$/i,
-	/^was this helpful\?$/i,
-	/^copy page for ai$/i,
-	/^ask ai\.\.\.$/i,
-	/^suggest changes to this page$/i,
-]
-
 const SOURCE_QUERY_HINTS: Record<
 	string,
-	{ pattern: RegExp; weight: number }[]
+	{ pattern: RegExp; weight: number; explicit?: boolean }[]
 > = {
 	mpp: [
-		{ pattern: /\bmpp\b/, weight: 5 },
+		{ pattern: /\bmpp\b/, weight: 5, explicit: true },
 		{ pattern: /\bmachine payments?\b/, weight: 4 },
 		{ pattern: /\bpayment protocol\b/, weight: 4 },
 		{ pattern: /\bjson rpc\b/, weight: 2 },
 		{ pattern: /\bx402\b/, weight: 2 },
 	],
 	regen: [
-		{ pattern: /\bregen\b/, weight: 5 },
+		{ pattern: /\bregen\b/, weight: 5, explicit: true },
 		{ pattern: /\bbutton\b/, weight: 3 },
 		{ pattern: /\bvariants?\b/, weight: 2 },
 		{ pattern: /\bcomponents?\b/, weight: 2 },
@@ -156,20 +166,19 @@ const SOURCE_QUERY_HINTS: Record<
 		{ pattern: /\bdeposits?\b/, weight: 2 },
 	],
 	viem: [
-		{ pattern: /\bviem\b/, weight: 5 },
+		{ pattern: /\bviem\b/, weight: 5, explicit: true },
 		{ pattern: /\bwallet client\b/, weight: 3 },
 		{ pattern: /\bpublic client\b/, weight: 3 },
 		{ pattern: /\btypescript\b/, weight: 2 },
 		{ pattern: /\bfee token\b/, weight: 2 },
 	],
 	vocs: [
-		{ pattern: /\bvocs\b/, weight: 5 },
-		{ pattern: /\bmcp server\b/, weight: 4 },
+		{ pattern: /\bvocs\b/, weight: 5, explicit: true },
 		{ pattern: /\bdocs site\b/, weight: 3 },
 		{ pattern: /\bdocumentation framework\b/, weight: 3 },
 	],
 	wagmi: [
-		{ pattern: /\bwagmi\b/, weight: 5 },
+		{ pattern: /\bwagmi\b/, weight: 5, explicit: true },
 		{ pattern: /\btempowallet\b/, weight: 4 },
 		{ pattern: /\bconnector\b/, weight: 3 },
 		{ pattern: /\breact hooks?\b/, weight: 3 },
@@ -179,15 +188,9 @@ const SOURCE_QUERY_HINTS: Record<
 export async function handleMcp(
 	req: Request,
 	context: McpContext,
+	body: JsonRpcRequest | undefined,
 ): Promise<Response | undefined> {
-	if (req.method !== 'POST') return undefined
-
-	let body: JsonRpcRequest
-	try {
-		body = (await req.clone().json()) as JsonRpcRequest
-	} catch {
-		return undefined
-	}
+	if (req.method !== 'POST' || !body) return undefined
 
 	if (body.method === 'tools/list') {
 		const tools = toolSchemas(context.sources ?? [])
@@ -243,6 +246,19 @@ export async function handleMcp(
 			return jsonRpc(req, body.id, result)
 		})
 	}
+	const query = body.params?.arguments?.query
+	if (
+		CODEMODE_TOOL_NAMES.has(body.params?.name ?? '') &&
+		typeof query === 'string' &&
+		query.length > MAX_QUERY_LENGTH
+	) {
+		return jsonRpcErrorFor(
+			req,
+			body,
+			-32602,
+			`query exceeds maximum length of ${MAX_QUERY_LENGTH} characters`,
+		)
+	}
 	if (body.params?.name === 'read_page') {
 		return trackToolCall('read_page', () =>
 			handleReadPage(req, body, context.sources ?? []),
@@ -276,13 +292,23 @@ export async function handleMcp(
 				args,
 				context.sources ?? [],
 			)
-			const result = await cachedSearch(
-				query.trim(),
-				effectiveArgs,
-				context.instance,
-				context.sources ?? [],
+			const result = await withTimeout(
+				() =>
+					cachedSearch(
+						query.trim(),
+						effectiveArgs,
+						context.instanceForSources?.(selectedSources(effectiveArgs)) ??
+							context.instance,
+						context.sources ?? [],
+					),
+				SEARCH_TIMEOUT_MS,
 			)
-			const formatted = formatResult(
+			recordRetrieval(
+				result.chunks.length === 0
+					? 'empty'
+					: (result.retrieval ?? 'ai_search'),
+			)
+			const formatted = await formatResult(
 				result,
 				effectiveArgs,
 				context.sources ?? [],
@@ -313,11 +339,12 @@ async function createCodeServer(
 Available read-only docs tools:
 {{types}}
 
+Each execution may call at most ${MAX_CODE_TOOL_CALLS} docs tools total, including parallel calls and retries.
 Write an async arrow function in JavaScript that returns the result.
 Do not use TypeScript syntax, type annotations, interfaces, or generics.
 Do not define a named function and then call it.
 
-{{example}}`,
+Example: async () => { const found = await codemode.find_pages({ source: "viem", query: "sendTransaction" }); const page = await codemode.read_page({ source: "viem", url: found.result.pages[0].url, max_chars: 2000 }); return page.result.text; }`,
 	})
 }
 
@@ -325,7 +352,9 @@ function createReadOnlyDocsServer(
 	tools: Tool[],
 	context: McpContext,
 ): McpServer {
-	const docsTools = tools.filter((tool) => CODEMODE_TOOL_NAMES.has(tool.name))
+	const docsTools = tools
+		.filter((tool) => CODEMODE_TOOL_NAMES.has(tool.name))
+		.map(codemodeToolSchema)
 	const server = new McpServer(
 		{
 			name: 'tempo-docs-readonly',
@@ -336,10 +365,56 @@ function createReadOnlyDocsServer(
 	server.server.setRequestHandler(ListToolsRequestSchema, () => ({
 		tools: docsTools,
 	}))
-	server.server.setRequestHandler(CallToolRequestSchema, (request) =>
-		callLocalDocsTool(context, request.params.name, request.params.arguments),
-	)
+	let remainingCalls = MAX_CODE_TOOL_CALLS
+	server.server.setRequestHandler(CallToolRequestSchema, (request) => {
+		if (remainingCalls === 0)
+			return toolCallError(
+				`Code execution exceeded its ${MAX_CODE_TOOL_CALLS}-call docs tool budget`,
+			)
+		// Reserve before dispatch so concurrent calls and failed attempts share the limit.
+		remainingCalls -= 1
+		return callLocalDocsTool(
+			context,
+			request.params.name,
+			request.params.arguments,
+		)
+	})
 	return server
+}
+
+/**
+ * Codemode renders array-of-enum schemas as `"a" | "b"[]`, which TypeScript
+ * reads as `"a" | ("b"[])`. Describe the allowed values in prose instead; the
+ * tool handlers still validate them.
+ */
+function codemodeToolSchema(tool: Tool): Tool {
+	const properties = tool.inputSchema.properties ?? {}
+	return {
+		...tool,
+		inputSchema: {
+			...tool.inputSchema,
+			properties: Object.fromEntries(
+				Object.entries(properties).map(([name, schema]) => {
+					const property = schema as {
+						type?: string
+						description?: string
+						items?: { enum?: string[] }
+					}
+					const values = property.items?.enum
+					if (property.type !== 'array' || !values) return [name, schema]
+					return [
+						name,
+						{
+							...property,
+							description:
+								`${property.description ?? ''} One of: ${values.join(', ')}.`.trim(),
+							items: { type: 'string' },
+						},
+					]
+				}),
+			),
+		},
+	}
 }
 
 async function callLocalDocsTool(
@@ -352,14 +427,14 @@ async function callLocalDocsTool(
 	const response = await handleMcp(
 		new Request('https://mcp.tempo.xyz/', {
 			method: 'POST',
-			body: JSON.stringify({
-				jsonrpc: '2.0',
-				id: 1,
-				method: 'tools/call',
-				params: { name, arguments: args },
-			}),
 		}),
 		context,
+		{
+			jsonrpc: '2.0',
+			id: 1,
+			method: 'tools/call',
+			params: { name, arguments: args },
+		},
 	)
 	if (!response) return toolCallError(`unknown tool: ${name}`)
 	const payload = (await response.json()) as {
@@ -378,7 +453,10 @@ async function listCodeTools(
 	const codeServer = await createCodeServer(tools, context)
 	return withMcpClient(codeServer, async (client) => {
 		const result = await client.listTools()
-		return result.tools
+		return result.tools.map((tool) => ({
+			...tool,
+			annotations: READ_ONLY_TOOL_ANNOTATIONS,
+		}))
 	})
 }
 
@@ -438,17 +516,16 @@ async function handleFindPages(
 
 	try {
 		const entries = await readSourceIndex(source)
-		const tokens = queryTokens(query)
-		const pages = entries
-			.map((entry) => ({ entry, score: sourceEntryScore(entry, tokens) }))
-			.filter(({ score }) => score > 0)
-			.sort((a, b) => b.score - a.score)
-			.slice(0, findPagesMaxResultsFor(args))
-			.map(({ entry, score }) => ({
-				title: entry.title,
-				url: entry.url,
-				score: Number(Math.min(0.99, score / 20).toFixed(4)),
-			}))
+		const pages = rankSourceEntries(
+			entries,
+			query,
+			findPagesMaxResultsFor(args),
+		).map(({ entry, relevance }) => ({
+			title: entry.title,
+			url: entry.url,
+			...(entry.section ? { section: entry.section } : {}),
+			score: Number(relevance.toFixed(4)),
+		}))
 		return toolResult(
 			req,
 			body.id,
@@ -479,7 +556,10 @@ async function handleReadPage(
 	}
 
 	try {
-		const text = await readCleanPage(pageUrl)
+		const text = await readCleanPage(
+			markdownUrlFor(pageUrl, source),
+			source.base,
+		)
 		const maxChars = maxPageCharsFor(args)
 		const truncated = text.length > maxChars
 		const resultText = pageTextFor(text, args, maxChars)
@@ -512,60 +592,92 @@ function resolvePageUrl(
 				: ''
 	if (!raw) return undefined
 
-	try {
-		const url = new URL(raw, source.base)
-		if (url.origin !== new URL(source.base).origin) return undefined
-		url.hash = ''
-		url.search = ''
-		return url.toString()
-	} catch {
-		return undefined
-	}
+	return resolveSourcePageUrl(raw, source.base)?.toString()
 }
 
-async function readCleanPage(pageUrl: string): Promise<string> {
-	const markdownUrl = toMarkdownUrl(pageUrl)
-	const cached = pageCache.get(markdownUrl)
-	if (cached && cached.expiresAt > Date.now()) return cached.text
-	if (cached) pageCache.delete(markdownUrl)
+function markdownUrlFor(pageUrl: string, source: Source): string {
+	const page = new URL(pageUrl)
+	const base = new URL(source.base)
+	const prefix = base.pathname.replace(/\/+$/, '')
+	if (prefix && page.pathname.replace(/\/+$/, '') === prefix) {
+		return `${base.origin}${prefix}/index.md`
+	}
+	return toMarkdownUrl(pageUrl)
+}
 
-	const inFlight = pageInFlight.get(markdownUrl)
+async function readCleanPage(pageUrl: string, base: string): Promise<string> {
+	const markdownUrl = toMarkdownUrl(pageUrl)
+	if (!resolveSourcePageUrl(markdownUrl, base))
+		throw new Error('Document outside source boundary')
+	const key = JSON.stringify([new URL(base).href, markdownUrl])
+	const cached = pageCache.get(key)
+	if (cached && cached.expiresAt > Date.now()) return cached.text
+	if (cached) pageCache.delete(key)
+
+	const inFlight = pageInFlight.get(key)
 	if (inFlight) return inFlight
 
-	const pending = fetchCleanPage(markdownUrl)
-	pageInFlight.set(markdownUrl, pending)
+	const pending = fetchCleanPage(markdownUrl, base)
+	pageInFlight.set(key, pending)
 	try {
 		return await pending
 	} finally {
-		pageInFlight.delete(markdownUrl)
+		pageInFlight.delete(key)
 	}
 }
 
-async function fetchCleanPage(markdownUrl: string): Promise<string> {
-	const res = await fetch(markdownUrl, { cf: { cacheTtl: 60 } })
-	if (!res.ok) throw new Error(`page fetch ${res.status}`)
-	const text = normalizeMarkdown(await res.text())
+async function fetchCleanPage(
+	markdownUrl: string,
+	base: string,
+): Promise<string> {
+	const { res, body } = await withTimeout(async (signal) => {
+		const res = await fetchSourceDocument(markdownUrl, base, signal, {
+			accept: MARKDOWN_ACCEPT,
+		})
+		if (!res.ok) throw new Error(`page fetch ${res.status}`)
+		return { res, body: await readDocumentText(res) }
+	}, DOC_FETCH_TIMEOUT_MS)
+	if (isHtmlDocument(body, res.headers.get('content-type')))
+		throw new Error('page is HTML, not Markdown')
+	// Copy normalized text so a short V8 substring cannot retain the whole source body.
+	const text = new TextDecoder().decode(
+		new TextEncoder().encode(normalizeDocsMarkdown(body)),
+	)
 	if (!text) throw new Error('page is empty')
-	cachePage(markdownUrl, text)
+	cachePage(JSON.stringify([new URL(base).href, markdownUrl]), text)
 	return text
 }
 
 function cachePage(key: string, text: string): void {
-	pageCache.set(key, { expiresAt: Date.now() + PAGE_CACHE_TTL_MS, text })
-	if (pageCache.size <= PAGE_CACHE_MAX_ENTRIES) return
-	const oldestKey = pageCache.keys().next().value
-	if (oldestKey) pageCache.delete(oldestKey)
+	const now = Date.now()
+	let bytes = 0
+	for (const [cachedKey, entry] of pageCache) {
+		if (entry.expiresAt <= now || cachedKey === key) pageCache.delete(cachedKey)
+		else bytes += entry.text.length * 2
+	}
+	const size = text.length * 2
+	while (
+		pageCache.size &&
+		(bytes + size > 4 * 1024 * 1024 || pageCache.size >= PAGE_CACHE_MAX_ENTRIES)
+	) {
+		const oldest = pageCache.entries().next().value!
+		bytes -= oldest[1].text.length * 2
+		pageCache.delete(oldest[0])
+	}
+	if (size <= 4 * 1024 * 1024)
+		pageCache.set(key, { expiresAt: now + PAGE_CACHE_TTL_MS, text })
 }
 
 async function cachedSearch(
 	query: string,
 	args: SearchArguments | undefined,
-	instance: AiSearchInstance,
+	instance: SearchInstance,
 	sources: Source[],
-): Promise<AiSearchSearchResponse> {
-	const key = searchCacheKey(query, args)
+): Promise<SearchResult> {
+	const key = JSON.stringify(sources) + searchCacheKey(query, args)
 	const cached = searchResultCache.get(key)
-	if (cached && cached.expiresAt > Date.now()) return cached.result
+	if (cached && cached.expiresAt > Date.now())
+		return JSON.parse(cached.serialized) as SearchResult
 	if (cached) searchResultCache.delete(key)
 
 	const inFlight = searchInFlight.get(key)
@@ -584,12 +696,12 @@ async function runAndCacheSearch(
 	key: string,
 	query: string,
 	args: SearchArguments | undefined,
-	instance: AiSearchInstance,
+	instance: SearchInstance,
 	sources: Source[],
-): Promise<AiSearchSearchResponse> {
+): Promise<SearchResult> {
 	const result = await runSearch(query, args, instance, sources)
 	cacheSearchResult(key, result)
-	const postFallbackKey = searchCacheKey(query, args)
+	const postFallbackKey = JSON.stringify(sources) + searchCacheKey(query, args)
 	if (postFallbackKey !== key) cacheSearchResult(postFallbackKey, result)
 	return result
 }
@@ -597,50 +709,63 @@ async function runAndCacheSearch(
 async function runSearch(
 	query: string,
 	args: SearchArguments | undefined,
-	instance: AiSearchInstance,
+	instance: SearchInstance,
 	sources: Source[],
-): Promise<AiSearchSearchResponse> {
+): Promise<SearchResult> {
 	const wantedSources = selectedSources(args)
 	const skipSourceFilter = shouldSkipSourceFilter(wantedSources)
-	let result = await searchWithMetrics(
-		instance,
-		{
-			query,
-			ai_search_options: normalizeOptions(args, {
-				includeSourceFilter: !skipSourceFilter,
-				maxResults: upstreamMaxResultsFor(args),
-				...(skipSourceFilter
-					? { maxResults: fallbackMaxResultsFor(args) }
-					: {}),
-			}),
-		},
-		{ path: 'primary', sourceCount: wantedSources.length },
-	)
-	if (skipSourceFilter) {
-		result = filterSourceChunks(
-			result,
-			wantedSources,
-			upstreamMaxResultsFor(args),
-		)
-	} else if (result.chunks.length === 0 && wantedSources.length > 0) {
-		rememberStaleSourceFilters(wantedSources)
-		const fallback = await searchWithMetrics(
+	let result: SearchResult
+	try {
+		result = await searchWithMetrics(
 			instance,
 			{
 				query,
 				ai_search_options: normalizeOptions(args, {
-					includeSourceFilter: false,
-					maxResults: fallbackMaxResultsFor(args),
+					includeSourceFilter: !skipSourceFilter,
+					maxResults: upstreamMaxResultsFor(args),
+					...(skipSourceFilter
+						? { maxResults: fallbackMaxResultsFor(args) }
+						: {}),
 				}),
 			},
-			{ path: 'unfiltered_fallback', sourceCount: wantedSources.length },
+			{ path: 'primary', sourceCount: wantedSources.length },
 		)
-		const filtered = filterSourceChunks(
-			fallback,
+		if (skipSourceFilter) {
+			result = filterSourceChunks(
+				result,
+				wantedSources,
+				upstreamMaxResultsFor(args),
+			)
+		} else if (result.chunks.length === 0 && wantedSources.length > 0) {
+			rememberStaleSourceFilters(wantedSources)
+			const fallback = await searchWithMetrics(
+				instance,
+				{
+					query,
+					ai_search_options: normalizeOptions(args, {
+						includeSourceFilter: false,
+						maxResults: fallbackMaxResultsFor(args),
+					}),
+				},
+				{ path: 'unfiltered_fallback', sourceCount: wantedSources.length },
+			)
+			const filtered = filterSourceChunks(
+				fallback,
+				wantedSources,
+				upstreamMaxResultsFor(args),
+			)
+			if (filtered.chunks.length > 0) result = filtered
+		}
+	} catch (error) {
+		const fallback = await localSourceSearch(
+			query,
+			args,
 			wantedSources,
-			upstreamMaxResultsFor(args),
+			sources,
+			{ search_query: query, chunks: [] },
 		)
-		if (filtered.chunks.length > 0) result = filtered
+		if (fallback.chunks.length === 0) throw error
+		return fallback
 	}
 	if (result.chunks.length === 0) {
 		result = await localSourceSearch(
@@ -655,19 +780,30 @@ async function runSearch(
 }
 
 async function searchWithMetrics(
-	instance: AiSearchInstance,
+	instance: SearchInstance,
 	request: AiSearchSearchRequest,
 	tags: { path: string; sourceCount: number },
-): Promise<AiSearchSearchResponse> {
+): Promise<SearchResult> {
 	const startedAt = performance.now()
-	const result = await instance.search(request)
-	recordAiSearchRequest({
-		chunks: result.chunks.length,
-		durationMs: Math.round(performance.now() - startedAt),
-		path: tags.path,
-		sourceCount: tags.sourceCount,
-	})
-	return result
+	let result: SearchResult | undefined
+	try {
+		result = await withTimeout(
+			() => instance.search(request),
+			AI_SEARCH_TIMEOUT_MS,
+		)
+		return result
+	} catch (error) {
+		log.error('ai_search.failed', { path: tags.path, ...errorFields(error) })
+		throw error
+	} finally {
+		recordAiSearchRequest({
+			chunks: result?.chunks.length,
+			outcome: result ? 'success' : 'error',
+			durationMs: Math.round(performance.now() - startedAt),
+			path: tags.path,
+			sourceCount: tags.sourceCount,
+		})
+	}
 }
 
 function searchCacheKey(
@@ -687,14 +823,30 @@ function searchCacheKey(
 	})
 }
 
-function cacheSearchResult(key: string, result: AiSearchSearchResponse): void {
+function cacheSearchResult(key: string, result: SearchResult): void {
+	const now = Date.now()
+	const serialized = JSON.stringify(result)
+	const size = serialized.length * 2
+	searchResultCache.delete(key)
+	if (size > 4 * 1024 * 1024) return
+	let bytes = 0
+	for (const [cachedKey, entry] of searchResultCache) {
+		if (entry.expiresAt <= now) searchResultCache.delete(cachedKey)
+		else bytes += entry.serialized.length * 2
+	}
+	while (
+		searchResultCache.size &&
+		(bytes + size > 4 * 1024 * 1024 ||
+			searchResultCache.size >= SEARCH_RESULT_CACHE_MAX_ENTRIES)
+	) {
+		const oldest = searchResultCache.entries().next().value!
+		bytes -= oldest[1].serialized.length * 2
+		searchResultCache.delete(oldest[0])
+	}
 	searchResultCache.set(key, {
-		expiresAt: Date.now() + SEARCH_RESULT_CACHE_TTL_MS,
-		result,
+		expiresAt: now + SEARCH_RESULT_CACHE_TTL_MS,
+		serialized,
 	})
-	if (searchResultCache.size <= SEARCH_RESULT_CACHE_MAX_ENTRIES) return
-	const oldestKey = searchResultCache.keys().next().value
-	if (oldestKey) searchResultCache.delete(oldestKey)
 }
 
 function shouldSkipSourceFilter(sources: string[]): boolean {
@@ -711,7 +863,7 @@ function rememberStaleSourceFilters(sources: string[]): void {
 }
 
 function filterSourceChunks(
-	result: AiSearchSearchResponse,
+	result: SearchResult,
 	sources: string[],
 	maxResults: number,
 ): AiSearchSearchResponse {
@@ -733,25 +885,50 @@ async function localSourceSearch(
 	sourceIds: string[],
 	sources: Source[],
 	emptyResult: AiSearchSearchResponse,
-): Promise<AiSearchSearchResponse> {
-	if (sourceIds.length !== 1) return emptyResult
+): Promise<SearchResult> {
+	if (sourceIds.length !== 1) {
+		const selected = sources.filter(
+			(source) => sourceIds.length === 0 || sourceIds.includes(source.id),
+		)
+		const results = await Promise.allSettled(
+			selected.map((source) =>
+				localSourceSearch(query, args, [source.id], [source], emptyResult),
+			),
+		)
+		const chunks = results.flatMap((result) =>
+			result.status === 'fulfilled' ? result.value.chunks : [],
+		)
+		return chunks.length
+			? {
+					...emptyResult,
+					chunks: chunks
+						.sort((a, b) => b.score - a.score)
+						.slice(0, localSourceMaxResultsFor(args)),
+					retrieval: 'source_index',
+				}
+			: emptyResult
+	}
 	if (args?.include_raw === true) return emptyResult
 
 	const source = sources.find((entry) => entry.id === sourceIds[0])
 	if (!source) return emptyResult
 
 	const entries = await readSourceIndex(source)
-	const tokens = queryTokens(query)
-	const scored = entries
-		.map((entry) => ({ entry, score: sourceEntryScore(entry, tokens) }))
-		.filter((entry) => entry.score > 0)
-		.sort((a, b) => b.score - a.score)
-		.slice(0, localSourceMaxResultsFor(args))
+	const scored = rankSourceEntries(
+		entries,
+		query,
+		localSourceMaxResultsFor(args),
+	)
 
 	const chunks = (
 		await Promise.allSettled(
-			scored.map(async ({ entry, score }) =>
-				sourceIndexChunk(source, entry, await readCleanPage(entry.url), score),
+			scored.map(async ({ entry, relevance }) =>
+				sourceIndexChunk(
+					source,
+					entry,
+					await readCleanPage(markdownUrlFor(entry.url, source), source.base),
+					relevance,
+				),
 			),
 		)
 	)
@@ -761,11 +938,11 @@ async function localSourceSearch(
 		)
 		.map((result) => result.value)
 	if (chunks.length === 0) return emptyResult
-	return { ...emptyResult, chunks }
+	return { ...emptyResult, chunks, retrieval: 'source_index' }
 }
 
 async function readSourceIndex(source: Source): Promise<SourceIndexEntry[]> {
-	const key = `${source.id}:${source.indexPath ?? '/llms.txt'}`
+	const key = `${source.id}:${sourceIndexUrl(source)}`
 	const cached = sourceIndexCache.get(key)
 	if (cached && cached.expiresAt > Date.now()) return cached.entries
 	if (cached) sourceIndexCache.delete(key)
@@ -783,15 +960,17 @@ async function readSourceIndex(source: Source): Promise<SourceIndexEntry[]> {
 }
 
 async function fetchSourceIndex(source: Source): Promise<SourceIndexEntry[]> {
-	const res = await fetch(
-		new URL(source.indexPath ?? '/llms.txt', source.base).toString(),
-		{
-			cf: { cacheTtl: 60 },
-		},
-	)
-	if (!res.ok) return []
-	const entries = parseSourceIndex(await res.text(), source.base)
-	cacheSourceIndex(`${source.id}:${source.indexPath ?? '/llms.txt'}`, entries)
+	const entries = await withTimeout(async (signal) => {
+		const res = await fetchSourceDocument(
+			sourceIndexUrl(source),
+			source.base,
+			signal,
+		)
+		if (!res.ok) return undefined
+		return parseSourceIndex(await readDocumentText(res), source.base)
+	}, DOC_FETCH_TIMEOUT_MS)
+	if (!entries) return []
+	cacheSourceIndex(`${source.id}:${sourceIndexUrl(source)}`, entries)
 	return entries
 }
 
@@ -805,24 +984,41 @@ function cacheSourceIndex(key: string, entries: SourceIndexEntry[]): void {
 	if (oldestKey) sourceIndexCache.delete(oldestKey)
 }
 
+const CONTENTS_HEADING = /^(?:table of )?contents$/i
+
 function parseSourceIndex(body: string, base: string): SourceIndexEntry[] {
-	const origin = new URL(base).origin
 	const entries = []
+	let section: string | undefined
+	let subsection: string | undefined
 	for (const line of body.split('\n')) {
+		if (line.length > 8192) continue
+		const heading = line.trimEnd().match(/^(#{2,3})[^\S\r\n]+(\S[^\r\n]*)$/)
+		if (heading) {
+			const [, level, label] = heading
+			if (level === '##') {
+				section = CONTENTS_HEADING.test(label) ? undefined : label
+				subsection = undefined
+			} else {
+				subsection = label
+			}
+			continue
+		}
 		const match =
 			line.match(/^\s*[-*]\s+\[([^\]]+)\]\(([^)]+)\)(?::\s*(.*))?/) ??
 			plainPathSourceIndexMatch(line)
 		if (!match) continue
 		const [, title, rawUrl, description] = match
 		try {
-			const url = new URL(rawUrl, origin)
-			if (url.origin !== origin) continue
-			url.hash = ''
-			url.search = ''
+			const input = resolveSourcePageUrl(rawUrl, base)
+			const url =
+				input && resolveSourcePageUrl(publicDocsUrl(input.toString()), base)
+			if (!url) continue
+			const sectionLabel = [section, subsection].filter(Boolean).join(' / ')
 			entries.push({
 				title: title.trim(),
-				url: publicDocsUrl(url.toString()),
+				url: url.toString(),
 				...(description?.trim() ? { description: description.trim() } : {}),
+				...(sectionLabel ? { section: sectionLabel } : {}),
 			})
 		} catch {
 			// Ignore invalid index entries.
@@ -852,17 +1048,84 @@ function titleFromPath(path: string): string {
 	return last.charAt(0).toUpperCase() + last.slice(1)
 }
 
-function sourceEntryScore(entry: SourceIndexEntry, tokens: string[]): number {
-	if (tokens.length === 0) return 0
-	const haystack = `${entry.title} ${entry.description ?? ''} ${entry.url}`
-		.toLowerCase()
-		.replace(/[-_/]+/g, ' ')
+function rankSourceEntries(
+	entries: SourceIndexEntry[],
+	query: string,
+	limit: number,
+): { entry: SourceIndexEntry; relevance: number }[] {
+	const tokens = queryTokens(query)
+	if (tokens.length === 0) return []
+	const phrase = searchableText(query)
+	const maxScore = tokens.length * 3 + 8
+	return entries
+		.map((entry, index) => ({
+			entry,
+			index,
+			score: sourceEntryScore(entry, tokens, phrase),
+		}))
+		.filter(({ score }) => score > 0)
+		.sort(
+			(a, b) =>
+				b.score - a.score ||
+				a.entry.title.length - b.entry.title.length ||
+				a.index - b.index,
+		)
+		.slice(0, limit)
+		.map(({ entry, score }) => ({
+			entry,
+			relevance: Math.min(0.99, score / maxScore),
+		}))
+}
+
+function sourceEntryScore(
+	entry: SourceIndexEntry,
+	tokens: string[],
+	phrase: string,
+): number {
+	const title = searchableText(entry.title)
+	const rest = searchableText(
+		`${entry.description ?? ''} ${entry.section ?? ''} ${new URL(entry.url).pathname}`,
+	)
 	let score = 0
+	let titleHits = 0
 	for (const token of tokens) {
-		if (!haystack.includes(token)) continue
-		score += entry.title.toLowerCase().includes(token) ? 3 : 1
+		if (containsToken(title, token)) {
+			score += 3
+			titleHits++
+		} else if (containsToken(rest, token)) {
+			score += 1
+		}
 	}
+	if (score === 0) return 0
+	if (phrase && title.includes(phrase)) score += 4
+	if (titleHits === tokens.length) score += 2
 	return score
+}
+
+/** Lowercase words separated and padded by single spaces. */
+function searchableText(text: string): string {
+	const words = textWords(text)
+	return words.length > 0 ? ` ${words.join(' ')} ` : ''
+}
+
+/** Lowercase words, splitting camelCase so `useConnect` reads `use connect`. */
+function textWords(text: string): string[] {
+	return text
+		.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+		.toLowerCase()
+		.split(/[^a-z0-9]+/)
+		.filter(Boolean)
+}
+
+/**
+ * Tokens match the start of a word (`address` in `addresses`, `api` in
+ * `APIs`, but not `earn` in `learn`); two-character tokens must match a whole
+ * word (`20` in `TIP-20`).
+ */
+function containsToken(text: string, token: string): boolean {
+	return token.length >= 3
+		? text.includes(` ${token}`)
+		: text.includes(` ${token} `)
 }
 
 function sourceIndexChunk(
@@ -874,7 +1137,7 @@ function sourceIndexChunk(
 	return {
 		id: `${source.id}:${entry.url}`,
 		type: 'text',
-		score: Math.min(0.9, 0.4 + score / 20),
+		score: Number(score.toFixed(4)),
 		text,
 		item: {
 			key: keyForSourceUrl(source, entry.url),
@@ -938,14 +1201,19 @@ function normalizeOptions(
 	}
 }
 
-function formatResult(
-	result: AiSearchSearchResponse,
+async function formatResult(
+	result: SearchResult,
 	args: SearchArguments | undefined,
 	sources: Source[],
-): AiSearchSearchResponse | { search_query: string; chunks: unknown[] } {
+): Promise<
+	SearchResult | { search_query: string; retrieval: string; chunks: unknown[] }
+> {
+	const retrieval =
+		result.chunks.length === 0 ? 'none' : (result.retrieval ?? 'ai_search')
 	if (args?.include_raw === true) {
 		return {
 			...result,
+			retrieval,
 			chunks: result.chunks.map((chunk) => ({
 				...chunk,
 				text: cleanChunkText(chunk.text),
@@ -953,13 +1221,16 @@ function formatResult(
 		}
 	}
 
+	const chunks = compactChunks(
+		distinctPageChunks(result.chunks, sources).slice(0, maxResultsFor(args)),
+		args,
+		sources,
+	)
+	await annotateChunkSections(chunks, sources)
 	return {
 		search_query: result.search_query,
-		chunks: compactChunks(
-			distinctPageChunks(result.chunks, sources).slice(0, maxResultsFor(args)),
-			args,
-			sources,
-		),
+		retrieval,
+		chunks,
 	}
 }
 
@@ -1012,12 +1283,21 @@ function pageIdentityForChunk(
 	}
 }
 
+type CompactChunk = {
+	score: number
+	source?: string
+	section?: string
+	url?: string
+	key?: string
+	text: string
+}
+
 function compactChunk(
 	chunk: SearchResultChunk,
 	args: SearchArguments | undefined,
 	sources: Source[],
 	maxChars = maxCharsPerChunkFor(args),
-) {
+): CompactChunk {
 	const source = sourceForChunk(chunk)
 	const url = urlForChunk(chunk, sources)
 	const text = compactText(chunk.text, args, maxChars)
@@ -1030,12 +1310,82 @@ function compactChunk(
 	}
 }
 
+/**
+ * Label compact chunks with the configured source that owns their URL and the
+ * docs navigation section from that source's index. Crawled pages carry no
+ * source metadata, so the URL is the only reliable link to the docs IA.
+ */
+async function annotateChunkSections(
+	chunks: CompactChunk[],
+	sources: Source[],
+): Promise<void> {
+	const owners = new Map<CompactChunk, Source>()
+	for (const chunk of chunks) {
+		const owner = chunk.url ? sourceForUrl(chunk.url, sources) : undefined
+		if (owner) owners.set(chunk, owner)
+	}
+	const sections = new Map<string, Map<string, string>>()
+	await Promise.all(
+		[...new Set(owners.values())].map(async (source) => {
+			try {
+				const entries = await readSourceIndexWithTimeout(source)
+				sections.set(
+					source.id,
+					new Map(
+						entries.flatMap((entry) =>
+							entry.section ? [[entry.url, entry.section] as const] : [],
+						),
+					),
+				)
+			} catch {
+				// Sections are optional context; keep the search result.
+			}
+		}),
+	)
+	for (const [chunk, source] of owners) {
+		chunk.source ??= source.id
+		const section = chunk.url
+			? sections.get(source.id)?.get(chunk.url)
+			: undefined
+		if (section) chunk.section = section
+	}
+}
+
+async function readSourceIndexWithTimeout(
+	source: Source,
+): Promise<SourceIndexEntry[]> {
+	let timeout: ReturnType<typeof setTimeout> | undefined
+	try {
+		return await Promise.race([
+			readSourceIndex(source),
+			new Promise<SourceIndexEntry[]>((_, reject) => {
+				timeout = setTimeout(
+					() => reject(new Error('section lookup timed out')),
+					SECTION_LOOKUP_TIMEOUT_MS,
+				)
+			}),
+		])
+	} finally {
+		if (timeout) clearTimeout(timeout)
+	}
+}
+
+/** The configured source whose origin and path prefix contain `url`. */
+function sourceForUrl(url: string, sources: Source[]): Source | undefined {
+	return sources.find((source) => {
+		if (!url.startsWith('https://') && !url.startsWith('http://')) return false
+		const resolved = resolveSourcePageUrl(url, source.base)
+		return resolved !== undefined && new URL(url).origin === resolved.origin
+	})
+}
+
 function urlForChunk(
 	chunk: SearchResultChunk,
 	sources: Source[],
 ): string | undefined {
 	const metadata = chunk.item.metadata ?? {}
 	if (typeof metadata.url === 'string') return publicDocsUrl(metadata.url)
+	if (/^https?:\/\//.test(chunk.item.key)) return publicDocsUrl(chunk.item.key)
 	return urlFromKey(chunk.item.key, sources)
 }
 
@@ -1052,7 +1402,13 @@ function urlFromKey(key: string, sources: Source[]): string | undefined {
 		.replace(/_/g, '/')
 	if (!path) return source.base
 	try {
-		return publicDocsUrl(new URL(`/${path}`, source.base).toString())
+		const url = resolveSourcePageUrl(`/${path}`, source.base)
+		return url
+			? resolveSourcePageUrl(
+					publicDocsUrl(url.toString()),
+					source.base,
+				)?.toString()
+			: undefined
 	} catch {
 		return undefined
 	}
@@ -1123,33 +1479,58 @@ function bestMatchIndex(text: string, query: string): number | undefined {
 	return undefined
 }
 
+const QUERY_STOPWORDS = new Set([
+	'a',
+	'about',
+	'an',
+	'and',
+	'are',
+	'available',
+	'can',
+	'configure',
+	'do',
+	'does',
+	'for',
+	'from',
+	'get',
+	'have',
+	'how',
+	'i',
+	'in',
+	'into',
+	'is',
+	'it',
+	'my',
+	'of',
+	'on',
+	'or',
+	'over',
+	'tempo',
+	'that',
+	'the',
+	'this',
+	'to',
+	'use',
+	'using',
+	'what',
+	'when',
+	'where',
+	'which',
+	'with',
+	'work',
+	'works',
+])
+
+/**
+ * Distinct query words, longest first. Common words are dropped unless the
+ * query has nothing else, so `MCP`, `API`, `RPC`, and `T12` still count.
+ */
 function queryTokens(query: string): string[] {
-	const stopwords = new Set([
-		'about',
-		'available',
-		'configure',
-		'does',
-		'have',
-		'into',
-		'over',
-		'tempo',
-		'that',
-		'this',
-		'using',
-		'what',
-		'when',
-		'with',
-		'work',
-		'works',
-	])
-	return [
-		...new Set(
-			query
-				.toLowerCase()
-				.split(/[^a-z0-9]+/)
-				.filter((token) => token.length >= 4 && !stopwords.has(token)),
-		),
-	].sort((a, b) => b.length - a.length)
+	const words = textWords(query).filter((word) => word.length >= 2)
+	const meaningful = words.filter((word) => !QUERY_STOPWORDS.has(word))
+	return [...new Set(meaningful.length > 0 ? meaningful : words)]
+		.sort((a, b) => b.length - a.length)
+		.slice(0, MAX_QUERY_TOKENS)
 }
 
 function maxResultsFor(args: SearchArguments | undefined): number {
@@ -1181,25 +1562,7 @@ function findPagesMaxResultsFor(args: FindPagesArguments | undefined): number {
 }
 
 function cleanChunkText(text: string): string {
-	return normalizeMarkdown(text)
-}
-
-function normalizeMarkdown(text: string): string {
-	return stripSitemapComment(text)
-		.split('\n')
-		.map((line) => line.trimEnd())
-		.filter(
-			(line) => !NOISE_LINE_PATTERNS.some((pattern) => pattern.test(line)),
-		)
-		.join('\n')
-		.replace(/\n{3,}/g, '\n\n')
-		.trim()
-}
-
-function stripSitemapComment(content: string): string {
-	return content
-		.replace(/\r\n/g, '\n')
-		.replace(/^<!--\nSitemap:\n[\s\S]*?\n-->\n*/, '')
+	return normalizeDocsMarkdown(text)
 }
 
 function maxPageCharsFor(args: ReadPageArguments | undefined): number {
@@ -1246,21 +1609,29 @@ function inferSourceForQuery(
 	if (knownSources.size === 0) return undefined
 
 	const normalized = query.toLowerCase().replace(/[^a-z0-9]+/g, ' ')
+	const mentionsTempo = /\btempo\b/.test(normalized)
 	const scores = [...knownSources]
-		.map((source) => ({
-			source,
-			score: (SOURCE_QUERY_HINTS[source] ?? []).reduce(
-				(total, hint) =>
-					total + (hint.pattern.test(normalized) ? hint.weight : 0),
-				0,
-			),
-		}))
+		.map((source) => {
+			const matched = (SOURCE_QUERY_HINTS[source] ?? []).filter((hint) =>
+				hint.pattern.test(normalized),
+			)
+			return {
+				source,
+				score: matched.reduce((total, hint) => total + hint.weight, 0),
+				explicit: matched.some((hint) => hint.explicit),
+			}
+		})
 		.filter(({ score }) => score > 0)
 		.sort((a, b) => b.score - a.score)
 
 	const [best, second] = scores
 	if (!best || best.score < 4) return undefined
 	if (second && second.score >= best.score) return undefined
+	// "machine payments on Tempo" is a Tempo question too; only an explicit
+	// library name narrows a Tempo query to another source.
+	if (mentionsTempo && best.source !== 'tempo' && !best.explicit) {
+		return undefined
+	}
 	return best.source
 }
 
@@ -1408,13 +1779,19 @@ async function trackToolCall(
 	const startedAt = performance.now()
 	try {
 		const response = await handler()
-		recordToolCall(
-			toolName,
-			(await responseIsError(response)) ? 'error' : 'success',
-			Math.round(performance.now() - startedAt),
-		)
+		const outcome = (await responseIsError(response)) ? 'error' : 'success'
+		log.info('mcp.tool_complete', {
+			tool_name: metricToolName(toolName),
+			outcome,
+			duration_ms: Math.round(performance.now() - startedAt),
+		})
+		recordToolCall(toolName, outcome, Math.round(performance.now() - startedAt))
 		return response
 	} catch (error) {
+		log.error('mcp.tool_failed', {
+			tool_name: metricToolName(toolName),
+			...errorFields(error),
+		})
 		recordToolCall(toolName, 'error', Math.round(performance.now() - startedAt))
 		throw error
 	}
@@ -1451,6 +1828,7 @@ function toolSchemas(sources: Source[]): Tool[] {
 				properties: {
 					query: {
 						type: 'string',
+						maxLength: MAX_QUERY_LENGTH,
 						description: 'Question or task.',
 					},
 					source: {
@@ -1484,15 +1862,6 @@ function toolSchemas(sources: Source[]): Tool[] {
 						minimum: 300,
 						maximum: 50000,
 					},
-					include_raw: {
-						type: 'boolean',
-						description: 'Return raw AI Search chunks.',
-					},
-					ai_search_options: {
-						type: 'object',
-						description: 'Advanced AI Search options.',
-						additionalProperties: true,
-					},
 					response_format: {
 						type: 'string',
 						enum: ['text', 'structured'],
@@ -1505,7 +1874,8 @@ function toolSchemas(sources: Source[]): Tool[] {
 		},
 		{
 			name: 'find_pages',
-			description: 'Find page URLs from a source index.',
+			description:
+				'Find page URLs from a source index, including docs navigation sections when available.',
 			annotations: READ_ONLY_TOOL_ANNOTATIONS,
 			inputSchema: {
 				type: 'object',
@@ -1517,6 +1887,7 @@ function toolSchemas(sources: Source[]): Tool[] {
 					},
 					query: {
 						type: 'string',
+						maxLength: MAX_QUERY_LENGTH,
 						description: 'Page topic.',
 					},
 					max_results: {
@@ -1563,6 +1934,7 @@ function toolSchemas(sources: Source[]): Tool[] {
 					},
 					query: {
 						type: 'string',
+						maxLength: MAX_QUERY_LENGTH,
 						description: 'Focus excerpt when truncating.',
 					},
 					response_format: {
@@ -1665,7 +2037,7 @@ async function readResource(uri: string, sources: Source[]) {
 				text: [
 					'# Tempo docs MCP sources',
 					'Use the `search` tool with `source` to narrow retrieval when the task names a specific library.',
-					'Use `source: "tempo"` for core Tempo protocol and integration docs from docs.tempo.xyz.',
+					'Use `source: "tempo"` for core Tempo protocol and integration docs.',
 					'',
 					...sources.map(
 						(source) =>
@@ -1698,7 +2070,10 @@ async function readResource(uri: string, sources: Source[]) {
 			source,
 		)
 		if (!pageUrl) return undefined
-		const text = await readCleanPage(pageUrl)
+		const text = await readCleanPage(
+			markdownUrlFor(pageUrl, source),
+			source.base,
+		)
 		return [
 			{
 				uri,
@@ -1711,6 +2086,18 @@ async function readResource(uri: string, sources: Source[]) {
 		]
 	}
 	if (segments.length > 0) return undefined
+	let sections: string[] = []
+	try {
+		sections = [
+			...new Set(
+				(await readSourceIndex(source)).flatMap((entry) =>
+					entry.section ? [entry.section] : [],
+				),
+			),
+		]
+	} catch {
+		// Sections are optional context.
+	}
 	return [
 		{
 			uri,
@@ -1720,6 +2107,7 @@ async function readResource(uri: string, sources: Source[]) {
 				`Base URL: ${source.base}`,
 				`Index path: ${source.indexPath ?? '/llms.txt'}`,
 				source.description ? `Description: ${source.description}` : undefined,
+				sections.length > 0 ? `Sections: ${sections.join(', ')}` : undefined,
 				'',
 				'Search example:',
 				'```json',
@@ -1744,14 +2132,24 @@ function sourceIndexResourceText(
 	source: Source,
 	entries: SourceIndexEntry[],
 ): string {
+	const shown = entries.slice(0, RESOURCE_INDEX_MAX_ENTRIES)
+	const lines: string[] = []
+	let section: string | undefined
+	for (const entry of shown) {
+		if (entry.section !== section) {
+			lines.push('', `## ${entry.section ?? 'Other pages'}`)
+			section = entry.section
+		}
+		lines.push(`- [${entry.title}](${entry.url})`)
+	}
 	return [
 		`# ${source.id} docs page index`,
 		entries.length === 0
 			? 'No pages found in this source index.'
-			: entries
-					.slice(0, RESOURCE_INDEX_MAX_ENTRIES)
-					.map((entry) => `- [${entry.title}](${entry.url})`)
-					.join('\n'),
+			: lines.join('\n').trim(),
+		entries.length > shown.length
+			? `Showing ${shown.length} of ${entries.length} pages. Use \`find_pages\` with \`source: "${source.id}"\` to locate the rest.`
+			: undefined,
 	]
 		.filter(Boolean)
 		.join('\n')

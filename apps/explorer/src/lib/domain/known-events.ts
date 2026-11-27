@@ -5,21 +5,884 @@ import type { AbiEvent, Log, TransactionReceipt } from 'viem'
 import {
 	decodeAbiParameters,
 	decodeFunctionData,
+	keccak256,
 	parseEventLogs,
+	toEventSelector,
 	zeroAddress,
+	zeroHash,
 } from 'viem'
 import { Addresses } from 'viem/tempo'
-import { Abis, allAbis } from '#lib/abis'
+import {
+	Abis,
+	allAbis,
+	earnEventsAbi,
+	propAmmEventsAbi,
+	zoneFactoryAbi,
+	zoneOutboxAbi,
+	zonePortalAbi,
+} from '#lib/abis'
+import {
+	getZonePortalId,
+	isZonePortalAddress as isDeterministicZonePortalAddress,
+} from '#lib/domain/zones'
 import { decodeMemoForDisplay, isMppAttributionMemo } from '#lib/domain/memo'
+import { HexFormatter } from '#lib/formatting'
+import { findBurnAtTransfers } from '#lib/domain/tx-event-groups'
+import {
+	decodeHotWord,
+	findPropAmmV2Pair,
+	type PropAmmShapeLevel,
+} from '#lib/propamm'
+import type { GetPropAmmShapeFn } from '#lib/domain/propamm-shapes'
 import { describePhrasedEvent } from '#lib/domain/phrases'
 import type * as Tip20 from './tip20'
 
 const abi = allAbis
+const earnEventActionOverrides: Record<string, string> = {
+	'Deposited(address,address,uint256,uint256)': 'Deposit to Earn',
+	'Deposited(address,uint256,uint256)': 'Deposit to Earn',
+	'EarnDeposit(bytes32,address,address,uint256,uint256,uint256,bytes32)':
+		'Deposit to Earn',
+	'EarnRedeem(bytes32,address,address,uint256,uint256,uint256,bytes32)':
+		'Withdraw from Earn',
+	'EarnVaultInitialized(address)': 'Earn Strategy Connected',
+	'Redeemed(address,address,uint256,uint256)': 'Withdraw from Earn',
+	'Redeemed(address,uint256,uint256)': 'Withdraw from Earn',
+	'VenueSharesDeposited(address,address,uint256,uint256,uint256)':
+		'Move Position to Earn',
+	'VenueSharesDeposited(address,uint256,uint256)': 'Move Position to Earn',
+	'WithdrewExact(address,address,uint256,uint256)': 'Withdraw from Earn',
+	'WithdrewExact(address,uint256,uint256)': 'Withdraw from Earn',
+}
+
+function formatEarnEventAction(event: AbiEvent): string {
+	const signature = getEventSignature(event)
+	const override = earnEventActionOverrides[signature]
+	if (override) return override
+	return event.name.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+}
+
+function getEventSignature(event: AbiEvent): string {
+	return `${event.name}(${event.inputs.map((input) => input.type).join(',')})`
+}
+
+const earnEventActions = new Map(
+	earnEventsAbi.map((event) => [
+		toEventSelector(event).toLowerCase(),
+		formatEarnEventAction(event),
+	]),
+)
+const earnEventSignatures = new Map(
+	earnEventsAbi.map((event) => [
+		toEventSelector(event).toLowerCase(),
+		getEventSignature(event),
+	]),
+)
+const propAmmTradeSelector = toEventSelector(propAmmEventsAbi[0]).toLowerCase()
+const propAmmFillSelector = toEventSelector(propAmmEventsAbi[1]).toLowerCase()
+const propAmmPostedSelector = toEventSelector(propAmmEventsAbi[2]).toLowerCase()
+const propAmmRefilledSelector = toEventSelector(
+	propAmmEventsAbi[3],
+).toLowerCase()
+
+function formatBps(bps: number): string {
+	return `${Number(bps.toFixed(2))} bp`
+}
+
+const PROP_AMM_FACTOR_ONE = 100_000_000n
+
+/**
+ * One side of a v2 quote as a resting order (LadderMath.sol): its best level's
+ * price, mid * (1 +/- (spread * widthScale + widen * 1000) / 1e8), and the
+ * base its levels hold, size * sizeUnit * depthScale / 1000 each.
+ */
+function propAmmQuoteSide(
+	levels: readonly PropAmmShapeLevel[],
+	sizeUnit: bigint,
+	word: ReturnType<typeof decodeHotWord>,
+	bid: boolean,
+) {
+	const widen = bid ? word.bidWiden : word.askWiden
+	const offset = (spread: number) =>
+		BigInt(spread) * BigInt(word.widthScale) + BigInt(widen) * 1000n
+	// Bid levels at or past the floor can't fill.
+	const live = levels.filter(
+		(level) => !bid || offset(level.spread) < PROP_AMM_FACTOR_ONE,
+	)
+	const best = live[0]
+	if (!best || word.depthScale === 0) return undefined
+	const bestOffset = offset(best.spread)
+	const factor = bid
+		? PROP_AMM_FACTOR_ONE - bestOffset
+		: PROP_AMM_FACTOR_ONE + bestOffset
+	const depth = live.reduce(
+		(sum, level) =>
+			sum + (BigInt(level.size) * sizeUnit * BigInt(word.depthScale)) / 1000n,
+		0n,
+	)
+	return {
+		price: (word.mid * factor) / PROP_AMM_FACTOR_ONE,
+		bps: Number(bestOffset) / 10_000,
+		widenBps: widen / 10,
+		levels: live.length,
+		depth,
+	}
+}
+
+/** A 1/1000 scale as a multiplier, such as 1x or 0.5x. */
+function formatScale(scale: number): string {
+	return `${Number((scale / 1000).toFixed(3))}x`
+}
+
+function formatUnixSeconds(seconds: number): string {
+	return `${new Date(seconds * 1000).toISOString().slice(0, 19).replace('T', ' ')} UTC`
+}
+
+type PropAmmFillArgs = {
+	taker: Address.Address
+	amountIn: bigint
+	amountOut: bigint
+}
+
+/**
+ * A transfer's position in the receipt and the token that emitted it, as the
+ * log spells it: only a matched transfer's token is checksummed, so an
+ * emitter spelled in invalid mixed case can't fail the whole receipt.
+ */
+type PropAmmTransfer = { index: number; token: string }
+
+/**
+ * A receipt's transfers, each list in log order, keyed so that every propAMM
+ * Fill or TradeExecuted resolves its settlement transfers by lookup rather
+ * than by scanning the receipt. A receipt can carry thousands of trade-like
+ * logs from any contract, so a scan per trade would grow with the square of
+ * its log count.
+ */
+type PropAmmTransferIndex = {
+	/** `from:to:amount`: a Fill's input and output legs. */
+	route: Map<string, PropAmmTransfer[]>
+	/** `token:from:to:amount`: a TradeExecuted's input leg. */
+	tokenRoute: Map<string, PropAmmTransfer[]>
+	/** `token:from:amount`: a TradeExecuted's output leg, to any recipient. */
+	tokenSource: Map<string, PropAmmTransfer[]>
+}
+
+const propAmmTransferIndexes = new WeakMap<
+	readonly Log<bigint, number, boolean, AbiEvent>[],
+	PropAmmTransferIndex
+>()
+
+function addressKey(address: Address.Address): string {
+	return address.toLowerCase()
+}
+
+function pushTransfer(
+	map: Map<string, PropAmmTransfer[]>,
+	key: string,
+	transfer: PropAmmTransfer,
+) {
+	const list = map.get(key)
+	if (list) list.push(transfer)
+	else map.set(key, [transfer])
+}
+
+/** Builds a receipt's transfer index once and reuses it for the same events. */
+function getPropAmmTransferIndex(
+	events: readonly Log<bigint, number, boolean, AbiEvent>[],
+): PropAmmTransferIndex {
+	const cached = propAmmTransferIndexes.get(events)
+	if (cached) return cached
+	const index: PropAmmTransferIndex = {
+		route: new Map(),
+		tokenRoute: new Map(),
+		tokenSource: new Map(),
+	}
+	events.forEach((event, position) => {
+		if (!isTransferEvent(event)) return
+		const { from, to, amount } = event.args
+		const transfer = { index: position, token: event.address }
+		const token = addressKey(event.address)
+		const route = `${addressKey(from)}:${addressKey(to)}:${amount}`
+		pushTransfer(index.route, route, transfer)
+		pushTransfer(index.tokenRoute, `${token}:${route}`, transfer)
+		pushTransfer(
+			index.tokenSource,
+			`${token}:${addressKey(from)}:${amount}`,
+			transfer,
+		)
+	})
+	propAmmTransferIndexes.set(events, index)
+	return index
+}
+
+/**
+ * A v2 Fill names no tokens: the Settler pulls the input from the taker into
+ * the venue, and the venue pays the output to the taker, both in the same
+ * transaction. Returns the first of each of those two transfers, matched by
+ * account and amount.
+ */
+function findPropAmmFillTransfers(
+	fill: ParsedEvent,
+	events: readonly Log<bigint, number, boolean, AbiEvent>[],
+): {
+	input: { index: number; token: Address.Address } | undefined
+	output: { index: number; token: Address.Address } | undefined
+} {
+	const { taker, amountIn, amountOut } = fill.args as PropAmmFillArgs
+	const { route } = getPropAmmTransferIndex(events)
+	const venue = addressKey(fill.address)
+	const account = addressKey(taker)
+	const inputKey = `${account}:${venue}:${amountIn}`
+	const outputKey = `${venue}:${account}:${amountOut}`
+	const input = route.get(inputKey)?.[0]
+	// A transfer that could settle either leg settles the input.
+	const output = outputKey === inputKey ? undefined : route.get(outputKey)?.[0]
+	return {
+		input: input && { index: input.index, token: checksumAddress(input.token) },
+		output: output && {
+			index: output.index,
+			token: checksumAddress(output.token),
+		},
+	}
+}
+
+type CreateAmount = (value: bigint, token: Address.Address) => Amount
+
+function eventArgument(event: ParsedEvent, name: string): unknown {
+	return (event.args as Record<string, unknown>)[name]
+}
+
+function eventBigInt(event: ParsedEvent, name: string): bigint | undefined {
+	const value = eventArgument(event, name)
+	return typeof value === 'bigint' ? value : undefined
+}
+
+function eventAddress(
+	event: ParsedEvent,
+	name: string,
+): Address.Address | undefined {
+	const value = eventArgument(event, name)
+	return typeof value === 'string' && Address.validate(value)
+		? Address.checksum(value)
+		: undefined
+}
+
+function findEarnToken(
+	events: ParsedEvent[],
+	params: {
+		amount: bigint
+		from?: Address.Address | undefined
+		to?: Address.Address | undefined
+		kind?: 'mint' | 'burn' | 'transfer' | undefined
+		exclude?: Address.Address | undefined
+	},
+): Address.Address | undefined {
+	for (const candidate of events) {
+		if (eventBigInt(candidate, 'amount') !== params.amount) continue
+		if (params.exclude && Address.isEqual(candidate.address, params.exclude))
+			continue
+
+		const from = eventAddress(candidate, 'from')
+		const to = eventAddress(candidate, 'to')
+		if (params.from && (!from || !Address.isEqual(from, params.from))) continue
+		if (params.to && (!to || !Address.isEqual(to, params.to))) continue
+		if (params.kind === 'mint' && candidate.eventName !== 'Mint') continue
+		if (params.kind === 'burn' && candidate.eventName !== 'Burn') continue
+		if (
+			params.kind === 'transfer' &&
+			candidate.eventName !== 'Transfer' &&
+			candidate.eventName !== 'TransferWithMemo'
+		)
+			continue
+		if (
+			candidate.eventName !== 'Mint' &&
+			candidate.eventName !== 'Burn' &&
+			candidate.eventName !== 'Transfer' &&
+			candidate.eventName !== 'TransferWithMemo'
+		)
+			continue
+
+		return Address.checksum(candidate.address)
+	}
+	return undefined
+}
+
+function findEarnSendRecipient(
+	events: ParsedEvent[],
+	params: {
+		amount: bigint
+		from: Address.Address
+		token: Address.Address
+	},
+): Address.Address | undefined {
+	for (const candidate of events) {
+		if (
+			candidate.eventName !== 'Transfer' &&
+			candidate.eventName !== 'TransferWithMemo'
+		)
+			continue
+		if (!Address.isEqual(candidate.address, params.token)) continue
+		if (eventBigInt(candidate, 'amount') !== params.amount) continue
+
+		const from = eventAddress(candidate, 'from')
+		const to = eventAddress(candidate, 'to')
+		if (!from || !to || !Address.isEqual(from, params.from)) continue
+		if (Address.isEqual(to, params.from) || Address.isEqual(to, zeroAddress))
+			continue
+		return to
+	}
+	return undefined
+}
+
+function earnValuePart(
+	value: bigint,
+	token: Address.Address | undefined,
+	createAmount: CreateAmount,
+): KnownEventPart {
+	return token
+		? { type: 'amount', value: createAmount(value, token) }
+		: { type: 'number', value }
+}
+
+type CardSpendArgs = {
+	payer: Address.Address
+	destination: Address.Address
+	token: Address.Address
+	amount: bigint
+	fromVault: bigint
+	sharesUsed: bigint
+	isPrivate: boolean
+}
+
+type RouterSpentArgs = {
+	spender: Address.Address
+	token: Address.Address
+	used: bigint
+	change: bigint
+}
+
+/** The Zone router's \`Spent\` for a card program, in the same receipt. */
+function findRouterSpent(
+	events: ParsedEvent[],
+	program: Address.Address,
+): (ParsedEvent & { args: RouterSpentArgs }) | undefined {
+	return events.find(
+		(candidate): candidate is ParsedEvent & { args: RouterSpentArgs } =>
+			candidate.eventName === 'Spent' &&
+			Address.isEqual(
+				(candidate.args as Partial<RouterSpentArgs>).spender ?? zeroAddress,
+				program,
+			),
+	)
+}
+
+/**
+ * The transfers a card spend moves through its program and Zone router: the
+ * input in, the payment out and the change back. The card spend summary and
+ * the Zone withdrawal and deposit already show them, so the receipt hides them.
+ */
+function findCardSpendTransferIndices(events: ParsedEvent[]): Set<number> {
+	const indices = new Set<number>()
+	for (const spend of events) {
+		if (spend.eventName !== 'CardSpent') continue
+		const program = spend.address
+		const router = findRouterSpent(events, program)?.address
+		// The portal pays a callback withdrawal through the Zone messenger, so
+		// its first hop names neither the router nor the program.
+		const withdrawals = router
+			? events.flatMap((event) => {
+					if (event.eventName !== 'WithdrawalProcessed') return []
+					const args = event.args as {
+						to?: Address.Address
+						token?: Address.Address
+						amount?: bigint
+					}
+					if (!args.to || !args.token || args.amount === undefined) return []
+					if (!Address.isEqual(args.to, router)) return []
+					return [
+						{ portal: event.address, token: args.token, amount: args.amount },
+					]
+				})
+			: []
+		for (const [index, event] of events.entries()) {
+			if (!isTransferEvent(event)) continue
+			const { from, to, amount } = event.args
+			const touches = (address: Address.Address | undefined) =>
+				address !== undefined &&
+				(Address.isEqual(from, address) || Address.isEqual(to, address))
+			const isWithdrawalHop = withdrawals.some(
+				(withdrawal) =>
+					Address.isEqual(from, withdrawal.portal) &&
+					Address.isEqual(event.address, withdrawal.token) &&
+					amount === withdrawal.amount,
+			)
+			if (touches(program) || touches(router) || isWithdrawalHop)
+				indices.add(index)
+		}
+	}
+	return indices
+}
+
+function createCardSpendSummary(
+	event: ParsedEvent,
+	events: ParsedEvent[],
+	createAmount: CreateAmount,
+): KnownEvent | null {
+	if (event.eventName !== 'CardSpent') return null
+	const { payer, destination, token, amount, sharesUsed, isPrivate } =
+		event.args as CardSpendArgs
+	const program = Address.checksum(event.address)
+	const note: NonNullable<KnownEvent['note']> = [
+		['Card program', { type: 'account', value: program }],
+		[
+			'Funding',
+			{ type: 'text', value: isPrivate ? 'Private (Zone)' : 'Public' },
+		],
+	]
+	if (sharesUsed > 0n)
+		note.push(['Earn shares used', { type: 'number', value: sharesUsed }])
+	const routerSpent = isPrivate ? findRouterSpent(events, program) : undefined
+	if (routerSpent && routerSpent.args.change > 0n)
+		note.push([
+			'Change to Zone',
+			{
+				type: 'amount',
+				value: createAmount(routerSpent.args.change, routerSpent.args.token),
+			},
+		])
+	return {
+		type: isPrivate ? 'card private spend' : 'card spend',
+		parts: [
+			{ type: 'action', value: 'Card Spend' },
+			{ type: 'amount', value: createAmount(amount, token) },
+			{ type: 'text', value: 'to' },
+			{ type: 'account', value: Address.checksum(destination) },
+		],
+		note,
+		meta: {
+			...(isPrivate ? {} : { from: Address.checksum(payer) }),
+			to: Address.checksum(destination),
+		},
+	}
+}
+
+function createEarnReceiptSummary(
+	event: ParsedEvent,
+	events: ParsedEvent[],
+	createAmount: CreateAmount,
+): KnownEvent | null {
+	const selector = event.topics[0]?.toLowerCase()
+	const signature = selector ? earnEventSignatures.get(selector) : undefined
+	const hasEvent = (name: string) =>
+		events.some((candidate) => candidate.eventName === name)
+
+	if (event.eventName === 'EarnDeposit') {
+		const inputToken = eventAddress(event, 'inputToken')
+		const inputAmount = eventBigInt(event, 'inputAmount')
+		const earnShares = eventBigInt(event, 'earnShares')
+		if (!inputToken || inputAmount === undefined || earnShares === undefined)
+			return null
+		const earnShare = findEarnToken(events, {
+			amount: earnShares,
+			kind: 'mint',
+			exclude: inputToken,
+		})
+		return {
+			type: 'earn private deposit',
+			parts: [
+				{ type: 'action', value: 'Deposit to Earn' },
+				{ type: 'amount', value: createAmount(inputAmount, inputToken) },
+				{ type: 'text', value: 'for' },
+				earnValuePart(earnShares, earnShare, createAmount),
+			],
+		}
+	}
+
+	if (event.eventName === 'EarnRedeem') {
+		const outputToken = eventAddress(event, 'outputToken')
+		const outputAmount = eventBigInt(event, 'outputAmount')
+		const earnShares = eventBigInt(event, 'earnShares')
+		if (!outputToken || outputAmount === undefined || earnShares === undefined)
+			return null
+		const earnShare = findEarnToken(events, {
+			amount: earnShares,
+			kind: 'burn',
+			exclude: outputToken,
+		})
+		return {
+			type: 'earn private redemption',
+			parts: [
+				{ type: 'action', value: 'Withdraw from Earn' },
+				earnValuePart(earnShares, earnShare, createAmount),
+				{ type: 'text', value: 'for' },
+				{ type: 'amount', value: createAmount(outputAmount, outputToken) },
+			],
+		}
+	}
+
+	if (
+		signature === 'Deposited(address,address,uint256,uint256)' &&
+		!hasEvent('EarnDeposit') &&
+		!hasEvent('AssetsFunded') &&
+		!hasEvent('Contributed')
+	) {
+		const receiver = eventAddress(event, 'receiver')
+		const assets = eventBigInt(event, 'assets')
+		const earnShares = eventBigInt(event, 'earnShares')
+		if (!receiver || assets === undefined || earnShares === undefined)
+			return null
+		const asset = findEarnToken(events, {
+			amount: assets,
+			to: event.address,
+			kind: 'transfer',
+		})
+		const earnShare = findEarnToken(events, {
+			amount: earnShares,
+			to: receiver,
+			kind: 'mint',
+		})
+		return {
+			type: 'earn deposit',
+			parts: [
+				{ type: 'action', value: 'Deposit to Earn' },
+				earnValuePart(assets, asset, createAmount),
+				{ type: 'text', value: 'for' },
+				earnValuePart(earnShares, earnShare, createAmount),
+			],
+		}
+	}
+
+	if (
+		signature === 'Redeemed(address,address,uint256,uint256)' &&
+		!hasEvent('EarnRedeem')
+	) {
+		const caller = eventAddress(event, 'caller')
+		const receiver = eventAddress(event, 'receiver')
+		const earnShares = eventBigInt(event, 'earnShares')
+		const assets = eventBigInt(event, 'assets')
+		if (
+			!caller ||
+			!receiver ||
+			earnShares === undefined ||
+			assets === undefined
+		)
+			return null
+		const earnShare = findEarnToken(events, {
+			amount: earnShares,
+			kind: 'burn',
+		})
+		const asset = findEarnToken(events, {
+			amount: assets,
+			to: receiver,
+			kind: 'transfer',
+		})
+		return {
+			type: 'earn redemption',
+			parts: [
+				{ type: 'action', value: 'Withdraw from Earn' },
+				earnValuePart(earnShares, earnShare, createAmount),
+				{ type: 'text', value: 'for' },
+				earnValuePart(assets, asset, createAmount),
+			],
+		}
+	}
+
+	if (signature === 'WithdrewExact(address,address,uint256,uint256)') {
+		const caller = eventAddress(event, 'caller')
+		const receiver = eventAddress(event, 'receiver')
+		const assets = eventBigInt(event, 'assets')
+		const earnShares = eventBigInt(event, 'earnSharesBurned')
+		if (
+			!caller ||
+			!receiver ||
+			assets === undefined ||
+			earnShares === undefined
+		)
+			return null
+		const asset = findEarnToken(events, {
+			amount: assets,
+			to: receiver,
+			kind: 'transfer',
+		})
+		const earnShare = findEarnToken(events, {
+			amount: earnShares,
+			kind: 'burn',
+		})
+		if (asset) {
+			const sendRecipient = findEarnSendRecipient(events, {
+				amount: assets,
+				from: receiver,
+				token: asset,
+			})
+			if (sendRecipient) {
+				return {
+					type: 'earn send',
+					parts: [
+						{ type: 'action', value: 'Send' },
+						{ type: 'amount', value: createAmount(assets, asset) },
+						{ type: 'text', value: 'to' },
+						{ type: 'account', value: sendRecipient },
+					],
+					note: [['Source', { type: 'text', value: 'Earn balance' }]],
+					meta: { from: receiver, to: sendRecipient },
+				}
+			}
+		}
+		return {
+			type: 'earn exact withdrawal',
+			parts: [
+				{ type: 'action', value: 'Withdraw from Earn' },
+				earnValuePart(assets, asset, createAmount),
+				{ type: 'text', value: 'using' },
+				earnValuePart(earnShares, earnShare, createAmount),
+			],
+		}
+	}
+
+	if (
+		signature ===
+		'VenueSharesDeposited(address,address,uint256,uint256,uint256)'
+	) {
+		const caller = eventAddress(event, 'caller')
+		const receiver = eventAddress(event, 'receiver')
+		const venueShares = eventBigInt(event, 'requestedVenueShares')
+		const earnShares = eventBigInt(event, 'earnShares')
+		if (
+			!caller ||
+			!receiver ||
+			venueShares === undefined ||
+			earnShares === undefined
+		)
+			return null
+		const venue = findEarnToken(events, {
+			amount: venueShares,
+			from: caller,
+			kind: 'transfer',
+		})
+		const earnShare = findEarnToken(events, {
+			amount: earnShares,
+			to: receiver,
+			kind: 'mint',
+		})
+		return {
+			type: 'earn in-kind deposit',
+			parts: [
+				{ type: 'action', value: 'Move Position to Earn' },
+				earnValuePart(venueShares, venue, createAmount),
+				{ type: 'text', value: 'for' },
+				earnValuePart(earnShares, earnShare, createAmount),
+			],
+		}
+	}
+
+	if (event.eventName === 'Funded') {
+		const funder = eventAddress(event, 'funder')
+		const fundedAssets = eventBigInt(event, 'fundedAssets')
+		if (!funder || fundedAssets === undefined) return null
+		const asset = findEarnToken(events, {
+			amount: fundedAssets,
+			from: funder,
+		})
+		return {
+			type: 'earn contribution',
+			parts: [
+				{ type: 'action', value: 'Add Funds to Earn' },
+				earnValuePart(fundedAssets, asset, createAmount),
+			],
+		}
+	}
+
+	if (event.eventName === 'Contributed' && !hasEvent('Funded')) {
+		const assets = eventBigInt(event, 'assets')
+		if (assets === undefined) return null
+		const asset = findEarnToken(events, { amount: assets })
+		return {
+			type: 'earn contribution',
+			parts: [
+				{ type: 'action', value: 'Add Funds to Earn' },
+				earnValuePart(assets, asset, createAmount),
+			],
+		}
+	}
+
+	if (event.eventName === 'AssetsFunded') {
+		const earnShares = eventBigInt(event, 'earnShares')
+		if (earnShares === undefined) return null
+		const earnShare = findEarnToken(events, {
+			amount: earnShares,
+			to: event.address,
+			kind: 'mint',
+		})
+		return {
+			type: 'earn reward funding',
+			parts: [
+				{ type: 'action', value: 'Add Earn Rewards' },
+				earnValuePart(earnShares, earnShare, createAmount),
+			],
+		}
+	}
+
+	if (event.eventName === 'RootPublished') {
+		const version = eventBigInt(event, 'version')
+		const entitlement = eventBigInt(event, 'totalEntitlement')
+		if (version === undefined || entitlement === undefined) return null
+		const funded = events.find(
+			(candidate) => candidate.eventName === 'AssetsFunded',
+		)
+		const fundedShares = funded && eventBigInt(funded, 'earnShares')
+		const earnShare =
+			fundedShares === undefined
+				? undefined
+				: findEarnToken(events, {
+						amount: fundedShares,
+						to: event.address,
+						kind: 'mint',
+					})
+		return {
+			type: 'earn reward root',
+			parts: [
+				{ type: 'action', value: 'Publish Reward Allocation' },
+				{ type: 'text', value: `v${version.toString()} for` },
+				earnValuePart(entitlement, earnShare, createAmount),
+			],
+		}
+	}
+
+	if (event.eventName === 'BatchPushed') {
+		const attempted = eventBigInt(event, 'attemptedCount')
+		const paid = eventBigInt(event, 'paidCount')
+		const paidShares = eventBigInt(event, 'paidEarnShares')
+		if (
+			attempted === undefined ||
+			paid === undefined ||
+			paidShares === undefined
+		)
+			return null
+		const earnShare = events.find((candidate) => {
+			if (
+				candidate.eventName !== 'Transfer' &&
+				candidate.eventName !== 'TransferWithMemo'
+			)
+				return false
+			const from = eventAddress(candidate, 'from')
+			return from ? Address.isEqual(from, event.address) : false
+		})?.address
+		return {
+			type: 'earn reward distribution',
+			parts: [
+				{ type: 'action', value: 'Distribute Earn Rewards' },
+				earnValuePart(paidShares, earnShare, createAmount),
+				{
+					type: 'text',
+					value: `to ${paid.toString()} of ${attempted.toString()} recipients`,
+				},
+			],
+		}
+	}
+
+	if (event.eventName === 'RewardClaimed') {
+		const recipient = eventAddress(event, 'recipient')
+		const amount = eventBigInt(event, 'amount')
+		if (!recipient || amount === undefined) return null
+		const earnShare = findEarnToken(events, {
+			amount,
+			to: recipient,
+			kind: 'transfer',
+		})
+		return {
+			type: 'earn reward claim',
+			parts: [
+				{ type: 'action', value: 'Claim Earn Rewards' },
+				earnValuePart(amount, earnShare, createAmount),
+				{ type: 'text', value: 'to' },
+				{ type: 'account', value: recipient },
+			],
+		}
+	}
+
+	if (event.eventName === 'RedeemRequested' && 'requester' in event.args) {
+		const receiver = eventAddress(event, 'receiver')
+		const earnShares = eventBigInt(event, 'earnShares')
+		if (!receiver || earnShares === undefined) return null
+		const earnShare = findEarnToken(events, {
+			amount: earnShares,
+			kind: 'burn',
+		})
+		return {
+			type: 'earn async redemption request',
+			parts: [
+				{ type: 'action', value: 'Request Earn Withdrawal' },
+				earnValuePart(earnShares, earnShare, createAmount),
+				{ type: 'text', value: 'for' },
+				{ type: 'account', value: receiver },
+			],
+		}
+	}
+
+	if (event.eventName === 'RedeemFinalized') {
+		const receiver = eventAddress(event, 'receiver')
+		const asset = eventAddress(event, 'asset')
+		const assets = eventBigInt(event, 'assets')
+		if (!receiver || !asset || assets === undefined) return null
+		return {
+			type: 'earn async redemption finalized',
+			parts: [
+				{ type: 'action', value: 'Complete Earn Withdrawal' },
+				{ type: 'amount', value: createAmount(assets, asset) },
+				{ type: 'text', value: 'to' },
+				{ type: 'account', value: receiver },
+			],
+		}
+	}
+
+	if (event.eventName === 'RedeemCancelled') {
+		const receiver = eventAddress(event, 'receiver')
+		const earnShares = eventBigInt(event, 'earnShares')
+		if (!receiver || earnShares === undefined) return null
+		return {
+			type: 'earn async redemption cancelled',
+			parts: [
+				{ type: 'action', value: 'Cancel Earn Withdrawal' },
+				{ type: 'number', value: earnShares },
+				{ type: 'text', value: 'for' },
+				{ type: 'account', value: receiver },
+			],
+		}
+	}
+
+	if (event.eventName === 'EngineMigrated') {
+		const oldEngine = eventAddress(event, 'oldEngine')
+		const newEngine = eventAddress(event, 'newEngine')
+		const assetsMoved = eventBigInt(event, 'assetsMoved')
+		if (!oldEngine || !newEngine || assetsMoved === undefined) return null
+		return {
+			type: 'earn engine migration',
+			parts: [
+				{ type: 'action', value: 'Migrate Earn Strategy' },
+				{ type: 'number', value: assetsMoved },
+			],
+			note: [
+				['From', { type: 'account', value: oldEngine }],
+				['To', { type: 'account', value: newEngine }],
+			],
+		}
+	}
+
+	return null
+}
 const FEE_MANAGER = Addresses.feeManager
 const RECEIVE_POLICY_GUARD = Address.from(
 	'0xB10C000000000000000000000000000000000000',
 )
 const STABLECOIN_EXCHANGE = Addresses.stablecoinDex
+
+/**
+ * TIP-20 tokens live under a 12-byte address prefix, far too long for a
+ * deployed contract's address to be ground to, so their logs are genuine.
+ */
+export function isTip20Token(address: string): boolean {
+	return address.toLowerCase().startsWith('0x20c000000000000000000000')
+}
 export const STREAM_CHANNEL = '0x9d136eEa063eDE5418A6BC7bEafF009bBb6CFa70'
 export const STREAM_CHANNELS = [
 	STREAM_CHANNEL,
@@ -46,15 +909,16 @@ const KNOWN_ZONES: ReadonlyMap<Address.Address, { name: string }> = new Map([
 	],
 ])
 
-const ZONE_PORTAL_EVENT_NAMES = new Set([
-	'DepositMade',
-	'EncryptedDepositMade',
-	'BatchSubmitted',
-	'WithdrawalProcessed',
-	'BounceBack',
-	'SequencerTransferred',
-	'TokenEnabled',
-])
+const ZONE_EVENT_NAMES = new Set(
+	[...Abis.zoneFactory, ...Abis.zonePortal, ...Abis.zoneOutbox]
+		.filter((item) => item.type === 'event')
+		.map((item) => item.name),
+)
+const ZONE_PORTAL_EVENT_NAMES = new Set(
+	Abis.zonePortal
+		.filter((item) => item.type === 'event')
+		.map((item) => item.name),
+)
 
 function createZoneDepositTransferKey(params: {
 	sender: Address.Address
@@ -113,6 +977,54 @@ function checksumAddress(address: string): Address.Address {
 	return Address.from(address, { checksum: true })
 }
 
+function humanizeIdentifier(value: string): string {
+	return value
+		.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+		.replace(/^./, (character) => character.toUpperCase())
+}
+
+function formatZoneEventAction(eventName: string, zoneName: string): string {
+	const transformations = [
+		['Updated', 'Update'],
+		['Paused', 'Pause'],
+		['Resumed', 'Resume'],
+		['Transferred', 'Transfer'],
+		['Started', 'Start'],
+		['Scheduled', 'Schedule'],
+		['Claimed', 'Claim'],
+		['Requested', 'Request'],
+	] as const
+
+	for (const [suffix, verb] of transformations) {
+		if (!eventName.endsWith(suffix)) continue
+		const subject = humanizeIdentifier(eventName.slice(0, -suffix.length))
+		return `${verb} ${zoneName} ${subject}`
+	}
+
+	return `${zoneName} ${humanizeIdentifier(eventName)}`
+}
+
+function formatZoneEventArgument(value: unknown): KnownEventPart {
+	if (typeof value === 'bigint' || typeof value === 'number')
+		return { type: 'number', value }
+	if (typeof value === 'boolean')
+		return { type: 'text', value: value ? 'Yes' : 'No' }
+	if (typeof value === 'string') {
+		if (/^0x[\da-fA-F]{40}$/.test(value))
+			return { type: 'account', value: checksumAddress(value) }
+		if (/^0x[\da-fA-F]*$/.test(value))
+			return { type: 'hex', value: value as Hex.Hex }
+		return { type: 'text', value }
+	}
+
+	return {
+		type: 'text',
+		value: JSON.stringify(value, (_, item) =>
+			typeof item === 'bigint' ? item.toString() : item,
+		),
+	}
+}
+
 function decodeClaimReceiptV1(receipt: Hex.Hex) {
 	try {
 		const [
@@ -169,9 +1081,17 @@ function createZonePortalMetadata(events: ParsedEvent[]) {
 			continue
 		}
 
-		if (ZONE_PORTAL_EVENT_NAMES.has(event.eventName)) {
+		if (
+			isDeterministicZonePortalAddress(event.address) ||
+			ZONE_PORTAL_EVENT_NAMES.has(event.eventName)
+		) {
 			const portal = checksumAddress(event.address)
-			zonePortals.set(portal, zonePortals.get(portal) ?? { name: 'Zone' })
+			const zoneId = getZonePortalId(portal)
+			zonePortals.set(portal, {
+				name:
+					zonePortals.get(portal)?.name ??
+					(zoneId === undefined ? 'Zone' : `Zone ${zoneId}`),
+			})
 		}
 	}
 
@@ -189,6 +1109,8 @@ function createDetectors(
 		payee: Address.Address,
 	) => Address.Address | undefined,
 	zonePortals: ReadonlyMap<Address.Address, { name: string }> = KNOWN_ZONES,
+	chainId?: number,
+	getPropAmmShape?: GetPropAmmShapeFn,
 ) {
 	function isZonePortalAddress(address: Address.Address): boolean {
 		return zonePortals.has(checksumAddress(address))
@@ -199,6 +1121,189 @@ function createDetectors(
 	}
 
 	return {
+		propAmm(
+			event: ParsedEvent,
+			events?: readonly Log<bigint, number, boolean, AbiEvent>[],
+		) {
+			const selector = event.topics[0]?.toLowerCase()
+			if (
+				selector === propAmmPostedSelector ||
+				selector === propAmmRefilledSelector
+			) {
+				// Only listed venues: anyone can emit these events, and the pair's
+				// tokens come from the listing.
+				const { pairIndex } = event.args as { pairIndex: number }
+				const pair = findPropAmmV2Pair(chainId, event.address, pairIndex)
+				if (!pair) return null
+				const token = (address: Address.Address) => ({
+					address,
+					symbol: getTokenMetadata?.(address)?.symbol,
+				})
+				const base = token(pair.base)
+				const quote = token(pair.quote)
+
+				if (selector === propAmmRefilledSelector) {
+					const { bids, asks } = event.args as { bids: boolean; asks: boolean }
+					const sides = bids && asks ? 'Bids and Asks' : bids ? 'Bids' : 'Asks'
+					return {
+						type: 'propamm refill',
+						parts: [
+							{ type: 'action', value: `propAMM Refill ${sides}` },
+							{ type: 'token', value: base },
+							{ type: 'text', value: '/' },
+							{ type: 'token', value: quote },
+						],
+					}
+				}
+
+				// The maker's quote reads as a two-sided order: the shape's ladder
+				// around the mid, scaled by width and depth and widened per side.
+				const word = decodeHotWord(
+					BigInt((event.args as { hotWord: Hex.Hex }).hotWord),
+				)
+				const shape = getPropAmmShape?.(event.address, pairIndex, word.shapeId)
+				const meta: Array<[string, KnownEventPart]> = [
+					['Mid', { type: 'number', value: [word.mid, 18] }],
+					[
+						'Valid Until',
+						{ type: 'text', value: formatUnixSeconds(word.validUntil) },
+					],
+					['Width', { type: 'text', value: formatScale(word.widthScale) }],
+					[
+						'Depth Scale',
+						{ type: 'text', value: formatScale(word.depthScale) },
+					],
+					['Shape', { type: 'text', value: `#${word.shapeId}` }],
+					['Sequence', { type: 'number', value: word.seq }],
+				]
+
+				// Without the shape only the mid and the widens are known.
+				if (!shape) {
+					const widen = (off: boolean, value: number) =>
+						({
+							type: 'text',
+							value: off
+								? 'off'
+								: `shape #${word.shapeId} ladder + ${formatBps(value / 10)} widen`,
+						}) as const
+					return {
+						type: 'propamm quote',
+						parts: [
+							{ type: 'action', value: 'propAMM Quote' },
+							{ type: 'token', value: base },
+							{ type: 'text', value: 'around mid' },
+							{ type: 'number', value: [word.mid, 18] },
+							{ type: 'token', value: quote },
+						],
+						note: [
+							['Bid', widen(word.bidsOff, word.bidWiden)],
+							['Ask', widen(word.asksOff, word.askWiden)],
+							...meta,
+						],
+					}
+				}
+
+				const bid = word.bidsOff
+					? undefined
+					: propAmmQuoteSide(shape.bids, shape.sizeUnit, word, true)
+				const ask = word.asksOff
+					? undefined
+					: propAmmQuoteSide(shape.asks, shape.sizeUnit, word, false)
+				const sidePart = (label: string, side: typeof bid): KnownEventPart[] =>
+					side
+						? [
+								{ type: 'text', value: label },
+								{ type: 'number', value: [side.price, 18] },
+							]
+						: [{ type: 'text', value: `${label} off` }]
+				const sideNote = (
+					side: typeof bid,
+					sign: '-' | '+',
+				): KnownEventPart => ({
+					type: 'text',
+					value: side
+						? [
+								`mid ${sign} ${formatBps(side.bps)}`,
+								side.widenBps ? `incl. ${formatBps(side.widenBps)} widen` : '',
+								`${side.levels} level${side.levels === 1 ? '' : 's'}`,
+							]
+								.filter(Boolean)
+								.join(', ')
+						: 'off',
+				})
+				const note: Array<[string, KnownEventPart]> = [
+					['Bid', sideNote(bid, '-')],
+				]
+				if (bid)
+					note.push([
+						'Bid Size',
+						{ type: 'amount', value: createAmount(bid.depth, pair.base) },
+					])
+				note.push(['Ask', sideNote(ask, '+')])
+				if (ask)
+					note.push([
+						'Ask Size',
+						{ type: 'amount', value: createAmount(ask.depth, pair.base) },
+					])
+				return {
+					type: 'propamm quote',
+					parts: [
+						{ type: 'action', value: 'propAMM Quote' },
+						{ type: 'token', value: base },
+						...sidePart('Bid', bid),
+						...sidePart('/ Ask', ask),
+						{ type: 'token', value: quote },
+					],
+					note: [...note, ...meta],
+				}
+			}
+			if (selector === propAmmFillSelector) {
+				const { amountIn, amountOut } = event.args as PropAmmFillArgs
+				const { input, output } = findPropAmmFillTransfers(event, events ?? [])
+				const tokenIn = input?.token
+				const tokenOut = output?.token
+				// Without its settlement transfers the swap can't be described, and
+				// a bare swap would replace the transaction's other events.
+				if (!tokenIn || !tokenOut) return null
+				return {
+					type: 'propamm swap',
+					parts: [
+						{ type: 'action', value: 'propAMM Swap' },
+						{ type: 'amount', value: createAmount(amountIn, tokenIn) },
+						{ type: 'text', value: 'for' },
+						{ type: 'amount', value: createAmount(amountOut, tokenOut) },
+					],
+				}
+			}
+			if (selector !== propAmmTradeSelector) return null
+			const { tokenIn, tokenOut, amountIn, amountOut } = event.args as {
+				tokenIn: Address.Address
+				tokenOut: Address.Address
+				amountIn: bigint
+				amountOut: bigint
+			}
+
+			return {
+				type: 'propamm swap',
+				parts: [
+					{ type: 'action', value: 'propAMM Swap' },
+					{ type: 'amount', value: createAmount(amountIn, tokenIn) },
+					{ type: 'text', value: 'for' },
+					{ type: 'amount', value: createAmount(amountOut, tokenOut) },
+				],
+			}
+		},
+		earn(event: ParsedEvent) {
+			const selector = event.topics[0]?.toLowerCase()
+			if (!selector) return null
+			const action = earnEventActions.get(selector)
+			if (!action) return null
+
+			return {
+				type: 'earn event',
+				parts: [{ type: 'action', value: action }],
+			}
+		},
 		zone(event: ParsedEvent) {
 			const { eventName, args, address } = event
 
@@ -227,7 +1332,8 @@ function createDetectors(
 
 				if (
 					isZonePortalAddress(args.from) &&
-					!Address.isEqual(args.to, zeroAddress)
+					!Address.isEqual(args.to, zeroAddress) &&
+					!Address.isEqual(args.to, Addresses.zoneMessenger)
 				) {
 					const zoneName = getZoneName(args.from)
 					return {
@@ -248,7 +1354,10 @@ function createDetectors(
 
 			if (eventName === 'DepositMade') {
 				const zoneName = getZoneName(address)
-				const memo = decodeMemoForDisplay(args.memo)
+				const action =
+					'to' in args ? `Deposit to ${zoneName}` : 'Private Zone Deposit'
+				const memo =
+					'memo' in args ? decodeMemoForDisplay(args.memo) : undefined
 				const note: NonNullable<KnownEvent['note']> = []
 
 				if (args.fee > 0n) {
@@ -259,13 +1368,20 @@ function createDetectors(
 				}
 				if (memo) note.push(['Memo', { type: 'text', value: memo }])
 
+				const recipientParts: KnownEvent['parts'] =
+					'to' in args
+						? [
+								{ type: 'text', value: 'for' },
+								{ type: 'account', value: args.to },
+							]
+						: []
+
 				return {
 					type: 'zone deposit',
 					parts: [
-						{ type: 'action', value: `Deposit to ${zoneName}` },
+						{ type: 'action', value: action },
 						{ type: 'amount', value: createAmount(args.netAmount, args.token) },
-						{ type: 'text', value: 'for' },
-						{ type: 'account', value: args.to },
+						...recipientParts,
 					],
 					note: note.length > 0 ? note : undefined,
 					meta: { from: args.sender, to: address },
@@ -296,20 +1412,51 @@ function createDetectors(
 			}
 
 			if (eventName === 'BatchSubmitted') {
-				const zoneName = getZoneName(address)
+				const note: NonNullable<KnownEvent['note']> = [
+					['Batch Index', { type: 'number', value: args.withdrawalBatchIndex }],
+					[
+						'Processed Deposits',
+						{ type: 'hex', value: args.nextProcessedDepositQueueHash },
+					],
+					['Next Block', { type: 'hex', value: args.nextBlockHash }],
+					zoneBatchWithdrawalNote(args.withdrawalQueueHash),
+				]
+				if ('withdrawalQueueIndex' in args) {
+					if (args.withdrawalQueueHash !== zeroHash)
+						note.splice(1, 0, [
+							'Withdrawal Queue Index',
+							{ type: 'number', value: args.withdrawalQueueIndex },
+						])
+					note.push([
+						'Last Processed Deposit',
+						{ type: 'number', value: args.lastProcessedDepositNumber },
+					])
+				}
+
 				return {
 					type: 'zone batch submitted',
-					parts: [{ type: 'action', value: `Submit ${zoneName} Batch` }],
-					note: [
-						['Processed Deposits', { type: 'text', value: '' }],
-						['Next Block', { type: 'text', value: '' }],
-						['Withdrawal Queue', { type: 'text', value: '' }],
+					parts: [{ type: 'action', value: 'Submit Zone Batch' }],
+					note,
+					meta: {
+						zoneBatch: {
+							portal: address,
+							nextBlockHash: args.nextBlockHash,
+							nextProcessedDepositQueueHash: args.nextProcessedDepositQueueHash,
+							withdrawalQueueHash: args.withdrawalQueueHash,
+						},
+					},
+					evidence: [
+						{ kind: 'log', address, index: event.logIndex ?? undefined },
 					],
 				}
 			}
 
 			if (eventName === 'WithdrawalProcessed') {
 				const zoneName = getZoneName(address)
+				const action =
+					'senderTag' in args
+						? 'Private Zone Withdrawal'
+						: `Withdraw from ${zoneName}`
 				const note: NonNullable<KnownEvent['note']> = []
 				if (!args.callbackSuccess) {
 					note.push(['Callback', { type: 'text', value: 'Failed' }])
@@ -318,7 +1465,7 @@ function createDetectors(
 				return {
 					type: 'zone withdrawal',
 					parts: [
-						{ type: 'action', value: `Withdraw from ${zoneName}` },
+						{ type: 'action', value: action },
 						{ type: 'amount', value: createAmount(args.amount, args.token) },
 						{ type: 'text', value: 'to' },
 						{ type: 'account', value: args.to },
@@ -342,7 +1489,30 @@ function createDetectors(
 				}
 			}
 
-			if (eventName === 'ZoneCreated')
+			if (eventName === 'ZoneCreated') {
+				const note: NonNullable<KnownEvent['note']> = [
+					[
+						'Initial Token',
+						{ type: 'token', value: { address: args.initialToken } },
+					],
+					['Verifier', { type: 'account', value: args.verifier }],
+				]
+				if ('messenger' in args) {
+					note.unshift(
+						['Messenger', { type: 'account', value: args.messenger }],
+						['Sequencer', { type: 'account', value: args.sequencer }],
+					)
+				} else {
+					note.unshift(
+						...args.sequencers.map(
+							(sequencer, index): [string, KnownEventPart] => [
+								`Sequencer ${index + 1}`,
+								{ type: 'account', value: sequencer },
+							],
+						),
+					)
+				}
+
 				return {
 					type: 'zone created',
 					parts: [
@@ -351,17 +1521,10 @@ function createDetectors(
 						{ type: 'text', value: 'at' },
 						{ type: 'account', value: args.portal },
 					],
-					note: [
-						['Messenger', { type: 'account', value: args.messenger }],
-						[
-							'Initial Token',
-							{ type: 'token', value: { address: args.initialToken } },
-						],
-						['Sequencer', { type: 'account', value: args.sequencer }],
-						['Verifier', { type: 'account', value: args.verifier }],
-					],
+					note,
 					meta: { from: address, to: args.portal },
 				}
+			}
 
 			if (eventName === 'TokenEnabled') {
 				const zoneName = getZoneName(address)
@@ -394,6 +1557,31 @@ function createDetectors(
 						['Previous', { type: 'account', value: args.previousSequencer }],
 					],
 					meta: { from: address, to: args.newSequencer },
+				}
+			}
+
+			if (ZONE_EVENT_NAMES.has(eventName)) {
+				const zoneName = isZonePortalAddress(address)
+					? getZoneName(address)
+					: 'Zone'
+				const note = Object.entries(args).map(
+					([name, value]): [string, KnownEventPart] => [
+						humanizeIdentifier(name),
+						formatZoneEventArgument(value),
+					],
+				)
+
+				return {
+					type: `zone ${eventName
+						.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+						.toLowerCase()}`,
+					parts: [
+						{
+							type: 'action',
+							value: formatZoneEventAction(eventName, zoneName),
+						},
+					],
+					note: note.length > 0 ? note : undefined,
 				}
 			}
 
@@ -501,6 +1689,17 @@ function createDetectors(
 					],
 				}
 			}
+
+			if (eventName === 'BurnAt')
+				return {
+					type: 'burn at',
+					parts: [
+						{ type: 'action', value: 'BurnAt' },
+						{ type: 'amount', value: createAmount(args.amount, address) },
+						{ type: 'text', value: 'from' },
+						{ type: 'account', value: args.from },
+					],
+				}
 
 			if (eventName === 'RoleMembershipUpdated')
 				return {
@@ -1299,6 +2498,16 @@ type ContractCall = {
 	input: Hex.Hex
 }
 
+/** A Stablecoin DEX book as text, such as "USDC.e/OUSD". */
+export function dexPairLabel(
+	pair: { base: Token; quote: Token },
+	separator = '/',
+): string {
+	const symbol = (token: Token) =>
+		token.symbol ?? HexFormatter.truncate(token.address)
+	return `${symbol(pair.base)}${separator}${symbol(pair.quote)}`
+}
+
 export type KnownEventPart =
 	| { type: 'account'; value: Address.Address }
 	| { type: 'action'; value: string }
@@ -1315,6 +2524,16 @@ export type KnownEventPart =
 	| { type: 'text'; value: string }
 	| { type: 'tick'; value: number }
 	| { type: 'token'; value: Token }
+	/** A swap's route through the Stablecoin DEX, linked to its route page. */
+	| { type: 'dexRoute'; value: { from: Address.Address; to: Address.Address } }
+	/**
+	 * The Stablecoin DEX book an order rests on. An active book links to its
+	 * pair page; a retired one has none, as swaps no longer route through it.
+	 */
+	| {
+			type: 'dexPair'
+			value: { base: Token; quote: Token; active: boolean }
+	  }
 
 export interface KnownEvent {
 	type: Exclude<string, FeeTransferEvent['type']>
@@ -1323,7 +2542,19 @@ export interface KnownEvent {
 	meta?: {
 		from?: Address.Address
 		to?: Address.Address
+		zoneBatch?: {
+			portal: Address.Address
+			nextBlockHash: Hex.Hex
+			nextProcessedDepositQueueHash: Hex.Hex
+			withdrawalQueueHash: Hex.Hex
+		}
 	}
+	evidence?: readonly {
+		kind: 'call' | 'log'
+		address: Address.Address
+		index?: number | undefined
+		inputHash?: Hex.Hex | undefined
+	}[]
 	totalAmount?: Amount
 	failed?: boolean
 }
@@ -1346,15 +2577,45 @@ type FeeManagerAddLiquidityCall = {
 	args: readonly [Address.Address, Address.Address, bigint, Address.Address]
 }
 
+// A receipt's logs, decoded once however many of its Fill logs read them.
+const parsedSiblingLogs = new WeakMap<
+	readonly Log[],
+	Log<bigint, number, boolean, AbiEvent>[]
+>()
+
+function parseSiblingLogs(logs: readonly Log[]) {
+	let parsed = parsedSiblingLogs.get(logs)
+	if (!parsed) {
+		parsed = parseEventLogs({ abi, logs: [...logs] }) as Log<
+			bigint,
+			number,
+			boolean,
+			AbiEvent
+		>[]
+		parsedSiblingLogs.set(logs, parsed)
+	}
+	return parsed
+}
+
 export function parseKnownEvent(
 	log: Log,
 	options?: {
 		getTokenMetadata?: Tip20.GetTip20MetadataFn
 		streamChannelToken?: Address.Address
+		/** The transaction's logs, which a propAMM v2 Fill reads its tokens from. */
+		logs?: readonly Log[]
+		/** The chain the log is on, which listed propAMM venues are looked up on. */
+		chainId?: number
+		/** The ladders propAMM v2 quotes rest on, which set their bid and ask. */
+		getPropAmmShape?: GetPropAmmShapeFn
 	},
 ): KnownEvent | null {
 	const [event] = parseEventLogs({ abi, logs: [log] })
 	if (!event) return null
+	const siblings =
+		options?.logs && event.topics[0]?.toLowerCase() === propAmmFillSelector
+			? parseSiblingLogs(options.logs)
+			: undefined
 
 	const getTokenMetadata = options?.getTokenMetadata
 
@@ -1376,9 +2637,13 @@ export function parseKnownEvent(
 		undefined,
 		undefined,
 		() => options?.streamChannelToken,
+		undefined,
+		options?.chainId,
+		options?.getPropAmmShape,
 	)
 
 	const detected =
+		detectors.propAmm(event, siblings) ||
 		detectors.zone(event) ||
 		detectors.tip20(event) ||
 		detectors.tip20Factory(event) ||
@@ -1390,6 +2655,7 @@ export function parseKnownEvent(
 		detectors.accountKeychain(event) ||
 		detectors.feeAmm(event) ||
 		detectors.streamChannel(event) ||
+		detectors.earn(event) ||
 		describePhrasedEvent(event)
 
 	if (!detected || isFeeTransferEvent(detected)) return null
@@ -1446,10 +2712,15 @@ export function parseKnownEvents(
 		transaction?: TransactionLike
 		getTokenMetadata?: Tip20.GetTip20MetadataFn
 		viewer?: Address.Address
+		/** The chain the receipt is on, which listed propAMM venues are looked up on. */
+		chainId?: number
+		/** The ladders propAMM v2 quotes rest on, which set their bid and ask. */
+		getPropAmmShape?: GetPropAmmShapeFn
 	},
 ): KnownEvent[] {
 	const { logs } = receipt
 	const events = parseEventLogs({ abi, logs })
+	const burnAtTransfers = findBurnAtTransfers(events)
 	const zonePortals = createZonePortalMetadata(events)
 	const getTokenMetadata = options?.getTokenMetadata
 	const viewer = options?.viewer
@@ -1667,9 +2938,12 @@ export function parseKnownEvents(
 		transactionSender,
 		getStreamChannelToken,
 		zonePortals,
+		options?.chainId,
+		options?.getPropAmmShape,
 	)
 
 	const dedupedEvents = events.filter((event) => {
+		if (burnAtTransfers.has(event)) return false
 		let include = true
 
 		if (event.eventName === 'Transfer') {
@@ -1868,50 +3142,145 @@ export function parseKnownEvents(
 			index,
 		}))
 
-	// Look for swap pairs (transfer TO exchange + transfer FROM exchange)
+	// A propAMM trade is self-identifying through TradeExecuted or a v2 Fill.
+	// Hide the two settlement transfers so the receipt shows one swap summary
+	// instead.
+	for (const fill of dedupedEvents) {
+		if (fill.topics[0]?.toLowerCase() !== propAmmFillSelector) continue
+		const { input, output } = findPropAmmFillTransfers(fill, dedupedEvents)
+		// Hide only the two transfers the swap summary shows.
+		if (!input || !output) continue
+		swapIndices.add(input.index)
+		swapIndices.add(output.index)
+	}
+	// A TradeExecuted hides every transfer of its input and output legs. Trades
+	// that share a leg hide the same transfers, so each leg is added once.
+	const propAmmTransfers = getPropAmmTransferIndex(dedupedEvents)
+	const hiddenTradeLegs = new Set<string>()
+	const hideTradeLeg = (map: Map<string, PropAmmTransfer[]>, key: string) => {
+		if (hiddenTradeLegs.has(key)) return
+		hiddenTradeLegs.add(key)
+		for (const { index } of map.get(key) ?? []) swapIndices.add(index)
+	}
+	for (const trade of dedupedEvents) {
+		if (trade.topics[0]?.toLowerCase() !== propAmmTradeSelector) continue
+		const { taker, tokenIn, tokenOut, amountIn, amountOut } = trade.args as {
+			taker: Address.Address
+			tokenIn: Address.Address
+			tokenOut: Address.Address
+			amountIn: bigint
+			amountOut: bigint
+		}
+		const venue = addressKey(trade.address)
+		hideTradeLeg(
+			propAmmTransfers.tokenRoute,
+			`${addressKey(tokenIn)}:${addressKey(taker)}:${venue}:${amountIn}`,
+		)
+		hideTradeLeg(
+			propAmmTransfers.tokenSource,
+			`${addressKey(tokenOut)}:${venue}:${amountOut}`,
+		)
+	}
+
+	// The DEX takes a taker's tokens in, fills orders for it, then pays it
+	// out. Only TIP-20 transfers around a fill the DEX itself emitted for the
+	// same taker name it as the venue: any contract can emit a Transfer
+	// naming the DEX, and tokens can pass through it for other reasons.
+	// Index the DEX's fills by taker so each pair checks for one between its
+	// transfers without rescanning the logs.
+	const dexFillIndicesByTaker = new Map<string, number[]>()
+	for (const [index, event] of dedupedEvents.entries()) {
+		if (
+			event.eventName !== 'OrderFilled' ||
+			!Address.isEqual(event.address, STABLECOIN_EXCHANGE)
+		)
+			continue
+		const taker = (event.args as { taker?: unknown }).taker
+		if (typeof taker !== 'string') continue
+		const key = taker.toLowerCase()
+		const indices = dexFillIndicesByTaker.get(key)
+		if (indices) indices.push(index)
+		else dexFillIndicesByTaker.set(key, [index])
+	}
+	const dexFillBetween = (
+		start: number,
+		end: number,
+		taker: Address.Address,
+	) => {
+		const indices = dexFillIndicesByTaker.get(taker.toLowerCase())
+		if (!indices) return false
+		// The first fill after start, by binary search over ascending indices.
+		let low = 0
+		let high = indices.length
+		while (low < high) {
+			const middle = (low + high) >>> 1
+			if (indices[middle] <= start) low = middle + 1
+			else high = middle
+		}
+		return low < indices.length && indices[low] < end
+	}
+
+	// Look for swap pairs: a transfer TO the exchange settles against the next
+	// transfer FROM it. Find each transfer's next one FROM the exchange in a
+	// single backward pass, so pairing stays linear in the number of logs.
+	const nextFromExchange = new Array<number | undefined>(transferEvents.length)
+	let nextFrom: number | undefined
+	for (let index = transferEvents.length - 1; index >= 0; index--) {
+		nextFromExchange[index] = nextFrom
+		if (
+			Address.isEqual(
+				transferEvents[index].event.args.from,
+				STABLECOIN_EXCHANGE,
+			)
+		)
+			nextFrom = index
+	}
+
 	for (let index = 0; index < transferEvents.length - 1; index++) {
 		const { event: event1, index: idx1 } = transferEvents[index]
-		// Type assertion is safe here because isTransferEvent has validated the structure
 		const args1 = event1.args
-		const to1 = args1.to
+		if (!Address.isEqual(args1.to, STABLECOIN_EXCHANGE)) continue
 
-		// If this is a transfer TO the exchange, look for a matching transfer FROM the exchange
-		if (Address.isEqual(to1, STABLECOIN_EXCHANGE)) {
-			for (
-				let innerIndex = index + 1;
-				innerIndex < transferEvents.length;
-				innerIndex++
-			) {
-				const { event: event2, index: idx2 } = transferEvents[innerIndex]
-				const args2 = event2.args
-				const from2 = args2.from
+		const innerIndex = nextFromExchange[index]
+		if (innerIndex === undefined) continue
+		const { event: event2, index: idx2 } = transferEvents[innerIndex]
+		const args2 = event2.args
 
-				if (Address.isEqual(from2, STABLECOIN_EXCHANGE)) {
-					// This is a swap - create a single swap event
-					knownEvents.push({
-						type: 'swap',
-						parts: [
-							{ type: 'action', value: 'Swap' },
+		// This is a swap - create a single swap event
+		knownEvents.push({
+			type: 'swap',
+			parts: [
+				{ type: 'action', value: 'Swap' },
+				{
+					type: 'amount',
+					value: createAmount(args1.amount, event1.address),
+				},
+				{ type: 'text', value: 'for' },
+				{
+					type: 'amount',
+					value: createAmount(args2.amount, event2.address),
+				},
+				...(isTip20Token(event1.address) &&
+				isTip20Token(event2.address) &&
+				Address.isEqual(args1.from, args2.to) &&
+				dexFillBetween(idx1, idx2, args1.from)
+					? ([
+							{ type: 'text', value: 'on' },
 							{
-								type: 'amount',
-								value: createAmount(args1.amount, event1.address),
+								type: 'dexRoute',
+								value: { from: event1.address, to: event2.address },
 							},
-							{ type: 'text', value: 'for' },
-							{
-								type: 'amount',
-								value: createAmount(args2.amount, event2.address),
-							},
-						],
-					})
+						] as const)
+					: []),
+			],
+		})
 
-					// Mark these events as processed
-					swapIndices.add(idx1)
-					swapIndices.add(idx2)
-					break // Found the matching pair, move to next transfer
-				}
-			}
-		}
+		// Mark these events as processed
+		swapIndices.add(idx1)
+		swapIndices.add(idx2)
 	}
+
+	const cardSpendTransferIndices = findCardSpendTransferIndices(dedupedEvents)
 
 	const streamChannelIndices = new Set<number>()
 	const hasStreamChannelEvents = dedupedEvents.some((event) =>
@@ -1971,10 +3340,12 @@ export function parseKnownEvents(
 		// Skip events that are part of a swap
 		if (swapIndices.has(index)) continue
 		if (streamChannelIndices.has(index)) continue
+		if (cardSpendTransferIndices.has(index)) continue
 
 		const event = dedupedEvents[index]
 
 		const detected =
+			detectors.propAmm(event, dedupedEvents) ||
 			detectors.feePayer(event) ||
 			detectors.zone(event) ||
 			detectors.tip20(event) ||
@@ -1987,6 +3358,8 @@ export function parseKnownEvents(
 			detectors.accountKeychain(event) ||
 			detectors.feeAmm(event) ||
 			detectors.streamChannel(event) ||
+			createCardSpendSummary(event, dedupedEvents, createAmount) ||
+			createEarnReceiptSummary(event, dedupedEvents, createAmount) ||
 			describePhrasedEvent(event)
 
 		if (!detected) continue
@@ -2056,9 +3429,7 @@ export function parseKnownEvents(
 	return knownEvents
 }
 
-// ============================================================================
 // Call Decoding (for contracts that emit no events, e.g., validator precompile)
-// ============================================================================
 
 // Validator config address (use Addresses.validator when viem exports it)
 const VALIDATOR_CONFIG = '0xcccccccc00000000000000000000000000000000'
@@ -2066,6 +3437,7 @@ const VALIDATOR_CONFIG = '0xcccccccc00000000000000000000000000000000'
 type CallDecoder = (
 	functionName: string,
 	args: readonly unknown[],
+	to: Address.Address,
 ) => KnownEvent | null
 
 function decodeValidatorConfigCall(
@@ -2170,6 +3542,181 @@ function decodeValidatorConfigCall(
 	}
 }
 
+function decodeZoneFactoryCall(
+	functionName: string,
+	args: readonly unknown[],
+): KnownEvent | null {
+	if (functionName !== 'createZone') return null
+
+	const [params] = args as readonly [
+		{
+			initialToken: Address.Address
+			admin: Address.Address
+			sequencer?: Address.Address
+			sequencers?: readonly Address.Address[]
+			threshold?: number
+			rpcUrl: string
+			verifier?: Address.Address
+		},
+	]
+	const sequencers =
+		params.sequencers ?? (params.sequencer ? [params.sequencer] : [])
+	const note: NonNullable<KnownEvent['note']> = [
+		['Admin', { type: 'account', value: params.admin }],
+		...sequencers.map((sequencer, index): [string, KnownEventPart] => [
+			`Sequencer ${index + 1}`,
+			{ type: 'account', value: sequencer },
+		]),
+		['RPC URL', { type: 'text', value: params.rpcUrl }],
+	]
+	if (params.threshold !== undefined)
+		note.push(['Threshold', { type: 'number', value: params.threshold }])
+	if (params.verifier)
+		note.push(['Verifier', { type: 'account', value: params.verifier }])
+
+	return {
+		type: 'zone creation',
+		parts: [
+			{ type: 'action', value: 'Create Zone' },
+			{ type: 'text', value: 'with' },
+			{ type: 'token', value: { address: params.initialToken } },
+		],
+		note,
+	}
+}
+
+function decodeZonePortalCall(
+	functionName: string,
+	args: readonly unknown[],
+	to: Address.Address,
+): KnownEvent | null {
+	const zoneId = getZonePortalId(to)
+	const zoneName = zoneId === undefined ? 'Zone' : `Zone ${zoneId}`
+
+	switch (functionName) {
+		case 'deposit': {
+			if (typeof args[1] === 'bigint')
+				return decodeEncryptedZoneDeposit(args, zoneName)
+
+			const [token, recipient, amount, memo, refundRecipient] = args as [
+				Address.Address,
+				Address.Address,
+				bigint,
+				Hex.Hex,
+				Address.Address,
+			]
+			const note: NonNullable<KnownEvent['note']> = [
+				['Refund Recipient', { type: 'account', value: refundRecipient }],
+			]
+			const decodedMemo = decodeMemoForDisplay(memo)
+			if (decodedMemo)
+				note.unshift(['Memo', { type: 'text', value: decodedMemo }])
+			return {
+				type: 'zone deposit',
+				parts: [
+					{ type: 'action', value: `Deposit to ${zoneName}` },
+					{ type: 'amount', value: { token, value: amount } },
+					{ type: 'text', value: 'for' },
+					{ type: 'account', value: recipient },
+				],
+				note,
+			}
+		}
+		case 'depositEncrypted':
+			return decodeEncryptedZoneDeposit(args, zoneName)
+		case 'pause':
+			return {
+				type: 'zone portal paused',
+				parts: [{ type: 'action', value: `Pause ${zoneName} Portal` }],
+			}
+		case 'submitBatch': {
+			// T13 inserts tokenEnablementTransition after depositQueueTransition.
+			const offset = args.length === 10 ? 1 : 0
+			const tempoBlockNumber = args[0] as bigint
+			const withdrawalQueueHash = args[4 + offset] as Hex.Hex
+			const zoneHeight = args[7 + offset] as bigint
+			return {
+				type: 'zone batch submission',
+				parts: [{ type: 'action', value: 'Submit Zone Batch' }],
+				note: [
+					['Tempo Block', { type: 'number', value: tempoBlockNumber }],
+					['Zone Height', { type: 'number', value: zoneHeight }],
+					zoneBatchWithdrawalNote(withdrawalQueueHash),
+				],
+				meta: {
+					zoneBatch: {
+						portal: to,
+						nextBlockHash: (args[2] as { nextBlockHash: Hex.Hex })
+							.nextBlockHash,
+						nextProcessedDepositQueueHash: (
+							args[3] as { nextProcessedHash: Hex.Hex }
+						).nextProcessedHash,
+						withdrawalQueueHash,
+					},
+				},
+			}
+		}
+		default:
+			return null
+	}
+}
+
+function decodeEncryptedZoneDeposit(
+	args: readonly unknown[],
+	zoneName: string,
+): KnownEvent {
+	const [token, amount, keyIndex, _encrypted, refundRecipient] = args as [
+		Address.Address,
+		bigint,
+		bigint,
+		unknown,
+		Address.Address,
+	]
+	return {
+		type: 'zone encrypted deposit',
+		parts: [
+			{ type: 'action', value: `Encrypted Deposit to ${zoneName}` },
+			{ type: 'amount', value: { token, value: amount } },
+		],
+		note: [
+			['Key Index', { type: 'number', value: keyIndex }],
+			['Refund Recipient', { type: 'account', value: refundRecipient }],
+		],
+	}
+}
+
+function decodeZoneOutboxCall(
+	functionName: string,
+	args: readonly unknown[],
+): KnownEvent | null {
+	if (functionName !== 'requestWithdrawal') return null
+	const [token, recipient, amount, memo, gasLimit, fallbackRecipient] =
+		args as [
+			Address.Address,
+			Address.Address,
+			bigint,
+			Hex.Hex,
+			bigint,
+			Address.Address,
+		]
+	const note: NonNullable<KnownEvent['note']> = [
+		['Gas Limit', { type: 'number', value: gasLimit }],
+		['Fallback Recipient', { type: 'account', value: fallbackRecipient }],
+	]
+	const decodedMemo = decodeMemoForDisplay(memo)
+	if (decodedMemo) note.unshift(['Memo', { type: 'text', value: decodedMemo }])
+	return {
+		type: 'zone withdrawal request',
+		parts: [
+			{ type: 'action', value: 'Request Zone Withdrawal' },
+			{ type: 'amount', value: { token, value: amount } },
+			{ type: 'text', value: 'to' },
+			{ type: 'account', value: recipient },
+		],
+		note,
+	}
+}
+
 const callDecoders: Record<
 	string,
 	{ abi: readonly unknown[]; decoder: CallDecoder }
@@ -2177,6 +3724,18 @@ const callDecoders: Record<
 	[VALIDATOR_CONFIG.toLowerCase()]: {
 		abi: Abis.validatorConfig,
 		decoder: decodeValidatorConfigCall,
+	},
+	[Addresses.zoneFactory.toLowerCase()]: {
+		abi: zoneFactoryAbi,
+		decoder: decodeZoneFactoryCall,
+	},
+	[Addresses.zonePortalImplementation.toLowerCase()]: {
+		abi: zonePortalAbi,
+		decoder: decodeZonePortalCall,
+	},
+	[Addresses.zoneOutbox.toLowerCase()]: {
+		abi: zoneOutboxAbi,
+		decoder: decodeZoneOutboxCall,
 	},
 }
 
@@ -2191,7 +3750,9 @@ export function decodeKnownCall(
 ): KnownEvent | null {
 	if (!input || input === '0x') return null
 
-	const entry = callDecoders[to.toLowerCase()]
+	const entry = isDeterministicZonePortalAddress(to)
+		? { abi: zonePortalAbi, decoder: decodeZonePortalCall }
+		: callDecoders[to.toLowerCase()]
 	if (!entry) return null
 
 	try {
@@ -2199,8 +3760,59 @@ export function decodeKnownCall(
 			abi: entry.abi as readonly unknown[],
 			data: input,
 		})
-		return entry.decoder(decoded.functionName, decoded.args ?? [])
+		return entry.decoder(decoded.functionName, decoded.args ?? [], to)
 	} catch {
 		return null
 	}
+}
+
+export function decodeKnownTransactionCall(
+	transaction: TransactionLike,
+): KnownEvent | null {
+	return decodeKnownTransactionCalls(transaction)[0] ?? null
+}
+
+/** Decode each top-level operation once; Tempo's to/input alias its first call. */
+export function decodeKnownTransactionCalls(
+	transaction: TransactionLike,
+	status?: TransactionReceipt['status'],
+): KnownEvent[] {
+	const calls = transaction.calls?.length ? transaction.calls : [transaction]
+	return calls.flatMap((call, index) => {
+		const input = call.input ?? call.data
+		if (call.to && input && input !== '0x') {
+			const decoded = decodeKnownCall(call.to, input)
+			if (decoded)
+				return [
+					{
+						...decoded,
+						evidence: [
+							{
+								kind: 'call' as const,
+								address: call.to,
+								index,
+								inputHash: keccak256(input),
+							},
+						],
+						...(status === 'reverted'
+							? {
+									failed: true,
+									parts: decoded.parts.map((part) =>
+										part.type === 'action'
+											? { ...part, value: `${part.value} (failed)` }
+											: part,
+									),
+								}
+							: {}),
+					},
+				]
+		}
+		return []
+	})
+}
+
+function zoneBatchWithdrawalNote(hash: Hex.Hex): [string, KnownEventPart] {
+	return hash === zeroHash
+		? ['Withdrawals', { type: 'text', value: 'None' }]
+		: ['Withdrawal Queue', { type: 'hex', value: hash }]
 }

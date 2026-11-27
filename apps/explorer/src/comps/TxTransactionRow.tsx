@@ -14,6 +14,7 @@ import {
 	calculateKnownEventsTotal,
 	NORMALIZED_KNOWN_EVENT_TOTAL_DECIMALS,
 } from '#lib/domain/known-event-totals'
+import { isNonceIncrementedEvent } from '#lib/domain/transaction-activities'
 import { PriceFormatter } from '#lib/formatting'
 import { areUsdPricedTokens } from '#lib/pricing'
 import { getFeeTokenForChain } from '#lib/fee-token'
@@ -69,6 +70,11 @@ export function TransactionDescription(props: {
 	accountAddress: Address.Address
 }) {
 	const { knownEvents, accountAddress } = props
+	const meaningfulEvents = knownEvents.filter(
+		(event) => !isNonceIncrementedEvent(event),
+	)
+	const visibleEvents =
+		meaningfulEvents.length > 0 ? meaningfulEvents : knownEvents
 
 	const transformEvent = React.useCallback(
 		(event: KnownEvent) => getPerspectiveEvent(event, accountAddress),
@@ -77,7 +83,7 @@ export function TransactionDescription(props: {
 
 	return (
 		<TxEventDescription.ExpandGroup
-			events={knownEvents}
+			events={visibleEvents}
 			seenAs={accountAddress}
 			transformEvent={transformEvent}
 		/>
@@ -173,6 +179,12 @@ export function TransactionTotal(props: { transaction: Transaction }) {
 
 	const normalizedDecimals = NORMALIZED_KNOWN_EVENT_TOTAL_DECIMALS
 	const totalValue = calculateKnownEventsTotal(events)
+	if (totalValue === undefined || !showUsdPrefix)
+		return (
+			<span className="text-tertiary" title="No comparable payment total">
+				—
+			</span>
+		)
 
 	if (totalValue === 0n) {
 		const value = transaction.value ? Hex.toBigInt(transaction.value) : 0n

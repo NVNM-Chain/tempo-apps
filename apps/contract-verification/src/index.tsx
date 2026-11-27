@@ -23,10 +23,10 @@ import {
 	resolveAuthToken,
 } from '#lib/chain-registry.ts'
 import { configureLogger, getLogger, withContext } from '#lib/logger.ts'
+import { getOpenApiSpec } from '#lib/openapi.ts'
 import { lookupAllChainContractsRoute, lookupRoute } from '#route.lookup.ts'
 import { handleError, originMatches, sourcifyError } from '#lib/utilities.ts'
 
-import OpenApiSpec from '#openapi.json' with { type: 'json' }
 import packageJSON from '#package.json' with { type: 'json' }
 
 const logger = getLogger(['tempo'])
@@ -101,8 +101,6 @@ app.use(async (context, next) => {
 				rateLimitContext.req.header('CF-Connecting-IP') ??
 				rateLimitContext.req.header('X-Forwarded-For')) ||
 			'',
-		skip: (rateLimitContext) =>
-			isWhitelistedOrigin(rateLimitContext.req.header('Origin')),
 		message: { error: 'Rate limit exceeded', retryAfter: '60s' },
 	})(context, next)
 })
@@ -157,7 +155,7 @@ app
 			gitCommitHash: __BUILD_VERSION__,
 		}),
 	)
-	.get('/openapi.json', (context) => context.json(OpenApiSpec))
+	.get('/openapi.json', (context) => context.json(getOpenApiSpec(env.NODE_ENV)))
 	.get('/ping-container', async (context) =>
 		getContainer(context.env.VERIFICATION_CONTAINER, 'singleton')
 			.fetch(new Request('http://container/health'))

@@ -33,7 +33,6 @@ import {
 } from '#lib/domain/known-event-totals'
 import { PriceFormatter } from '#lib/formatting.ts'
 import { OG_BASE_URL } from '#lib/og'
-import { withLoaderTiming } from '#lib/profiling'
 import { useMediaQuery } from '#lib/hooks'
 import { areUsdPricedTokens } from '#lib/pricing'
 import { getFeeTokenForChain } from '#lib/fee-token'
@@ -45,6 +44,7 @@ import {
 	TRANSACTIONS_PER_PAGE,
 } from '#lib/queries'
 import { fetchLatestBlock } from '#lib/server/latest-block.ts'
+import { getNonceKey, isSubblockNonceKey } from '#lib/domain/nonce'
 import { getTempoChain, getWagmiConfig } from '#wagmi.config.ts'
 
 const defaultSearchValues = { page: 1 } as const
@@ -73,64 +73,63 @@ export const Route = createFileRoute('/_layout/block/$id')({
 	search: {
 		middlewares: [stripSearchParams(defaultSearchValues)],
 	},
-	loader: ({ params, context }) =>
-		withLoaderTiming('/_layout/block/$id', async () => {
-			const { id } = params
+	loader: async ({ params, context }) => {
+		const { id } = params
 
-			if (id === 'latest') {
-				const blockNumber = await fetchLatestBlock()
-				throw redirect({
-					to: '/block/$id',
-					params: { id: String(blockNumber) },
-				})
+		if (id === 'latest') {
+			const blockNumber = await fetchLatestBlock()
+			throw redirect({
+				to: '/block/$id',
+				params: { id: String(blockNumber) },
+			})
+		}
+
+		try {
+			let blockRef: BlockIdentifier
+			if (isHex(id)) {
+				Hex.assert(id)
+				blockRef = { kind: 'hash', blockHash: id }
+			} else {
+				const parsedNumber = Number(id)
+				if (!Number.isSafeInteger(parsedNumber)) throw notFound()
+				blockRef = { kind: 'number', blockNumber: BigInt(parsedNumber) }
 			}
 
+			const result = await context.queryClient.ensureQueryData(
+				blockDetailQueryOptions(blockRef),
+			)
+
+			let prevBlockTxCounts: number[] | undefined
 			try {
-				let blockRef: BlockIdentifier
-				if (isHex(id)) {
-					Hex.assert(id)
-					blockRef = { kind: 'hash', blockHash: id }
-				} else {
-					const parsedNumber = Number(id)
-					if (!Number.isSafeInteger(parsedNumber)) throw notFound()
-					blockRef = { kind: 'number', blockNumber: BigInt(parsedNumber) }
+				if (result.block.number != null) {
+					const bn = result.block.number
+					const config = getWagmiConfig()
+					const prevBlocks = await Promise.all(
+						Array.from({ length: 7 }, (_, i) =>
+							getBlock(config, {
+								blockNumber: bn - BigInt(i + 1),
+							})
+								.then((b) => b.transactions.length)
+								.catch(() => 0),
+						),
+					)
+					prevBlockTxCounts = prevBlocks.reverse()
 				}
-
-				const result = await context.queryClient.ensureQueryData(
-					blockDetailQueryOptions(blockRef),
-				)
-
-				let prevBlockTxCounts: number[] | undefined
-				try {
-					if (result.block.number != null) {
-						const bn = result.block.number
-						const config = getWagmiConfig()
-						const prevBlocks = await Promise.all(
-							Array.from({ length: 7 }, (_, i) =>
-								getBlock(config, {
-									blockNumber: bn - BigInt(i + 1),
-								})
-									.then((b) => b.transactions.length)
-									.catch(() => 0),
-							),
-						)
-						prevBlockTxCounts = prevBlocks.reverse()
-					}
-				} catch {
-					// Ignore errors fetching prev blocks
-				}
-
-				return { ...result, prevBlockTxCounts }
-			} catch (error) {
-				console.error(error)
-				throw notFound({
-					routeId: rootRouteId,
-					data: {
-						error: error instanceof Error ? error.message : 'Invalid block ID',
-					},
-				})
+			} catch {
+				// Ignore errors fetching prev blocks
 			}
-		}),
+
+			return { ...result, prevBlockTxCounts }
+		} catch (error) {
+			console.error(error)
+			throw notFound({
+				routeId: rootRouteId,
+				data: {
+					error: error instanceof Error ? error.message : 'Invalid block ID',
+				},
+			})
+		}
+	},
 	head: ({ params, loaderData }) => {
 		const blockNumber = loaderData?.block?.number
 		const title = blockNumber
@@ -280,9 +279,8 @@ function getTransactionType(
 		return { type: 'system', label: name }
 	}
 
-	// Check for sub-block transactions (nonce starts with 0x5b)
-	const nonceHex = transaction.nonce?.toString(16).padStart(8, '0') || ''
-	if (nonceHex.startsWith('5b'))
+	// Sub-block transactions use a nonce key whose top byte is 0x5b
+	if (isSubblockNonceKey(getNonceKey(transaction)))
 		return { type: 'sub-block', label: 'Sub-block' }
 
 	// Check for fee token transactions (type 0x76)
@@ -469,7 +467,14 @@ function TransactionTotalCell(props: TransactionTotalCellProps) {
 	const fee = hasFeeEvent ? 0n : paid
 
 	if (hasAmounts) {
-		const totalValue = calculateKnownEventsTotal(events ?? []) + fee
+		const eventTotal = calculateKnownEventsTotal(events ?? [])
+		if (eventTotal === undefined || !showUsdPrefix)
+			return (
+				<span className="text-tertiary" title="No comparable payment total">
+					—
+				</span>
+			)
+		const totalValue = eventTotal + fee
 		if (totalValue !== 0n) {
 			return (
 				<Amount.Base
@@ -585,7 +590,7 @@ function TransactionDescription(props: TransactionDescriptionProps) {
 					<AddressLink address={transaction.to} chars={4} />
 				</div>
 				{subtitle && (
-					<span className="text-base-content-secondary text-[12px]">
+					<span className="text-base-content-secondary label-12">
 						{subtitle}
 					</span>
 				)}

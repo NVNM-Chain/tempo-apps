@@ -1,46 +1,197 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { Abi } from 'viem'
+import { loaders } from '@shazow/whatsabi'
 import {
+	decodeAbiParameters,
+	decodeFunctionData,
+	encodeAbiParameters,
+	parseAbi,
+	parseAbiItem,
+	parseAbiParameters,
+	toEventSelector,
+	toFunctionSelector,
+	type Abi,
+} from 'viem'
+import { Addresses } from 'viem/tempo'
+import {
+	zoneFactoryAbi,
+	zoneMessengerAbi,
+	zonePortalAbi,
+	zoneVerifierAbi,
+} from '#lib/abis'
+import { getAccountTag } from '#lib/account'
+import {
+	getAbiItem,
 	getContractAbi,
 	getContractInfo,
 	getFunctionSelector,
 	getReadFunctions,
 	getWriteFunctions,
+	isInferredAbi,
+	isZonePortalAddress,
+	knownSignature,
+	lookupSignature,
+	resolveInteractAbi,
+	systemAddress,
+	TempoABILoader,
 } from '#lib/domain/contracts'
+
+describe('signature lookup admission', () => {
+	afterEach(() => vi.restoreAllMocks())
+
+	it('coalesces pending lookups even while settled entries turn over', async () => {
+		const deferred = Promise.withResolvers<string[]>()
+		const lookup = vi
+			.spyOn(loaders.MultiSignatureLookup.prototype, 'loadFunctions')
+			.mockImplementation(async (selector) =>
+				selector === '0xf1000000' ? deferred.promise : ['sample()'],
+			)
+		const first = lookupSignature('0xf1000000')
+		for (let i = 1; i <= 1025; i++)
+			await lookupSignature(`0x${(0xf1000000 + i).toString(16)}`)
+		const second = lookupSignature('0xf1000000')
+		expect(
+			lookup.mock.calls.filter(([selector]) => selector === '0xf1000000'),
+		).toHaveLength(1)
+		deferred.resolve(['pending()'])
+		expect(await Promise.all([first, second])).toEqual([
+			'pending()',
+			'pending()',
+		])
+	})
+
+	it('bounds outstanding work while allowing existing requests to join', async () => {
+		const deferred = Promise.withResolvers<string[]>()
+		const lookup = vi
+			.spyOn(loaders.MultiSignatureLookup.prototype, 'loadFunctions')
+			.mockReturnValue(deferred.promise)
+		const pending = Array.from({ length: 128 }, (_, i) =>
+			lookupSignature(`0x${(0xf2000000 + i).toString(16)}`),
+		)
+		try {
+			await expect(lookupSignature('0xf2001000')).rejects.toThrow(
+				'Too many signature lookups',
+			)
+			pending.push(lookupSignature('0xf2000000'))
+			expect(lookup).toHaveBeenCalledTimes(128)
+		} finally {
+			deferred.resolve([])
+			await Promise.all(pending)
+		}
+		expect(await lookupSignature('0xf2001000')).toBeNull()
+	})
+
+	it('retries failures without evicting successful results', async () => {
+		const lookup = vi
+			.spyOn(loaders.MultiSignatureLookup.prototype, 'loadFunctions')
+			.mockResolvedValue(['cached()'])
+		await lookupSignature('0xf3000000')
+		lookup.mockRejectedValueOnce(new Error('Unavailable'))
+		await expect(lookupSignature('0xf3000001')).rejects.toThrow('Unavailable')
+		expect(await lookupSignature('0xf3000000')).toBe('cached()')
+		expect(lookup).toHaveBeenCalledTimes(2)
+		expect(await lookupSignature('0xf3000001')).toBe('cached()')
+		expect(lookup).toHaveBeenCalledTimes(3)
+	})
+
+	it('skips function signatures that do not parse', async () => {
+		vi.spyOn(
+			loaders.MultiSignatureLookup.prototype,
+			'loadFunctions',
+		).mockResolvedValue([
+			'transfer(address,uint256',
+			'transfer(address,uint256)',
+		])
+		expect(await lookupSignature('0xf4000000')).toBe(
+			'transfer(address,uint256)',
+		)
+	})
+
+	it('skips event signatures that do not parse', async () => {
+		vi.spyOn(
+			loaders.MultiSignatureLookup.prototype,
+			'loadEvents',
+		).mockResolvedValue([
+			'Transfer(address,,uint256)',
+			'Transfer(address,address,uint256)',
+		])
+		expect(await lookupSignature(`0x${'f5'.repeat(32)}`)).toBe(
+			'Transfer(address,address,uint256)',
+		)
+	})
+
+	it('returns null when no signature parses', async () => {
+		vi.spyOn(
+			loaders.MultiSignatureLookup.prototype,
+			'loadFunctions',
+		).mockResolvedValue(['transfer(address', ')('])
+		expect(await lookupSignature('0xf6000000')).toBeNull()
+	})
+})
+
+describe('resolveInteractAbi', () => {
+	it('preserves verified functions when the bundled Stream Channel ABI only contains events', () => {
+		const address = '0x9d136eea063ede5418a6bc7beaff009bbb6cfa70'
+		const verifiedAbi = parseAbi([
+			'function CLOSE_GRACE_PERIOD() view returns (uint256)',
+			'function requestClose(bytes32 channelId)',
+		])
+		const bundledAbi = getContractAbi(address)
+		expect(bundledAbi?.length).toBeGreaterThan(0)
+		expect(bundledAbi?.every((item) => item.type === 'event')).toBe(true)
+
+		const abi = resolveInteractAbi({ address, abi: verifiedAbi })
+		expect
+			.soft(getReadFunctions(abi ?? []).map((fn) => fn.name))
+			.toEqual(['CLOSE_GRACE_PERIOD'])
+		expect
+			.soft(getWriteFunctions(abi ?? []).map((fn) => fn.name))
+			.toEqual(['requestClose'])
+	})
+
+	it('prefers the canonical Zone Portal interface over supplied and implementation ABIs', () => {
+		const incompleteAbi = parseAbi(['function pause()'])
+		const abi = resolveInteractAbi({
+			address: '0x5ad0000000000000000000000000000000000003',
+			abi: incompleteAbi,
+			implementationAbi: incompleteAbi,
+		})
+		expect(abi).toBe(zonePortalAbi)
+	})
+})
 
 const proxyImplementationAbi = [
 	{
 		type: 'function',
 		name: 'supportsInterface',
-		stateMutability: 'nonpayable',
+		stateMutability: 'view',
 		inputs: [{ name: 'interfaceId', type: 'bytes4' }],
 		outputs: [{ name: '', type: 'bool' }],
 	},
 	{
 		type: 'function',
 		name: 'reserveStores',
-		stateMutability: 'nonpayable',
+		stateMutability: 'view',
 		inputs: [{ name: 'token', type: 'address' }],
 		outputs: [{ name: '', type: 'address' }],
 	},
 	{
 		type: 'function',
 		name: 'BURNER_ROLE',
-		stateMutability: 'nonpayable',
+		stateMutability: 'view',
 		inputs: [],
 		outputs: [{ name: '', type: 'bytes32' }],
 	},
 	{
 		type: 'function',
 		name: 'MINT_RATE_LIMIT_SETTER_ROLE',
-		stateMutability: 'nonpayable',
+		stateMutability: 'view',
 		inputs: [],
 		outputs: [{ name: '', type: 'bytes32' }],
 	},
 	{
 		type: 'function',
 		name: 'minterAllowances',
-		stateMutability: 'nonpayable',
+		stateMutability: 'view',
 		inputs: [
 			{ name: 'minter', type: 'address' },
 			{ name: 'token', type: 'address' },
@@ -50,7 +201,7 @@ const proxyImplementationAbi = [
 	{
 		type: 'function',
 		name: 'mintTxnLimits',
-		stateMutability: 'nonpayable',
+		stateMutability: 'view',
 		inputs: [{ name: 'minter', type: 'address' }],
 		outputs: [{ name: '', type: 'uint256' }],
 	},
@@ -72,10 +223,59 @@ const proxyImplementationAbi = [
 
 const whatsabiImplementationAbi = proxyImplementationAbi.map((fn, index) => ({
 	...fn,
+	stateMutability: 'nonpayable',
 	selector: `0x${index.toString(16).padStart(8, '0')}`,
 })) as Abi
 
 describe('contract function classification', () => {
+	it('trusts compiler mutability even when names suggest the opposite', () => {
+		const abi = [
+			{
+				type: 'function',
+				name: 'paused',
+				stateMutability: 'view',
+				inputs: [],
+				outputs: [{ type: 'bool' }],
+			},
+			{
+				type: 'function',
+				name: 'calculateAndStore',
+				stateMutability: 'nonpayable',
+				inputs: [],
+				outputs: [{ type: 'uint256' }],
+			},
+			{
+				type: 'function',
+				name: 'getAndPay',
+				stateMutability: 'payable',
+				inputs: [],
+				outputs: [{ type: 'uint256' }],
+			},
+			{
+				type: 'function',
+				name: 'compute',
+				stateMutability: 'pure',
+				inputs: [],
+				outputs: [{ type: 'uint256' }],
+			},
+		] as const satisfies Abi
+		expect(getReadFunctions(abi).map((fn) => fn.name)).toEqual([
+			'paused',
+			'compute',
+		])
+		expect(getWriteFunctions(abi).map((fn) => fn.name)).toEqual([
+			'calculateAndStore',
+			'getAndPay',
+		])
+		expect(getReadFunctions(abi)[0]).toBe(abi[0])
+	})
+
+	it('identifies inferred entries without relabeling compiler ABIs', () => {
+		expect(isInferredAbi(whatsabiImplementationAbi)).toBe(true)
+		expect(isInferredAbi(proxyImplementationAbi)).toBe(false)
+		expect(isInferredAbi([])).toBe(false)
+	})
+
 	it('keeps getter-style implementation functions out of Write', () => {
 		for (const abi of [proxyImplementationAbi, whatsabiImplementationAbi]) {
 			const reads = getReadFunctions(abi)
@@ -94,6 +294,264 @@ describe('contract function classification', () => {
 				'setMinterAllowance',
 			])
 		}
+	})
+})
+
+describe('Tempo ABI lookup', () => {
+	afterEach(() => {
+		vi.unstubAllGlobals()
+		vi.unstubAllEnvs()
+		vi.resetModules()
+	})
+
+	it('loads the verified implementation ABI from the default host without losing metadata', async () => {
+		const abi = [
+			{
+				type: 'function',
+				name: 'paused',
+				stateMutability: 'view',
+				inputs: [],
+				outputs: [{ type: 'bool' }],
+			},
+		]
+		const fetch = vi
+			.fn()
+			.mockResolvedValue(Response.json({ match: 'exact_match', abi }))
+		vi.stubGlobal('fetch', fetch)
+		const loader = new TempoABILoader({ chainId: 4217 })
+		const result = await loader.loadABI(
+			'0x3B3F2e2aa07460a9ba95ffd06ad9597398Bbbab7',
+		)
+		expect(fetch).toHaveBeenCalledWith(
+			'https://contracts.tempo.xyz/v2/contract/4217/0x3b3f2e2aa07460a9ba95ffd06ad9597398bbbab7?fields=abi',
+		)
+		expect(result).toEqual(abi)
+		expect(isInferredAbi(result as Abi)).toBe(false)
+	})
+
+	it('honors the configured verifier host and requested chain', async () => {
+		vi.stubEnv(
+			'VITE_CONTRACT_VERIFICATION_API_BASE_URL',
+			'https://verifier.example',
+		)
+		vi.resetModules()
+		const { TempoABILoader } = await import('#lib/domain/contracts')
+		const fetch = vi.fn().mockResolvedValue(Response.json({ abi: [] }))
+		vi.stubGlobal('fetch', fetch)
+		await new TempoABILoader({ chainId: 42431 }).loadABI(
+			'0x0000000000000000000000000000000000000001',
+		)
+		expect(fetch).toHaveBeenCalledWith(
+			'https://verifier.example/v2/contract/42431/0x0000000000000000000000000000000000000001?fields=abi',
+		)
+	})
+
+	it('allows inference when the contract is not verified', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi
+				.fn()
+				.mockResolvedValue(
+					Response.json({ customCode: 'contract_not_found' }, { status: 404 }),
+				),
+		)
+		expect(
+			await new TempoABILoader({ chainId: 4217 }).loadABI(
+				'0x0000000000000000000000000000000000000001',
+			),
+		).toEqual([])
+	})
+})
+
+describe('Zone protocol contracts', () => {
+	it('registers the Zone protocol addresses exported by viem', () => {
+		expect(getContractInfo(Addresses.zoneFactory)).toMatchObject({
+			name: 'Zone Factory',
+			abi: zoneFactoryAbi,
+		})
+		expect(getContractInfo(Addresses.zonePortalImplementation)).toMatchObject({
+			name: 'Zone Portal Implementation',
+			abi: zonePortalAbi,
+		})
+		expect(getContractInfo(Addresses.zoneMessenger)).toMatchObject({
+			name: 'Zone Messenger',
+			abi: zoneMessengerAbi,
+		})
+		expect(getContractInfo(Addresses.zoneVerifier)?.name).toBe('Zone Verifier')
+		expect(getContractInfo(Addresses.zoneVerifier)?.abi).toBe(zoneVerifierAbi)
+	})
+
+	it('exposes Zone registry and portal administration functions', () => {
+		expect(getReadFunctions(zoneFactoryAbi).map((fn) => fn.name)).toContain(
+			'zones',
+		)
+		expect(getReadFunctions(zonePortalAbi).map((fn) => fn.name)).toContain(
+			'tokenConfig',
+		)
+		expect(getWriteFunctions(zonePortalAbi).map((fn) => fn.name)).toContain(
+			'pause',
+		)
+		expect(getWriteFunctions(zonePortalAbi).map((fn) => fn.name)).toContain(
+			'resume',
+		)
+		expect(getReadFunctions(zonePortalAbi).map((fn) => fn.name)).toEqual(
+			expect.arrayContaining(['paused', 'pauseExpiry']),
+		)
+		expect(
+			getAbiItem({ abi: zonePortalAbi, selector: '0x78fb159b' })?.name,
+		).toBe('submitBatch')
+		expect(
+			getAbiItem({ abi: zonePortalAbi, selector: '0x91aa3f04' })?.name,
+		).toBe('processWithdrawals')
+		expect(
+			getAbiItem({ abi: zonePortalAbi, selector: '0x005d97ef' })?.name,
+		).toBe('deliverWithdrawal')
+		expect(
+			getAbiItem({ abi: zoneMessengerAbi, selector: '0x11da5261' })?.name,
+		).toBe('relayMessage')
+		expect(
+			getAbiItem({ abi: zoneVerifierAbi, selector: '0x7106a43e' })?.name,
+		).toBe('verify')
+		expect(
+			zonePortalAbi.some(
+				(item) =>
+					item.type === 'event' &&
+					toEventSelector(item) ===
+						'0x5a66941dc92cb865480c966eff640c02b1d00d544b74332fd67c6f1cbfccdf39',
+			),
+		).toBe(true)
+	})
+
+	it('decodes T13 verifier and submitBatch calls with token enablement transitions', () => {
+		const hash = `0x${'11'.repeat(32)}` as const
+		// Encode the wire layout independently of the bundled ABI. Literal selectors
+		// are from the prover-devnet trace; older signatures are asserted above.
+		const verifierData = encodeAbiParameters(
+			parseAbiParameters(
+				'uint32, uint64, uint64, bytes32, uint64, (bytes32,bytes32), (bytes32,bytes32,uint64,uint64), (uint64,uint64), bytes32, bytes, bytes',
+			),
+			[
+				2,
+				44998n,
+				44998n,
+				hash,
+				7n,
+				[hash, hash],
+				[hash, hash, 3n, 5n],
+				[1n, 2n],
+				hash,
+				'0x1234',
+				'0xabcd',
+			],
+		)
+		const verifierAbi = getContractInfo(Addresses.zoneVerifier)?.abi ?? []
+		expect(
+			decodeFunctionData({
+				abi: verifierAbi,
+				data: `0xe57a6366${verifierData.slice(2)}`,
+			}),
+		).toMatchObject({
+			functionName: 'verify',
+			args: [
+				2,
+				44998n,
+				44998n,
+				hash,
+				7n,
+				{ prevBlockHash: hash, nextBlockHash: hash },
+				{
+					prevProcessedHash: hash,
+					nextProcessedHash: hash,
+					prevDepositNumber: 3n,
+					nextDepositNumber: 5n,
+				},
+				{ prevProcessedTokenCount: 1n, nextProcessedTokenCount: 2n },
+				hash,
+				'0x1234',
+				'0xabcd',
+			],
+		})
+		const verifier = getAbiItem({ abi: verifierAbi, selector: '0xe57a6366' })
+		if (!verifier || verifier.type !== 'function')
+			throw new Error('Missing T13 verify')
+		expect(
+			decodeAbiParameters(verifier.outputs, `0x${'0'.repeat(63)}1`),
+		).toEqual([true])
+
+		const batchData = encodeAbiParameters(
+			parseAbiParameters(
+				'uint64, uint64, (bytes32,bytes32), (bytes32,bytes32,uint64,uint64), (uint64,uint64), bytes32, bytes, bytes, uint256, bytes[]',
+			),
+			[
+				44998n,
+				0n,
+				[hash, hash],
+				[hash, hash, 3n, 5n],
+				[1n, 2n],
+				hash,
+				'0x1234',
+				'0xabcd',
+				99n,
+				['0x5678'],
+			],
+		)
+		const portalAbi =
+			getContractInfo('0x5ad0000000000000000000000000000000000002')?.abi ?? []
+		const decoded = decodeFunctionData({
+			abi: portalAbi,
+			data: `0x4cd6c7c7${batchData.slice(2)}`,
+		})
+		expect(decoded.functionName).toBe('submitBatch')
+		expect(decoded.args?.[4]).toEqual({
+			prevProcessedTokenCount: 1n,
+			nextProcessedTokenCount: 2n,
+		})
+		expect(decoded.args?.slice(6)).toEqual([
+			'0x1234',
+			'0xabcd',
+			99n,
+			['0x5678'],
+		])
+	})
+
+	it('recognizes deterministic Zone Portal proxy addresses', () => {
+		const portal = '0x5ad0000000000000000000000000000000000003'
+
+		expect(isZonePortalAddress(portal)).toBe(true)
+		expect(systemAddress(portal)).toBe(true)
+		expect(getContractInfo(portal)).toMatchObject({
+			name: 'Zone Portal Proxy #3',
+			description: 'ERC-1167 minimal proxy for Tempo Zone 3',
+			abi: zonePortalAbi,
+		})
+	})
+
+	it('recognizes the EIP-2935 history contract', () => {
+		const info = getContractInfo('0x0000f90827f1c53a10cb7a02335b175320002935')
+		expect(info).toMatchObject({ name: 'Block Hash History' })
+		const getBlockHash = info?.abi.find(
+			(item) => item.type === 'function' && item.name === 'getBlockHash',
+		)
+		expect(getBlockHash?.type).toBe('function')
+		if (!getBlockHash || getBlockHash.type !== 'function') return
+		const input = encodeAbiParameters(getBlockHash.inputs, [31_767_176n])
+		expect(decodeAbiParameters(getBlockHash.inputs, input)).toEqual([
+			31_767_176n,
+		])
+	})
+
+	it('recognizes the TIP-1020 signature verification precompile', () => {
+		const info = getContractInfo('0x5165300000000000000000000000000000000000')
+		expect(info).toMatchObject({
+			name: 'Signature Verification',
+			category: 'precompile',
+		})
+		expect(info?.abi).toContainEqual(
+			expect.objectContaining({ type: 'function', name: 'recover' }),
+		)
+		expect(info?.abi).toContainEqual(
+			expect.objectContaining({ type: 'function', name: 'verify' }),
+		)
 	})
 })
 
@@ -125,18 +583,8 @@ describe('anchoring contract', () => {
 	})
 })
 
-describe('NVNM testnet token metadata', () => {
-	afterEach(() => {
-		vi.unstubAllEnvs()
-		vi.resetModules()
-	})
-
-	it('uses the testnet genesis token rather than Tempo token labels', async () => {
-		vi.stubEnv('VITE_TEMPO_ENV', 'nvnm-testnet')
-		vi.resetModules()
-		const { getContractInfo } = await import('#lib/domain/contracts')
-		const { getAccountTag } = await import('#lib/account')
-
+describe('NVNM genesis token metadata', () => {
+	it('names the genesis token nUSD and lists no Tempo tokens', () => {
 		expect(
 			getContractInfo('0x20c0000000000000000000000000000000000000')?.name,
 		).toBe('nUSD')
@@ -146,5 +594,32 @@ describe('NVNM testnet token metadata', () => {
 		expect(
 			getAccountTag('0x20c0000000000000000000000000000000000001'),
 		).toBeUndefined()
+	})
+})
+
+describe('known signatures', () => {
+	it.each([
+		['function', '0x64d25295'], // addRecord, as a transaction page asked for it
+		[
+			'event',
+			'0x1a3295fa8cc0e28c95d21912c9e6958f3bc740231781f7640ad885c972a352fd',
+		], // AddRecord
+		[
+			'event',
+			'0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef',
+		], // Transfer
+	] as const)('answers a %s selector the explorer knows: %s', (kind, selector) => {
+		const signature = knownSignature(selector)
+		expect(signature).toBeDefined()
+		const item = parseAbiItem(`${kind} ${signature}`)
+		expect(
+			item.type === 'function'
+				? toFunctionSelector(item)
+				: toEventSelector(item as never),
+		).toBe(selector)
+	})
+
+	it('leaves an unknown selector to the public directories', () => {
+		expect(knownSignature('0xdeadbeef')).toBeUndefined()
 	})
 })

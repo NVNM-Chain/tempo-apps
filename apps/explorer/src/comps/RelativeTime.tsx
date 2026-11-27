@@ -21,9 +21,10 @@ export namespace RelativeTime {
 		React.useEffect(() => {
 			const updateTime = () => {
 				if (!ref.current) return
-				const { text } = DateFormatter.formatRelativeTime(timestamp)
+				const { text, fullDate } = DateFormatter.formatRelativeTime(timestamp)
 				if (text === prev.current) return
 				ref.current.textContent = prev.current = text
+				ref.current.title = fullDate
 			}
 
 			updateTime()
@@ -39,6 +40,9 @@ export namespace RelativeTime {
 			title: fullDate,
 			children: text,
 			dateTime: iso,
+			// The server's clock and time zone are not the browser's: hydration
+			// keeps the server's text and the effect above brings it up to date.
+			suppressHydrationWarning: true,
 		}
 	}
 }

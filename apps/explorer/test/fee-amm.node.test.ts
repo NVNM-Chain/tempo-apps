@@ -1,4 +1,3 @@
-import { Addresses } from 'viem/tempo'
 import { describe, expect, it } from 'vitest'
 import { type FeeAmmPool, sortFeeAmmPools } from '#lib/server/fee-amm'
 
@@ -24,13 +23,13 @@ function pool(poolId: string, overrides: Partial<FeeAmmPool> = {}): FeeAmmPool {
 }
 
 describe('sortFeeAmmPools', () => {
-	it('puts pathUSD-validator pools first, then the deepest, then the latest', () => {
+	it('puts the most active pools first, then orders by pair', () => {
 		const ids = sortFeeAmmPools([
-			pool('0xrecent', { latestMintAt: 9 }),
+			pool('0xquiet'),
+			pool('0xbusy', { mintCount: 9 }),
+			pool('0xhigher', { userToken: `0x${'44'.repeat(20)}` }),
 			pool('0xdeep', { liquidityUsd: 5 }),
-			pool('0xpathusd', { validatorToken: Addresses.pathUsd }),
-			pool('0xold'),
 		]).map((p) => p.poolId)
-		expect(ids).toEqual(['0xpathusd', '0xdeep', '0xrecent', '0xold'])
+		expect(ids).toEqual(['0xbusy', '0xhigher', '0xquiet', '0xdeep'])
 	})
 })

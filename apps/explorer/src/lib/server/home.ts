@@ -82,7 +82,14 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 		const start = newestAt - HOME_MINUTES * 60
 		const minute = (column: string) =>
 			`intDiv(toUnixTimestamp(${column}) - ${start} - 1, 60)`
-		const [blockMinutes, txns, [tokens], blocks, txs] = await Promise.all([
+		// Three chains at once: each second query starts when its first answers.
+		const [
+			[blockMinutes, txMinutes],
+			[blocks, counts],
+			[txs, codes],
+			txns,
+			[tokens],
+		] = await Promise.all([
 			indexer(
 				chainId,
 				`SELECT ${minute('timestamp')} AS minute, count() AS blocks, sum(gas_used) AS gas,
@@ -90,42 +97,48 @@ export const fetchHomeStats = createServerFn({ method: 'GET' }).handler(
 					min(num) AS first_num
 				FROM blocks WHERE toUnixTimestamp(timestamp) > ${start} AND num <= ${newestNum}
 				GROUP BY minute`,
-			),
-			countTransactions(chainId),
-			// Refreshed on a schedule: `token_metadata` would aggregate every transfer.
-			indexer(chainId, 'SELECT count() AS n FROM token_holder_counts'),
+			).then(async (minutes) => {
+				// `txs` sorts by block, so a block bound spares a scan of every timestamp.
+				const firstInHour = Math.min(
+					newestNum,
+					...minutes.map((row) => Number(row.first_num)),
+				)
+				// `FINAL` as `countTransactions` counts.
+				const perMinute = await indexer(
+					chainId,
+					`SELECT ${minute('block_timestamp')} AS minute, count() AS txs FROM txs FINAL
+					WHERE block_num >= ${firstInHour} AND block_num <= ${newestNum} GROUP BY minute`,
+				)
+				return [minutes, perMinute] as const
+			}),
 			indexer(
 				chainId,
 				`SELECT num, hash, toUnixTimestamp(timestamp) AS at, gas_used, gas_limit FROM blocks
 				ORDER BY num DESC LIMIT ${HOME_ROWS}`,
+			).then(async (latest) => {
+				const perBlock = await indexer(
+					chainId,
+					`SELECT block_num, count() AS n FROM txs FINAL WHERE block_num >= ${Number(latest.at(-1)?.num ?? 0)} GROUP BY block_num`,
+				)
+				return [latest, perBlock] as const
+			}),
+			readTransactions(chainId, HOME_ROWS).then(
+				async (listed) =>
+					[
+						listed,
+						// A recipient's code, as the address page reads it to offer a contract tab.
+						await Promise.all(
+							listed.map((tx) =>
+								tx.to && !tx.failed
+									? client.getCode({ address: tx.to }).catch(() => undefined)
+									: undefined,
+							),
+						),
+					] as const,
 			),
-			readTransactions(chainId, HOME_ROWS),
-		])
-		// `txs` sorts by block, so a block bound spares a scan of every timestamp.
-		const firstInHour = Math.min(
-			newestNum,
-			...blockMinutes.map((row) => Number(row.first_num)),
-		)
-		const lowest = Number(blocks.at(-1)?.num ?? 0)
-		const [txMinutes, counts, codes] = await Promise.all([
-			// `FINAL` as `countTransactions` counts.
-			indexer(
-				chainId,
-				`SELECT ${minute('block_timestamp')} AS minute, count() AS txs FROM txs FINAL
-				WHERE block_num >= ${firstInHour} AND block_num <= ${newestNum} GROUP BY minute`,
-			),
-			indexer(
-				chainId,
-				`SELECT block_num, count() AS n FROM txs FINAL WHERE block_num >= ${lowest} GROUP BY block_num`,
-			),
-			// A recipient's code, as the address page reads it to offer a contract tab.
-			Promise.all(
-				txs.map((tx) =>
-					tx.to && !tx.failed
-						? client.getCode({ address: tx.to }).catch(() => undefined)
-						: undefined,
-				),
-			),
+			countTransactions(chainId),
+			// Refreshed on a schedule: `token_metadata` would aggregate every transfer.
+			indexer(chainId, 'SELECT count() AS n FROM token_holder_counts'),
 		])
 
 		const txPerMinute = Array<number>(HOME_MINUTES).fill(0)

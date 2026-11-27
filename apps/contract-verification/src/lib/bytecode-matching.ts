@@ -217,6 +217,31 @@ export function splitAuxdata(
 }
 
 /**
+ * Returns the solar version recorded in a bytecode's CBOR auxdata (solar writes a `solar` key
+ * where solc writes `solc`), or null when the bytecode was not compiled by solar.
+ */
+export function getSolarAuxdataVersion(bytecode: string): string | null {
+	const { auxdata } = splitAuxdata(bytecode, AuxdataStyle.SOLIDITY)
+	if (!auxdata) return null
+	try {
+		const decoded = CBOR.decode(Hex.toBytes(`0x${auxdata}`)) as unknown
+		const solar =
+			decoded instanceof Map
+				? decoded.get('solar')
+				: typeof decoded === 'object' && decoded !== null
+					? (decoded as Record<string, unknown>).solar
+					: undefined
+		// solar 0.2 writes its version as 3 bytes, like solc; later builds write a string such as
+		// `0.3.0-dev+commit.a2b44354`.
+		if (typeof solar === 'string' && solar.length > 0) return solar
+		if (!(solar instanceof Uint8Array) || solar.length !== 3) return null
+		return Array.from(solar).join('.')
+	} catch {
+		return null
+	}
+}
+
+/**
  * Attempts to decode the auxdata to verify if it's CBOR-encoded.
  */
 function isCborEncoded(auxdata: string): boolean {
@@ -582,13 +607,15 @@ export function extractCallProtectionTransformation(
 	// PUSH20 opcode (0x73) followed by 20 zero bytes
 	const callProtectionPlaceholder = `0x73${'00'.repeat(20)}`
 
-	if (recompiledBytecode.toLowerCase().startsWith(callProtectionPlaceholder)) {
-		// Extract actual address from onchain bytecode
-		const actualProtection = onchainBytecode.slice(
-			0,
+	if (
+		recompiledBytecode.toLowerCase().startsWith(callProtectionPlaceholder) &&
+		onchainBytecode.slice(0, 4).toLowerCase() === '0x73' &&
+		onchainBytecode.length >= callProtectionPlaceholder.length
+	) {
+		const actualAddress = onchainBytecode.slice(
+			4,
 			callProtectionPlaceholder.length,
 		)
-		const actualAddress = actualProtection.slice(4) // Remove 0x73
 
 		transformations.push({
 			type: 'replace',
@@ -598,7 +625,8 @@ export function extractCallProtectionTransformation(
 		transformationValues.callProtection = `0x${actualAddress}`
 
 		const populatedBytecode =
-			actualProtection +
+			recompiledBytecode.slice(0, 4) +
+			actualAddress +
 			recompiledBytecode.slice(callProtectionPlaceholder.length)
 
 		return { populatedBytecode, transformations, transformationValues }
@@ -780,6 +808,8 @@ export interface MatchBytecodeOptions {
 	onchainBytecode: string
 	recompiledBytecode: string
 	isCreation: boolean
+	/** Required when matching a deployed library's call-protection address. */
+	deploymentAddress?: string
 	linkReferences?: LinkReferences
 	immutableReferences?: ImmutableReferences
 	cborAuxdataPositions?: CborAuxdataPositions
@@ -801,12 +831,23 @@ export function matchBytecode(
 		onchainBytecode,
 		recompiledBytecode,
 		isCreation,
+		deploymentAddress,
 		linkReferences,
 		immutableReferences,
 		cborAuxdataPositions,
 		auxdataStyle = AuxdataStyle.SOLIDITY,
 		abi,
 	} = options
+
+	// Interfaces and abstract contracts compile to empty bytecode: there is nothing to verify.
+	if (recompiledBytecode.replace(/^0x/i, '') === '') {
+		return {
+			match: null,
+			transformations: [],
+			transformationValues: {},
+			message: 'Compiled contract has no bytecode to verify',
+		}
+	}
 
 	const allTransformations: Transformation[] = []
 	const allTransformationValues: TransformationValues = {}
@@ -819,6 +860,19 @@ export function matchBytecode(
 			populatedBytecode,
 			onchainBytecode,
 		)
+		if (
+			callProtectionResult.transformations.length > 0 &&
+			callProtectionResult.transformationValues.callProtection?.toLowerCase() !==
+				deploymentAddress?.toLowerCase()
+		) {
+			return {
+				match: null,
+				transformations: [],
+				transformationValues: {},
+				message:
+					'Library call protection address does not match deployment address',
+			}
+		}
 		populatedBytecode = callProtectionResult.populatedBytecode
 		allTransformations.push(...callProtectionResult.transformations)
 		Object.assign(
@@ -891,12 +945,21 @@ export function matchBytecode(
 	const recompiledSplit = splitAuxdata(populatedBytecode, auxdataStyle)
 	const onchainSplit = splitAuxdata(onchainBytecode, auxdataStyle)
 
-	const executionMatch = isCreation
-		? onchainSplit.executionBytecode
-				.toLowerCase()
-				.startsWith(recompiledSplit.executionBytecode.toLowerCase())
-		: recompiledSplit.executionBytecode.toLowerCase() ===
-			onchainSplit.executionBytecode.toLowerCase()
+	// Strip the onchain auxdata only when the compiler output carries auxdata of its own and
+	// executable code remains, so trailing bytes that merely decode as CBOR are never ignored.
+	const canIgnoreAuxdata =
+		recompiledSplit.auxdata !== null &&
+		onchainSplit.auxdata !== null &&
+		recompiledSplit.executionBytecode.replace(/^0x/i, '') !== ''
+
+	const executionMatch =
+		canIgnoreAuxdata &&
+		(isCreation
+			? onchainSplit.executionBytecode
+					.toLowerCase()
+					.startsWith(recompiledSplit.executionBytecode.toLowerCase())
+			: recompiledSplit.executionBytecode.toLowerCase() ===
+				onchainSplit.executionBytecode.toLowerCase())
 
 	if (executionMatch) {
 		// Handle CBOR auxdata positions if provided

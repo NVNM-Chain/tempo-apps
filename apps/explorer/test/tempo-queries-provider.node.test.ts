@@ -37,11 +37,13 @@ describe('Tempo query provider', () => {
 		)
 	})
 
-	it('uses the working ClickHouse engine by default for NVNM testnet', () => {
-		provider.tempoQueryBuilder(787223)
+	it.each([
+		787222, 787223, 7872,
+	])('uses ClickHouse by default on chain %i', (chainId) => {
+		provider.tempoQueryBuilder(chainId)
 
 		expect(mocks.from).toHaveBeenLastCalledWith(
-			expect.objectContaining({ chainId: 787223, engine: 'clickhouse' }),
+			expect.objectContaining({ chainId, engine: 'clickhouse' }),
 		)
 	})
 

@@ -210,7 +210,7 @@ export function Breadcrumbs(props: Breadcrumbs.Props) {
 			aria-label="Breadcrumb"
 			aria-hidden={isEmpty}
 			className={cx(
-				'flex items-center gap-1 text-[12px] text-secondary overflow-x-auto overflow-y-hidden scrollbar-none h-5 pl-0.5 origin-left transition-[opacity,scale] duration-[80ms] starting:opacity-0 starting:scale-[0.97]',
+				'flex items-center gap-1 label-12 text-secondary overflow-x-auto overflow-y-hidden scrollbar-none h-5 pl-0.5 origin-left transition-[opacity,scale] duration-[80ms] starting:opacity-0 starting:scale-[0.97]',
 				isEmpty
 					? 'opacity-0 scale-[0.97] pointer-events-none'
 					: 'opacity-100 scale-100',
@@ -243,7 +243,7 @@ export function Breadcrumbs(props: Breadcrumbs.Props) {
 										)}
 										title={crumb.path}
 									>
-										{crumb.label}
+										<CrumbLabel label={crumb.label} />
 									</span>
 								) : (
 									<Link
@@ -251,7 +251,7 @@ export function Breadcrumbs(props: Breadcrumbs.Props) {
 										className="text-secondary hover:text-accent press-down truncate max-w-[120px] outline-none focus-visible:text-accent"
 										title={crumb.path}
 									>
-										{crumb.label}
+										<CrumbLabel label={crumb.label} />
 									</Link>
 								)}
 							</React.Fragment>
@@ -308,4 +308,15 @@ export function BreadcrumbsPortal() {
 
 	// No slot registered - BreadcrumbsSlot handles the loading fallback
 	return null
+}
+
+function CrumbLabel(props: { label: string }): React.JSX.Element {
+	const index = props.label.indexOf('0x')
+	if (index === -1) return <>{props.label}</>
+	return (
+		<>
+			{props.label.slice(0, index)}
+			<span className="font-mono">{props.label.slice(index)}</span>
+		</>
+	)
 }

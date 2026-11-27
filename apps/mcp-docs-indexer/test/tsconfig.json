@@ -1,0 +1,17 @@
+{
+	"extends": "../tsconfig.json",
+	"compilerOptions": {
+		"types": [
+			"@cloudflare/vitest-plugin/types",
+			"@cloudflare/workers-types",
+			"node"
+		]
+	},
+	"include": [
+		"./scheduled.test.ts",
+		"./request.test.ts",
+		"../worker-configuration.d.ts",
+		"../env.d.ts"
+	],
+	"exclude": ["../node_modules"]
+}

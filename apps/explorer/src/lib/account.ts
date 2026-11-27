@@ -1,8 +1,6 @@
 import type * as Address from 'ox/Address'
 import * as Hex from 'ox/Hex'
 import { z } from 'zod/mini'
-import { nvnmTestnet } from '#lib/chains'
-import { getTempoEnv } from '#lib/env'
 
 export const zAccountType = () => z.enum(['empty', 'account', 'contract'])
 export type AccountType = z.infer<ReturnType<typeof zAccountType>>
@@ -56,20 +54,8 @@ const taggedAccounts: Record<Address.Address, AccountTag> = {
 	},
 	// genesis tip20 tokens
 	'0x20c0000000000000000000000000000000000000': {
-		id: 'genesis-token:pathusd',
-		label: 'pathUSD',
-	},
-	'0x20c0000000000000000000000000000000000001': {
-		id: 'genesis-token:alphausd',
-		label: 'AlphaUSD',
-	},
-	'0x20c0000000000000000000000000000000000002': {
-		id: 'genesis-token:betausd',
-		label: 'BetaUSD',
-	},
-	'0x20c0000000000000000000000000000000000003': {
-		id: 'genesis-token:thetausd',
-		label: 'ThetaUSD',
+		id: 'genesis-token:nusd',
+		label: 'nUSD',
 	},
 	// mpp
 	'0x33b901018174ddabe4841042ab76ba85d4e24f25': {
@@ -81,11 +67,5 @@ const taggedAccounts: Record<Address.Address, AccountTag> = {
 export function getAccountTag(
 	address: Address.Address,
 ): AccountTag | undefined {
-	const lowerAddress = address.toLowerCase() as Address.Address
-	const tag = taggedAccounts[lowerAddress]
-	if (getTempoEnv() === 'nvnm-testnet' && tag?.id.startsWith('genesis-token:'))
-		return lowerAddress === nvnmTestnet.feeToken
-			? { id: 'genesis-token:nusd', label: 'nUSD' }
-			: undefined
-	return tag
+	return taggedAccounts[address.toLowerCase() as Address.Address]
 }

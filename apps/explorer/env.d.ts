@@ -1,7 +1,4 @@
 interface EnvironmentVariables {
-	readonly DATADOG_APPLICATION_ID: string | undefined
-	readonly DATADOG_CLIENT_TOKEN: string | undefined
-	readonly DATADOG_SITE: string | undefined
 	readonly SENTRY_AUTH_TOKEN: string | undefined
 	readonly SENTRY_ORG: string | undefined
 	readonly SENTRY_PROJECT: string | undefined
@@ -11,13 +8,15 @@ interface EnvironmentVariables {
 	readonly VITE_SENTRY_TRACES_SAMPLE_RATE: string | undefined
 
 	readonly VITE_CONTRACT_VERIFICATION_API_BASE_URL: string
-	readonly VITE_DATADOG_ALLOWED_TRACING_URLS: string | undefined
-	readonly VITE_DATADOG_ENABLED: string | undefined
-	readonly VITE_DATADOG_ENV: string | undefined
-	readonly VITE_DATADOG_SERVICE: string | undefined
-	readonly VITE_DATADOG_SESSION_REPLAY_SAMPLE_RATE: string | undefined
-	readonly VITE_DATADOG_SESSION_SAMPLE_RATE: string | undefined
-	readonly VITE_DATADOG_TRACE_SAMPLE_RATE: string | undefined
+	/** Set in CI only (GitHub Actions secret). Unset means no PostHog at all. */
+	readonly VITE_EXPLORER_POSTHOG_KEY: string | undefined
+	readonly VITE_POSTHOG_HOST: string | undefined
+	/** Set at build time: "true" when a devnet build has DEVNET_RPC_URL. */
+	readonly VITE_DEVNET_RPC_OVERRIDDEN: string | undefined
+	/** Set at build time for a devnet build, empty otherwise (see vite.config.ts). */
+	readonly DEVNET_API_URL: string | undefined
+	readonly DEVNET_RPC_URL: string | undefined
+	readonly DEVNET_TIDX_URL: string | undefined
 
 	readonly VITE_TEMPO_ENV: 'nvnm' | 'nvnm-testnet' | 'nvnm-mainnet'
 }

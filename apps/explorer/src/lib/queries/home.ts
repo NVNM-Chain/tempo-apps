@@ -5,8 +5,8 @@ import { getTempoChain } from '#wagmi.config'
 export function homeStatsQueryOptions() {
 	return queryOptions({
 		queryKey: ['home-stats', getTempoChain().id],
-		queryFn: () => fetchHomeStats(),
+		// A failed read is no dashboard until a later poll succeeds.
+		queryFn: () => fetchHomeStats().catch(() => null),
 		refetchInterval: 3_000,
-		retry: 1,
 	})
 }

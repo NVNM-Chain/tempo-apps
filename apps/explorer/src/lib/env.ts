@@ -9,7 +9,10 @@ const clientEnvSchema = z.object({
 	),
 })
 
-export const clientEnv = clientEnvSchema.parse(import.meta.env)
+export const clientEnv = clientEnvSchema.parse({
+	CONTRACT_VERIFICATION_API_BASE_URL: import.meta.env
+		.VITE_CONTRACT_VERIFICATION_API_BASE_URL,
+})
 
 /**
  * Environments this build serves, one per deployment: `nvnm` is the devnet.

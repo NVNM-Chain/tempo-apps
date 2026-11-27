@@ -63,8 +63,8 @@ describe('explorer network switcher hrefs', () => {
 		expect(chain.serializers).toBe(nvnmChainByEnv.nvnm.serializers)
 	})
 
-	it('recognizes the testnet fee token', () => {
-		expect(getFeeTokenForChain(787223)).toBe(
+	it.each([787222, 787223, 7872])("knows chain %i's fee token", (id) => {
+		expect(getFeeTokenForChain(id)).toBe(
 			'0x20c0000000000000000000000000000000000000',
 		)
 	})

@@ -43,11 +43,12 @@ describe('address metadata', () => {
 	})
 
 	it('loads activity boundaries and count from tidx', async () => {
-		indexer.mockImplementation(async (_chainId: number, sql: string) =>
-			sql.includes('count()')
-				? [{ n: 3, first_at: 100, last_at: 300 }]
-				: [{ tx_hash: '0xoldest', from: '0xsender' }],
-		)
+		indexer.mockImplementation(async (_chainId: number, sql: string) => {
+			if (sql.includes('count()')) return [{ n: 3 }]
+			return sql.includes('DESC')
+				? [{ tx_hash: '0xnewest', from: '0xsender', at: 300 }]
+				: [{ tx_hash: '0xoldest', from: '0xsender', at: 100 }]
+		})
 		const address = '0x1111111111111111111111111111111111111111'
 		await expect(fetchAddressTxMetadata(4217, address)).resolves.toEqual({
 			count: 3,
@@ -57,9 +58,9 @@ describe('address metadata', () => {
 			oldestTxFrom: '0xsender',
 		})
 
-		// An address with no transactions: the empty aggregate's epoch is not a time.
+		// An address with no transactions has no receipt at either end.
 		indexer.mockImplementation(async (_chainId: number, sql: string) =>
-			sql.includes('count()') ? [{ n: 0, first_at: 0, last_at: 0 }] : [],
+			sql.includes('count()') ? [{ n: 0 }] : [],
 		)
 		await expect(fetchAddressTxMetadata(4217, address)).resolves.toEqual({
 			count: 0,

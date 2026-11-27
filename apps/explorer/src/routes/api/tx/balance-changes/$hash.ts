@@ -6,8 +6,13 @@ import { getTransactionReceipt, readContract } from 'viem/actions'
 import { Abis } from '#lib/abis'
 import * as z from 'zod/mini'
 import { mapWithConcurrency } from '#lib/network.ts'
+import { withImmutableDataCache } from '#lib/server/immutable-data-cache'
 import { zHash } from '#lib/zod'
-import { getWagmiConfig, type WagmiConfig } from '#wagmi.config.ts'
+import {
+	getTempoChain,
+	getWagmiConfig,
+	type WagmiConfig,
+} from '#wagmi.config.ts'
 
 const DEFAULT_LIMIT = 20
 const MAX_LIMIT = 100
@@ -122,7 +127,7 @@ async function getTokenMetadata(
 	return { decimals, symbol }
 }
 
-export async function fetchBalanceChanges(params: {
+async function fetchBalanceChangesUncached(params: {
 	hash: Address.Address
 	limit: number
 	offset: number
@@ -192,7 +197,18 @@ export async function fetchBalanceChanges(params: {
 	}
 }
 
-const querySchema = z.object({
+export async function fetchBalanceChanges(params: {
+	hash: Address.Address
+	limit: number
+	offset: number
+}): Promise<BalanceChangesData> {
+	return withImmutableDataCache({
+		key: `balance-changes:v1:${getTempoChain().id}:${params.hash.toLowerCase()}:${params.limit}:${params.offset}`,
+		load: () => fetchBalanceChangesUncached(params),
+	})
+}
+
+export const BalanceChangesQuerySchema = z.object({
 	limit: z.optional(z.coerce.number()),
 	offset: z.optional(z.coerce.number()),
 })
@@ -204,10 +220,9 @@ export const Route = createFileRoute('/api/tx/balance-changes/$hash')({
 				try {
 					const hash = zHash().parse(params.hash)
 					const url = new URL(request.url)
-					const query = querySchema.parse({
-						limit: url.searchParams.get('limit') ?? undefined,
-						offset: url.searchParams.get('offset') ?? undefined,
-					})
+					const query = BalanceChangesQuerySchema.parse(
+						Object.fromEntries(url.searchParams),
+					)
 					const limit = normalizeLimit(query.limit ?? DEFAULT_LIMIT)
 					const offset = normalizeOffset(query.offset ?? 0)
 

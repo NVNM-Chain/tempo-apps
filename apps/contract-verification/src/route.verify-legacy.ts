@@ -3,13 +3,12 @@ import * as z from 'zod/mini'
 import { Address, Hex } from 'ox'
 import { and, eq, or } from 'drizzle-orm'
 import { getRandom } from '@cloudflare/containers'
-import { createPublicClient, http, keccak256 } from 'viem'
+import { createPublicClient, keccak256 } from 'viem'
 
 import {
 	getDb,
 	formatError,
 	sourcifyError,
-	normalizeSourcePath,
 	filterSourcesByCompilerMetadata,
 	getCreationTransactionMetadata,
 } from '#lib/utilities.ts'
@@ -34,6 +33,8 @@ import {
 } from '#lib/bytecode-matching.ts'
 import type { AppEnv } from '#index.tsx'
 import { getLogger } from '#lib/logger.ts'
+import { CONTAINER_COMPILE_TIMEOUT_MS, isTimeoutError } from '#route.verify.ts'
+import { createRpcTransport } from '#lib/rpc.ts'
 
 const logger = getLogger(['tempo'])
 
@@ -188,17 +189,8 @@ legacyVerifyRoute.post('/vyper', async (context) => {
 		const rpcUrl = chainConfig.rpcUrls.default.http.at(0)
 		const client = createPublicClient({
 			chain: chainConfig,
-			transport: http(rpcUrl),
+			transport: createRpcTransport(rpcUrl, chainConfig.id, context.env),
 		})
-
-		const creationTransactionMetadata = body.creatorTxHash
-			? await getCreationTransactionMetadata({
-					creationTransactionHash: body.creatorTxHash,
-					address,
-					chainId,
-					client,
-				})
-			: null
 
 		const onchainBytecode = await client.getCode({ address })
 
@@ -244,6 +236,7 @@ legacyVerifyRoute.post('/vyper', async (context) => {
 						compilerVersion,
 						input: stdJsonInput,
 					}),
+					signal: AbortSignal.timeout(CONTAINER_COMPILE_TIMEOUT_MS),
 				}),
 			)
 		} catch (error) {
@@ -252,6 +245,8 @@ legacyVerifyRoute.post('/vyper', async (context) => {
 				address,
 				chain,
 			})
+			if (isTimeoutError(error))
+				return sourcifyError(context, 504, 'timeout', 'Compilation timed out')
 			return sourcifyError(
 				context,
 				500,
@@ -342,6 +337,7 @@ legacyVerifyRoute.post('/vyper', async (context) => {
 			onchainBytecode: onchainBytecode,
 			recompiledBytecode: compiledBytecode,
 			isCreation: false,
+			deploymentAddress: address,
 			linkReferences: undefined,
 			immutableReferences,
 			auxdataStyle,
@@ -358,6 +354,29 @@ legacyVerifyRoute.post('/vyper', async (context) => {
 				500,
 			)
 		}
+
+		const filteredSourceEntries = filterSourcesByCompilerMetadata(
+			files,
+			compiledContract.metadata,
+		)
+		if (filteredSourceEntries === null) {
+			return sourcifyError(
+				context,
+				400,
+				'source_path_collision',
+				'Compiler source paths collide after normalization',
+			)
+		}
+
+		// Only matched source submissions may trigger optional factory tracing.
+		const creationTransactionMetadata = body.creatorTxHash
+			? await getCreationTransactionMetadata({
+					creationTransactionHash: body.creatorTxHash,
+					address,
+					chainId,
+					client,
+				})
+			: null
 
 		const isExactMatch = runtimeMatchResult.match === 'exact_match'
 		const auditUser = 'verification-api'
@@ -567,10 +586,6 @@ legacyVerifyRoute.post('/vyper', async (context) => {
 			})
 		}
 
-		const filteredSourceEntries = filterSourcesByCompilerMetadata(
-			files,
-			compiledContract.metadata,
-		)
 		const shouldInsertSources =
 			existingCompilation.length === 0 || shouldReplaceExistingSources
 
@@ -583,7 +598,7 @@ legacyVerifyRoute.post('/vyper', async (context) => {
 		// ast-grep-ignore-start: Sequential DB operations are intentional
 		// Insert sources referenced by the compiler metadata
 		if (shouldInsertSources) {
-			for (const [sourcePath, sourceContent] of filteredSourceEntries) {
+			for (const [path, sourceContent] of filteredSourceEntries) {
 				const contentBytes = new TextEncoder().encode(sourceContent)
 				const sourceHashSha256 = new Uint8Array(
 					await globalThis.crypto.subtle.digest('SHA-256', contentBytes),
@@ -602,15 +617,13 @@ legacyVerifyRoute.post('/vyper', async (context) => {
 
 				await db.insert(sourcesTable).values(sourceInsert).onConflictDoNothing()
 
-				// Normalize path (convert absolute to relative)
-				const normalizedPath = normalizeSourcePath(sourcePath)
 				await db
 					.insert(compiledContractsSourcesTable)
 					.values({
 						id: globalThis.crypto.randomUUID(),
 						compilationId: compilationId,
 						sourceHash: sourceHashSha256,
-						path: normalizedPath,
+						path,
 					})
 					.onConflictDoNothing()
 			}
