@@ -1,42 +1,28 @@
+import { useSuspenseQuery } from '@tanstack/react-query'
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
-import type { Address, Hex } from 'ox'
 import * as React from 'react'
 import * as z from 'zod/mini'
 import { ExploreInput } from '#comps/ExploreInput'
+import { HomeDashboard } from '#comps/HomeDashboard'
 import { cx } from '#lib/css'
-import { getTempoEnv } from '#lib/env'
+import { homeStatsQueryOptions } from '#lib/queries'
+import type { ListedTransaction } from '#lib/server/transaction-list'
+import AnchorIcon from '~icons/lucide/anchor'
 import BoxIcon from '~icons/lucide/box'
 import CoinsIcon from '~icons/lucide/coins'
 import FileIcon from '~icons/lucide/file'
 import ReceiptIcon from '~icons/lucide/receipt'
 import UserIcon from '~icons/lucide/user'
 
-const SPOTLIGHT_DATA: Record<
-	string,
-	{
-		accountAddress: Address.Address
-		contractAddress: Address.Address
-		receiptHash: Hex.Hex
-	}
-> = {
-	// Real values from tidx_787222.txs. Re-pick if the chain is regenerated.
-	nvnm: {
-		accountAddress: '0x9493feed391b9d1875731c8a4b5e492db8505843',
-		contractAddress: '0x20c000000000000000000000566f8b4a921dcd3a',
-		receiptHash:
-			'0x4dc23799c4f7474c29de45e62ec533c6cd3026f3ac0c5993483487d3b2fc7f72',
-	},
-}
-
-function getSpotlightData() {
-	return SPOTLIGHT_DATA[getTempoEnv()]
-}
-
 export const Route = createFileRoute('/_layout/')({
 	component: Component,
 	validateSearch: z.object({
 		q: z.optional(z.coerce.string()),
-	}).parse,
+	}),
+	// Not awaited: the page paints first and the dashboard streams in.
+	loader: ({ context }) => {
+		void context.queryClient.prefetchQuery(homeStatsQueryOptions())
+	},
 })
 
 function Component() {
@@ -50,8 +36,9 @@ function Component() {
 	}, [query])
 
 	return (
-		<div className="flex flex-1 w-full flex-col text-[16px]">
-			<div className="flex min-h-[42svh] flex-col justify-end">
+		<div className="flex flex-1 w-full flex-col copy-16">
+			{/* Short above the dashboard or its place; tall when the page is the search box alone. */}
+			<div className="flex flex-col justify-end min-h-[42svh] [&:has(+*_[data-dashboard])]:min-h-[18svh]">
 				<div className="flex justify-center select-none [@media(max-height:360px)]:hidden">
 					<LandingWords />
 				</div>
@@ -62,7 +49,7 @@ function Component() {
 						autoFocus
 						size="large"
 						wide
-						className="bg-base-alt"
+						className="bg-pane"
 						value={inputValue}
 						onChange={setInputValue}
 						onActivate={(data) => {
@@ -75,7 +62,7 @@ function Component() {
 							}
 							if (data.type === 'hash') {
 								navigate({
-									to: '/receipt/$hash',
+									to: '/tx/$hash',
 									params: { hash: data.value },
 								})
 								return
@@ -97,32 +84,54 @@ function Component() {
 						}}
 					/>
 				</div>
-				<SpotlightLinks />
+				<React.Suspense
+					fallback={
+						<>
+							<SpotlightLinks />
+							<div data-dashboard hidden />
+						</>
+					}
+				>
+					<Dashboard />
+				</React.Suspense>
 			</div>
 		</div>
 	)
 }
 
-function SpotlightLinks() {
-	const spotlightData = getSpotlightData()
+/** The links with their examples and the dashboard; the links alone when the stats could not be read. */
+function Dashboard() {
+	const { data: stats } = useSuspenseQuery(homeStatsQueryOptions())
+	return (
+		<>
+			<SpotlightLinks example={stats?.example} />
+			{stats && (
+				<div data-dashboard className="contents">
+					<HomeDashboard stats={stats} />
+				</div>
+			)}
+		</>
+	)
+}
+
+function SpotlightLinks(props: { example?: ListedTransaction }) {
+	const tx = props.example
 
 	return (
 		<section className="text-center max-w-[500px] px-4">
-			<div className="group/pills flex items-center gap-2 text-[13px] flex-wrap justify-center">
-				{spotlightData && (
+			<div className="group/pills flex items-center gap-2 copy-13 flex-wrap justify-center">
+				{tx?.to && (
 					<>
 						<SpotlightPill
 							to="/address/$address"
-							params={{ address: spotlightData.accountAddress }}
+							params={{ address: tx.from }}
 							icon={<UserIcon className="size-[14px] text-accent" />}
 						>
 							Account
 						</SpotlightPill>
 						<SpotlightPill
 							to="/address/$address"
-							params={{
-								address: spotlightData.contractAddress,
-							}}
+							params={{ address: tx.to }}
 							search={{ tab: 'contract' }}
 							icon={<FileIcon className="size-[14px] text-accent" />}
 						>
@@ -130,7 +139,7 @@ function SpotlightLinks() {
 						</SpotlightPill>
 						<SpotlightPill
 							to="/receipt/$hash"
-							params={{ hash: spotlightData.receiptHash }}
+							params={{ hash: tx.hash }}
 							icon={<ReceiptIcon className="size-[14px] text-accent" />}
 						>
 							Receipt
@@ -148,6 +157,12 @@ function SpotlightLinks() {
 					icon={<CoinsIcon className="size-[14px] text-accent" />}
 				>
 					Tokens
+				</SpotlightPill>
+				<SpotlightPill
+					to="/anchoring"
+					icon={<AnchorIcon className="size-[14px] text-accent" />}
+				>
+					Anchoring
 				</SpotlightPill>
 			</div>
 		</section>
@@ -169,7 +184,7 @@ function SpotlightPill(props: {
 			{...(params ? { params } : {})}
 			{...(search ? { search } : {})}
 			className={cx(
-				'flex items-center gap-1.5 text-base-content-secondary hover:text-base-content border hover:border-accent focus-visible:border-accent px-2.5 py-1 rounded-full! press-down bg-surface focus-visible:outline-none border-base-border',
+				'flex h-9 items-center gap-2 text-secondary hover:text-primary border hover:border-border-hover px-3 rounded-button press-down bg-surface border-base-border transition-colors',
 				className,
 			)}
 		>
@@ -179,18 +194,12 @@ function SpotlightPill(props: {
 	)
 }
 
-function LandingWords() {
+function LandingWords(): React.JSX.Element {
 	return (
-		<div className="flex flex-col items-center gap-1">
-			<span className="text-[32px] font-semibold tracking-[-0.02em] leading-[0.95] text-primary/50">
-				Search
-			</span>
-			<span className="text-[40px] font-semibold tracking-[-0.02em] leading-[0.95] text-primary/70">
-				Explore
-			</span>
-			<span className="text-[52px] font-semibold tracking-[-0.02em] leading-[0.95] text-primary">
-				Discover
-			</span>
-		</div>
+		<h1 className="flex flex-col items-center gap-1">
+			<span className="heading-32 text-primary/50">Search</span>
+			<span className="heading-40 text-primary/70">Explore</span>
+			<span className="heading-48 text-primary">Discover</span>
+		</h1>
 	)
 }

@@ -1,72 +1,15 @@
 import { createServerFn } from '@tanstack/react-start'
-import { type InferResponseType, parseResponse } from 'hono/client'
 import type { Address, Hex } from 'ox'
+import { erc20Abi } from 'viem'
 import { getChainId } from 'wagmi/actions'
 import * as z from 'zod/mini'
 import { TOKEN_COUNT_MAX } from '#lib/constants'
-import { api } from '#lib/server/tempo-api'
+import { indexer } from '#lib/server/dex-indexer'
+import { getTokensMetadata } from '#lib/server/verified-tokens'
 import { zAddress } from '#lib/zod'
-import { getWagmiConfig } from '#wagmi.config.ts'
+import { getBatchedClient, getWagmiConfig } from '#wagmi.config.ts'
 
-const CACHE_TTL = 60_000
-const CACHE_MAX_ENTRIES = 20
 const COUNT_CAP = TOKEN_COUNT_MAX
-
-type TokenDetails = InferResponseType<
-	(typeof api.v1.tokens)[':token']['$get'],
-	200
->
-
-type CacheEntry<T> = { data: T; timestamp: number }
-
-function setCached<T>(
-	cache: Map<string, CacheEntry<T>>,
-	key: string,
-	data: T,
-): void {
-	if (!cache.has(key) && cache.size >= CACHE_MAX_ENTRIES) {
-		const oldestKey = cache.keys().next().value
-		if (oldestKey) cache.delete(oldestKey)
-	}
-	cache.delete(key)
-	cache.set(key, { data, timestamp: Date.now() })
-}
-
-const tokenDetailsCache = new Map<
-	string,
-	CacheEntry<TokenDetails | undefined>
->()
-
-/**
- * Cached token detail lookup shared by the holders / transfers server fns:
- * exact `holderCount`, `totalSupply`, and lifetime `transferStats`.
- * `createdAt` is intentionally omitted because the creation lookup can add
- * several seconds and neither paginated view consumes it.
- */
-async function getTokenDetails(
-	chainId: number,
-	address: Address.Address,
-): Promise<TokenDetails | undefined> {
-	const cacheKey = `${chainId}-${address}`
-	const cached = tokenDetailsCache.get(cacheKey)
-	if (cached && Date.now() - cached.timestamp < CACHE_TTL) return cached.data
-
-	const details = await parseResponse(
-		api.v1.tokens[':token'].$get({
-			param: { token: address },
-			query: {
-				chainId: String(chainId),
-				include: 'holderCount,transferStats',
-			},
-		}),
-	).catch((error) => {
-		console.error(`Failed to fetch token details for ${address}:`, error)
-		return undefined
-	})
-
-	setCached(tokenDetailsCache, cacheKey, details)
-	return details
-}
 
 /**
  * Resolves `total`/`totalCapped` for the numbered-pagination UI: prefer the
@@ -119,6 +62,8 @@ export type TokenHoldersApiResponse = {
 	total: number
 	totalCapped: boolean
 	totalBalance: string
+	/** Set when holders can't be computed (a plain ERC-20 past the log scan limit). */
+	unavailable?: boolean | undefined
 }
 
 const EMPTY_HOLDERS_RESPONSE: TokenHoldersApiResponse = {
@@ -135,33 +80,41 @@ export const fetchHolders = createServerFn({ method: 'POST' })
 			if (data.page * data.limit > COUNT_CAP) return EMPTY_HOLDERS_RESPONSE
 			const chainId = getChainId(getWagmiConfig())
 
-			const [details, page] = await Promise.all([
-				getTokenDetails(chainId, data.address),
-				parseResponse(
-					api.v1.tokens[':token'].holders.$get({
-						param: { token: data.address },
-						query: {
-							chainId: String(chainId),
-							limit: String(data.limit),
-							page: String(data.page),
-						},
-					}),
+			const [rows, [counted], supply] = await Promise.all([
+				// `amount`, not `balance`: an alias would shadow the column in ORDER BY.
+				// `holder` gives equal balances one order across pages.
+				indexer(
+					chainId,
+					`SELECT holder, toString(balance) AS amount FROM token_balances_snapshot
+					WHERE token = '${data.address}' AND balance > 0 ORDER BY balance DESC, holder
+					LIMIT ${data.limit} OFFSET ${(data.page - 1) * data.limit}`,
 				),
+				indexer(
+					chainId,
+					`SELECT holder_count FROM token_holder_counts WHERE token = '${data.address}'`,
+				),
+				getBatchedClient()
+					.readContract({
+						address: data.address,
+						abi: erc20Abi,
+						functionName: 'totalSupply',
+					})
+					.catch(() => undefined),
 			])
 
 			return {
-				holders: page.data.map((holder) => ({
-					address: holder.address as Address.Address,
-					balance: holder.balance,
+				holders: rows.map((row) => ({
+					address: String(row.holder) as Address.Address,
+					balance: String(row.amount),
 				})),
 				...resolveTotal({
-					exactCount: details?.holderCount,
+					exactCount: counted ? Number(counted.holder_count) : undefined,
 					page: data.page,
 					limit: data.limit,
-					rows: page.data.length,
-					exhausted: page.nextCursor === null,
+					rows: rows.length,
+					exhausted: rows.length < data.limit,
 				}),
-				totalBalance: details?.totalSupply ?? '0',
+				totalBalance: supply?.toString() ?? '0',
 			}
 		} catch (error) {
 			console.error('Failed to fetch holders:', error)
@@ -182,6 +135,7 @@ export type FetchTokenTransfersInput = z.infer<
 
 export type TokenTransfersApiResponse = {
 	transfers: Array<{
+		id: string
 		from: Address.Address
 		to: Address.Address
 		value: string
@@ -203,10 +157,12 @@ const FetchAccountTransfersInputSchema = z.object({
 	account: zAddress({ lowercase: true }),
 	page: z.coerce.number().check(z.gte(1)),
 	limit: z.coerce.number().check(z.gte(5), z.lte(200)),
+	direction: z.optional(z.enum(['in', 'out'])),
 })
 
 export type AccountTransfersApiResponse = {
 	transfers: Array<{
+		id: string
 		from: Address.Address
 		to: Address.Address
 		value: string
@@ -230,6 +186,61 @@ const EMPTY_ACCOUNT_TRANSFERS_RESPONSE: AccountTransfersApiResponse = {
 	totalCapped: false,
 }
 
+/** A page of transfers, newest first, and how many match. */
+async function indexedTransfers(params: {
+	chainId: number
+	page: number
+	limit: number
+	token?: Address.Address | undefined
+	account?: Address.Address | undefined
+	direction?: 'in' | 'out' | undefined
+}) {
+	const { account, direction } = params
+	const filters = [
+		params.token && `token = '${params.token}'`,
+		account &&
+			(direction === 'in'
+				? `"to" = '${account}'`
+				: direction === 'out'
+					? `"from" = '${account}'`
+					: `("from" = '${account}' OR "to" = '${account}')`),
+	].filter(Boolean)
+	const where = filters.length ? `WHERE ${filters.join(' AND ')}` : ''
+	const [rows, [counted]] = await Promise.all([
+		indexer(
+			params.chainId,
+			`SELECT token, "from", "to", toString(amount) AS value, tx_hash, block_num, log_idx,
+				toUnixTimestamp(block_timestamp) AS timestamp
+			FROM token_transfers ${where}
+			ORDER BY block_num DESC, log_idx DESC
+			LIMIT ${params.limit} OFFSET ${(params.page - 1) * params.limit}`,
+		),
+		indexer(
+			params.chainId,
+			`SELECT count() AS n FROM token_transfers ${where}`,
+		),
+	])
+	return {
+		transfers: rows.map((row) => ({
+			id: `${row.tx_hash}-${row.log_idx}`,
+			token: String(row.token) as Address.Address,
+			from: String(row.from) as Address.Address,
+			to: String(row.to) as Address.Address,
+			value: String(row.value),
+			transactionHash: String(row.tx_hash) as Hex.Hex,
+			blockNumber: String(row.block_num),
+			timestamp: String(row.timestamp),
+		})),
+		...resolveTotal({
+			exactCount: counted ? Number(counted.n) : undefined,
+			page: params.page,
+			limit: params.limit,
+			rows: rows.length,
+			exhausted: rows.length < params.limit,
+		}),
+	}
+}
+
 /**
  * Token transfers where the account is sender or recipient, across all
  * tokens (the address page's account-scoped Transfers tab). Rows span
@@ -243,41 +254,22 @@ export const fetchAccountTransfers = createServerFn({ method: 'POST' })
 				return EMPTY_ACCOUNT_TRANSFERS_RESPONSE
 			const chainId = getChainId(getWagmiConfig())
 
-			const page = await parseResponse(
-				api.v1.transfers.$get({
-					query: {
-						chainId: String(chainId),
-						address: data.account,
-						limit: String(data.limit),
-						page: String(data.page),
-						include: 'totalCount',
-					},
-				}),
+			const page = await indexedTransfers({ chainId, ...data })
+			const metadata = await getTokensMetadata(
+				page.transfers.map((transfer) => transfer.token),
 			)
 
 			return {
-				transfers: page.data.map((transfer) => ({
-					from: transfer.sender as Address.Address,
-					to: transfer.recipient as Address.Address,
-					value: transfer.sourceAmount.baseUnits,
-					transactionHash: transfer.transactionHash as Hex.Hex,
-					blockNumber: String(transfer.blockNumber),
-					timestamp: transfer.timestamp ?? null,
+				...page,
+				transfers: page.transfers.map(({ token, ...transfer }, i) => ({
+					...transfer,
 					token: {
-						address: transfer.sourceToken.address as Address.Address,
-						symbol: transfer.sourceToken.symbol,
-						decimals: transfer.sourceToken.decimals,
-						currency: transfer.sourceToken.currency,
+						address: token,
+						symbol: metadata[i]?.symbol ?? '',
+						decimals: metadata[i]?.decimals ?? 0,
+						currency: metadata[i]?.currency ?? '',
 					},
 				})),
-				...resolveTotal({
-					exactCount: page.meta?.totalCount,
-					exactCountCapped: page.meta?.totalCountCapped,
-					page: data.page,
-					limit: data.limit,
-					rows: page.data.length,
-					exhausted: page.nextCursor === null,
-				}),
 			}
 		} catch (error) {
 			console.error('Failed to fetch account transfers:', error)
@@ -292,45 +284,13 @@ export const fetchTransfers = createServerFn({ method: 'POST' })
 			if (data.page * data.limit > COUNT_CAP) return EMPTY_TRANSFERS_RESPONSE
 			const chainId = getChainId(getWagmiConfig())
 
-			const [details, page] = await Promise.all([
-				getTokenDetails(chainId, data.address),
-				parseResponse(
-					api.v1.transfers.$get({
-						query: {
-							token: data.address,
-							chainId: String(chainId),
-							limit: String(data.limit),
-							page: String(data.page),
-							...(data.account
-								? { address: data.account, include: 'totalCount' }
-								: {}),
-						},
-					}),
-				),
-			])
-
-			return {
-				transfers: page.data.map((transfer) => ({
-					from: transfer.sender as Address.Address,
-					to: transfer.recipient as Address.Address,
-					value: transfer.sourceAmount.baseUnits,
-					transactionHash: transfer.transactionHash as Hex.Hex,
-					blockNumber: String(transfer.blockNumber),
-					timestamp: transfer.timestamp ?? null,
-				})),
-				...resolveTotal({
-					exactCount: data.account
-						? page.meta?.totalCount
-						: details?.transferStats?.count,
-					exactCountCapped: data.account
-						? page.meta?.totalCountCapped
-						: undefined,
-					page: data.page,
-					limit: data.limit,
-					rows: page.data.length,
-					exhausted: page.nextCursor === null,
-				}),
-			}
+			return await indexedTransfers({
+				chainId,
+				page: data.page,
+				limit: data.limit,
+				token: data.address,
+				account: data.account,
+			})
 		} catch (error) {
 			console.error('Failed to fetch transfers:', error)
 			throw error

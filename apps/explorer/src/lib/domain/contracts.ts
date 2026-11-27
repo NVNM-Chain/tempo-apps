@@ -1,26 +1,46 @@
 import { loaders, whatsabi } from '@shazow/whatsabi'
+import { formatAbiItem } from 'abitype'
 import type { Address, Hex } from 'ox'
 import type { Abi, AbiEvent, AbiFunction, AbiParameter } from 'viem'
 import {
 	decodeEventLog,
 	getAbiItem as getAbiItem_viem,
+	parseAbiItem,
 	stringify,
+	toEventSelector,
 	toFunctionSelector,
 } from 'viem'
 import { Addresses } from 'viem/tempo'
 import {
 	Abis,
+	allAbis,
+	blockHashHistoryAbi,
 	stablecoinDexAbi,
 	streamChannelAbi,
 	tip20ChannelReserveAbi,
 	tip20ChannelReserveAddress,
+	zoneFactoryAbi,
+	zoneMessengerAbi,
+	zoneOutboxAbi,
+	zonePortalAbi,
+	zoneVerifierAbi,
 } from '#lib/abis'
 import { getChainId, getPublicClient } from 'wagmi/actions'
+import {
+	ANCHORING_ADDRESS,
+	ANCHORING_IMPLEMENTATION,
+} from '#lib/domain/anchoring.ts'
 import { isTip20Address } from '#lib/domain/tip20.ts'
+import { getZonePortalId, isZonePortalAddress } from '#lib/domain/zones.ts'
 import { getWagmiConfig } from '#wagmi.config.ts'
+import { clientEnv } from '#lib/env.ts'
+
+export { isZonePortalAddress } from '#lib/domain/zones.ts'
 
 const validatorConfigV2Address =
 	'0xcccccccc00000000000000000000000000000001' as const
+export const blockHashHistoryAddress =
+	'0x0000f90827f1c53a10cb7a02335b175320002935' as const
 
 /**
  * Registry of known contract addresses to their ABIs and metadata.
@@ -40,11 +60,12 @@ export type ContractInfo = {
 }
 
 function makePrecompile(
-	data: Omit<ContractInfo, 'code' | 'abi' | 'category'>,
+	data: Omit<ContractInfo, 'code' | 'abi' | 'category'> & { abi?: Abi },
 ): [Address.Address, ContractInfo] {
+	const { abi = [], ...metadata } = data
 	return [
 		data.address,
-		{ ...data, code: '0x' as Hex.Hex, abi: [] as Abi, category: 'precompile' },
+		{ ...metadata, code: '0x' as Hex.Hex, abi, category: 'precompile' },
 	]
 }
 
@@ -163,6 +184,13 @@ export const precompileRegistry = new Map<Address.Address, ContractInfo>([
 		description: 'ECDSA signature verification on secp256r1 (P-256)',
 		docsUrl: 'https://www.evm.codes/precompiled#0x100',
 	}),
+	makePrecompile({
+		address: Addresses.signatureVerifier,
+		name: 'Signature Verification',
+		description: 'Recover and verify Tempo signature types',
+		abi: Abis.signatureVerifier,
+		docsUrl: 'https://github.com/tempoxyz/tempo/blob/main/tips/tip-1020.md',
+	}),
 ])
 
 /**
@@ -178,50 +206,16 @@ export function isPrecompile(address: Address.Address): boolean {
 export const tip20ContractRegistry = new Map<Address.Address, ContractInfo>(<
 	const
 >[
-	// TIP-20 Tokens
+	// The one TIP-20 in every NVNM genesis.
 	[
 		'0x20c0000000000000000000000000000000000000',
 		{
-			name: 'pathUSD',
-			description: 'Non-transferable DEX accounting unit',
+			name: 'nUSD',
+			description: 'NVNM stablecoin',
 			abi: Abis.tip20,
 			code: '0xef',
 			category: 'token',
-			docsUrl: 'https://docs.tempo.xyz/documentation/protocol/exchange/pathUSD',
 			address: '0x20c0000000000000000000000000000000000000',
-		},
-	],
-	[
-		'0x20c0000000000000000000000000000000000001',
-		{
-			name: 'AlphaUSD',
-			code: '0xef',
-			description: 'TIP-20 stablecoin (AUSD)',
-			abi: Abis.tip20,
-			category: 'token',
-			address: '0x20c0000000000000000000000000000000000001',
-		},
-	],
-	[
-		'0x20c0000000000000000000000000000000000002',
-		{
-			name: 'BetaUSD',
-			code: '0xef',
-			description: 'TIP-20 stablecoin (BUSD)',
-			abi: Abis.tip20,
-			category: 'token',
-			address: '0x20c0000000000000000000000000000000000002',
-		},
-	],
-	[
-		'0x20c0000000000000000000000000000000000003',
-		{
-			name: 'ThetaUSD',
-			code: '0xef',
-			description: 'TIP-20 stablecoin (TUSD)',
-			abi: Abis.tip20,
-			category: 'token',
-			address: '0x20c0000000000000000000000000000000000003',
 		},
 	],
 ])
@@ -319,6 +313,28 @@ export const systemContractRegistry = new Map<Address.Address, ContractInfo>(<
 		},
 	],
 	[
+		ANCHORING_ADDRESS,
+		{
+			name: 'Anchoring',
+			code: '0xef',
+			description: 'Registries of anchored records',
+			abi: Abis.anchoring,
+			category: 'system',
+			address: ANCHORING_ADDRESS,
+		},
+	],
+	[
+		ANCHORING_IMPLEMENTATION,
+		{
+			name: 'Anchoring Implementation',
+			code: '0xef',
+			description: 'The code the anchoring proxy runs',
+			abi: Abis.anchoring,
+			category: 'system',
+			address: ANCHORING_IMPLEMENTATION,
+		},
+	],
+	[
 		Addresses.accountKeychain,
 		{
 			name: 'Account Keychain',
@@ -354,6 +370,78 @@ export const systemContractRegistry = new Map<Address.Address, ContractInfo>(<
 		},
 	],
 	[
+		Addresses.zoneFactory,
+		{
+			name: 'Zone Factory',
+			code: '0xef',
+			description: 'Create and discover Tempo Zones',
+			abi: zoneFactoryAbi,
+			category: 'system',
+			docsUrl: 'https://docs.tempo.xyz/protocol/zones',
+			address: Addresses.zoneFactory,
+		},
+	],
+	[
+		Addresses.zonePortalImplementation,
+		{
+			name: 'Zone Portal Implementation',
+			code: '0xef',
+			description: 'Bridge assets between Tempo and Tempo Zones',
+			abi: zonePortalAbi,
+			category: 'system',
+			docsUrl: 'https://docs.tempo.xyz/protocol/zones',
+			address: Addresses.zonePortalImplementation,
+		},
+	],
+	[
+		Addresses.zoneOutbox,
+		{
+			name: 'Zone Outbox',
+			code: '0xef',
+			description: 'Request withdrawals from a Tempo Zone',
+			abi: zoneOutboxAbi,
+			category: 'system',
+			docsUrl: 'https://docs.tempo.xyz/protocol/zones',
+			address: Addresses.zoneOutbox,
+		},
+	],
+	[
+		Addresses.zoneMessenger,
+		{
+			name: 'Zone Messenger',
+			code: '0xef',
+			description: 'Relay messages between Tempo and Tempo Zones',
+			abi: zoneMessengerAbi,
+			category: 'system',
+			docsUrl: 'https://docs.tempo.xyz/protocol/zones',
+			address: Addresses.zoneMessenger,
+		},
+	],
+	[
+		Addresses.zoneVerifier,
+		{
+			name: 'Zone Verifier',
+			code: '0xef',
+			description: 'Verify Tempo Zone state transitions',
+			abi: zoneVerifierAbi,
+			category: 'system',
+			docsUrl: 'https://docs.tempo.xyz/protocol/zones',
+			address: Addresses.zoneVerifier,
+		},
+	],
+	[
+		blockHashHistoryAddress,
+		{
+			name: 'Block Hash History',
+			code: '0xef',
+			description: 'EIP-2935 historical block hash storage',
+			abi: blockHashHistoryAbi,
+			category: 'system',
+			docsUrl: 'https://eips.ethereum.org/EIPS/eip-2935',
+			address: blockHashHistoryAddress,
+		},
+	],
+	[
 		'0x9d136eea063ede5418a6bc7beaff009bbb6cfa70',
 		{
 			name: 'Tempo Stream Channel',
@@ -383,7 +471,10 @@ export const contractRegistry = new Map<Address.Address, ContractInfo>(
  * detect if an address is a system address (i.e., not a token)
  */
 export function systemAddress(address: Address.Address): boolean {
-	return systemContractRegistry.has(address.toLowerCase() as Address.Address)
+	return (
+		systemContractRegistry.has(address.toLowerCase() as Address.Address) ||
+		isZonePortalAddress(address)
+	)
 }
 
 /**
@@ -393,9 +484,23 @@ export function systemAddress(address: Address.Address): boolean {
 export function getContractInfo(
 	address: Address.Address,
 ): ContractInfo | undefined {
-	const lowerAddress = address.toLowerCase() as Address.Address
-	const registered = contractRegistry.get(lowerAddress)
+	const registered = contractRegistry.get(
+		address.toLowerCase() as Address.Address,
+	)
 	if (registered) return registered
+
+	if (isZonePortalAddress(address)) {
+		const zoneId = getZonePortalId(address)
+		return {
+			address,
+			name: `Zone Portal Proxy #${zoneId}`,
+			code: '0xef',
+			description: `ERC-1167 minimal proxy for Tempo Zone ${zoneId}`,
+			abi: zonePortalAbi,
+			category: 'system',
+			docsUrl: 'https://eips.ethereum.org/EIPS/eip-1167',
+		}
+	}
 
 	// Dynamic TIP-20 token detection
 	if (isTip20Address(address))
@@ -418,9 +523,22 @@ export function getContractAbi(address: Address.Address): Abi | undefined {
 	return getContractInfo(address)?.abi
 }
 
-// ============================================================================
+export function resolveInteractAbi(params: {
+	address: Address.Address
+	abi?: Abi
+	implementationAbi?: Abi | null
+}): Abi | undefined {
+	const knownAbi = getContractAbi(params.address)
+	// Prefer canonical interfaces, but not event-only ABIs bundled for decoding.
+	if (knownAbi?.some((item) => item.type === 'function')) return knownAbi
+
+	const implAbi = params.implementationAbi
+	return (
+		(implAbi && implAbi.length > 0 ? implAbi : null) ?? params.abi ?? knownAbi
+	)
+}
+
 // ABI Utilities
-// ============================================================================
 
 export type ReadFunction = AbiFunction & { stateMutability: 'view' | 'pure' }
 export type WriteFunction = AbiFunction & {
@@ -432,6 +550,15 @@ export type WriteFunction = AbiFunction & {
  * This is needed because whatsabi doesn't always recover the function name.
  */
 type WhatsabiAbiFunction = AbiFunction & { selector?: string }
+
+/** Bytecode-extracted entries carry selectors; compiler ABIs do not. */
+export function isInferredAbi(abi: Abi): boolean {
+	return abi.some(
+		(item) =>
+			item.type === 'function' &&
+			Boolean((item as WhatsabiAbiFunction).selector),
+	)
+}
 
 /**
  * Get the function selector, using whatsabi's extracted selector if available,
@@ -555,8 +682,6 @@ export function getReadFunctions(abi: Abi): ReadFunction[] {
 	const functions = abi.filter((item): item is ReadFunction => {
 		if (item.type !== 'function') return false
 		if (!Array.isArray(item.inputs)) return false
-		if (looksLikeWriteFunction(item.name) && !looksLikeReadFunction(item.name))
-			return false
 
 		const whatsabiItem = item as WhatsabiAbiFunction
 		const isWhatsabi = Boolean(whatsabiItem.selector)
@@ -565,15 +690,13 @@ export function getReadFunctions(abi: Abi): ReadFunction[] {
 		if (!isWhatsabi) {
 			if (!Array.isArray(item.outputs) || item.outputs.length === 0)
 				return false
-			// Some verified/proxy ABIs contain incorrect mutability metadata.
-			// Prefer a recognized getter name over that metadata so those functions
-			// remain callable from the Read section.
-			if (looksLikeReadFunction(item.name)) return true
 			return item.stateMutability === 'view' || item.stateMutability === 'pure'
 		}
 
 		// For whatsabi ABIs, stateMutability is often wrong (everything is nonpayable)
 		// Use name-based heuristics instead
+		if (looksLikeWriteFunction(item.name) && !looksLikeReadFunction(item.name))
+			return false
 		if (looksLikeReadFunction(item.name)) return true
 
 		// Functions with no inputs that don't look like writes are likely getters
@@ -612,16 +735,13 @@ export function getWriteFunctions(abi: Abi): WriteFunction[] {
 			item.stateMutability === 'nonpayable' ||
 			item.stateMutability === 'payable'
 		if (!isNonpayableOrPayable) return false
-		// ABI sources used for proxy implementations can carry incorrect
-		// mutability metadata. Do not expose recognized getters as transactions,
-		// regardless of whether the entry came from whatsabi or a verified ABI.
-		if (looksLikeReadFunction(item.name)) return false
 
 		const whatsabiItem = item as WhatsabiAbiFunction
 		const isWhatsabi = Boolean(whatsabiItem.selector)
 
 		// For whatsabi ABIs, filter out functions that look like read functions
 		if (isWhatsabi) {
+			if (looksLikeReadFunction(item.name)) return false
 			// Functions with no inputs that don't look like writes are likely getters
 			if (item.inputs.length === 0 && !looksLikeWriteFunction(item.name))
 				return false
@@ -657,9 +777,7 @@ export function getInputFunctions(abi: Abi): ReadFunction[] {
 	return getReadFunctions(abi).filter((fn) => fn?.inputs?.length > 0)
 }
 
-// ============================================================================
 // Parameter Type Utilities
-// ============================================================================
 
 export type SolidityBaseType =
 	| 'address'
@@ -757,6 +875,44 @@ export function parseInputValue(value: string, type: string): unknown {
 }
 
 /**
+ * Whether every argument of a write function has a value. Arguments are read
+ * by their position in `inputs`, so unnamed or same-named parameters each
+ * keep their own field.
+ */
+export function areWriteArgsFilled(
+	inputs: readonly { type: string }[],
+	args: readonly (string | undefined)[],
+): boolean {
+	return inputs.every((_, index) => {
+		const value = args[index]
+		return value !== undefined && value.trim() !== ''
+	})
+}
+
+/**
+ * Parse a write function's arguments, read by their position in `inputs`.
+ */
+export function parseWriteArgs(
+	inputs: readonly { type: string }[],
+	args: readonly (string | undefined)[],
+): { args: unknown[]; error: string | null } {
+	if (!areWriteArgsFilled(inputs, args)) return { args: [], error: null }
+	try {
+		return {
+			args: inputs.map((input, index) =>
+				parseInputValue(args[index] ?? '', input.type),
+			),
+			error: null,
+		}
+	} catch (error) {
+		return {
+			args: [],
+			error: error instanceof Error ? error.message : 'Failed to parse inputs',
+		}
+	}
+}
+
+/**
  * Format output value for display
  */
 export function formatOutputValue(value: unknown, _type: string): string {
@@ -790,9 +946,7 @@ export async function getContractBytecode(
 	return code
 }
 
-// ============================================================================
 // ABI Item Utilities
-// ============================================================================
 
 /**
  * Get an ABI item by selector (function selector or event topic)
@@ -876,14 +1030,14 @@ export function decodeEventLog_guessed(args: {
 					topics: topics as [Hex.Hex, ...Hex.Hex[]],
 					data,
 				})
-			} catch {}
+			} catch {
+				// Try the next indexed-parameter layout if this one cannot decode the event.
+			}
 		}
 	}
 }
 
-// ============================================================================
 // Whatsabi - ABI extraction from bytecode
-// ============================================================================
 
 const defaultSignatureLookup = new loaders.MultiSignatureLookup([
 	new loaders.OpenChainSignatureLookup(),
@@ -891,37 +1045,81 @@ const defaultSignatureLookup = new loaders.MultiSignatureLookup([
 	new loaders.SamczunSignatureLookup(),
 ])
 
+let knownSignatures: Map<string, string> | undefined
+
+/** A selector's or topic's signature in the explorer's own ABIs, which need no public directory. */
+export function knownSignature(selector: Hex.Hex): string | undefined {
+	knownSignatures ??= new Map(
+		allAbis
+			.filter((item) => item.type === 'function' || item.type === 'event')
+			.map((item) => [
+				item.type === 'function'
+					? toFunctionSelector(item)
+					: toEventSelector(item),
+				formatAbiItem(item).replace(/^(function|event) /, ''),
+			]),
+	)
+	return knownSignatures.get(selector.toLowerCase())
+}
+
 /**
  * Lookup a function or event signature by selector/topic hash.
- * Returns the first matching signature string or null.
+ * Returns the first matching signature string that parses as an ABI item, or
+ * null. Public registries accept arbitrary text, so unparsable entries are
+ * skipped.
  */
 export async function lookupSignature(
 	selector: Hex.Hex,
 ): Promise<string | null> {
 	const key = selector.toLowerCase() as Hex.Hex
-	const cached = signatureLookupCache.get(key)
-	if (cached) return cached
-
+	const known = knownSignature(key)
+	if (known) return known
+	if (signatureLookupCache.has(key)) return signatureLookupCache.get(key)!
+	const pending = signatureLookups.get(key)
+	if (pending) return pending
+	if (signatureLookups.size >= 128)
+		throw new Error('Too many signature lookups')
 	const lookup = (async () => {
+		const kind = key.length === 10 ? 'function' : 'event'
 		const signatures =
-			key.length === 10
+			kind === 'function'
 				? await defaultSignatureLookup.loadFunctions(key)
 				: await defaultSignatureLookup.loadEvents(key)
-		return signatures[0] ?? null
+		return (
+			signatures.find((signature) => isParsableSignature(kind, signature)) ??
+			null
+		)
 	})()
-	signatureLookupCache.set(key, lookup)
-
+	signatureLookups.set(key, lookup)
 	try {
-		return await lookup
-	} catch (error) {
-		signatureLookupCache.delete(key)
-		throw error
+		const value = await lookup
+		signatureLookupCache.set(key, value)
+		if (signatureLookupCache.size > 1024) {
+			const oldest = signatureLookupCache.keys().next().value!
+			signatureLookupCache.delete(oldest)
+		}
+		return value
+	} finally {
+		if (signatureLookups.get(key) === lookup) signatureLookups.delete(key)
 	}
 }
 
-const signatureLookupCache = new Map<Hex.Hex, Promise<string | null>>()
+function isParsableSignature(
+	kind: 'function' | 'event',
+	signature: string,
+): boolean {
+	try {
+		parseAbiItem(`${kind} ${signature}`)
+		return true
+	} catch {
+		return false
+	}
+}
 
-class TempoABILoader {
+const signatureLookupCache = new Map<Hex.Hex, string | null>()
+const signatureLookups = new Map<Hex.Hex, Promise<string | null>>()
+
+export class TempoABILoader {
 	readonly name = 'TempoABILoader'
 	readonly chainId: number
 
@@ -938,7 +1136,7 @@ class TempoABILoader {
 
 	async loadABI(address: string): Promise<unknown[]> {
 		try {
-			const url = `${import.meta.env.VITE_CONTRACT_VERIFICATION_API_BASE_URL}/v2/contract/${this.chainId}/${address.toLowerCase()}?fields=abi`
+			const url = `${clientEnv.CONTRACT_VERIFICATION_API_BASE_URL}/v2/contract/${this.chainId}/${address.toLowerCase()}?fields=abi`
 			const response = await fetch(url)
 			if (!response.ok) return []
 			const data = (await response.json()) as { abi?: unknown[] }
@@ -950,6 +1148,8 @@ class TempoABILoader {
 }
 
 export type AutoloadAbiOptions = {
+	/** Resolve inferred signatures; disable when the caller has a separate lookup budget. */
+	resolveSignatures?: boolean
 	followProxies?: boolean
 	includeSourceVerified?: boolean
 }
@@ -965,7 +1165,11 @@ export async function autoloadAbi(
 	const knownAbi = getContractAbi(address)
 	if (knownAbi && knownAbi.length > 0) return knownAbi
 
-	const { followProxies = true, includeSourceVerified = true } = options
+	const {
+		followProxies = true,
+		includeSourceVerified = true,
+		resolveSignatures = true,
+	} = options
 	const config = getWagmiConfig()
 	const chainId = getChainId(config)
 	const client = getPublicClient(config)
@@ -981,7 +1185,7 @@ export async function autoloadAbi(
 						new loaders.SourcifyABILoader({ chainId }),
 					])
 				: false,
-			signatureLookup: defaultSignatureLookup,
+			signatureLookup: resolveSignatures ? defaultSignatureLookup : false,
 			onError: () => false,
 		})
 

@@ -15,20 +15,30 @@ import * as Hex from 'ox/Hex'
 import * as React from 'react'
 import { formatUnits } from 'viem'
 import type { Config } from 'wagmi'
-import { Actions } from 'wagmi/tempo'
+import { Actions, Hooks } from 'wagmi/tempo'
 import * as z from 'zod/mini'
+import { accountFilterSearchSchema } from '#lib/domain/account-filter'
 import { Amount } from '#comps/Amount'
 import { AccountCard } from '#comps/AccountCard'
 import { WalletActions } from '#comps/WalletActions'
+import { ValidatorFees } from '#comps/ValidatorFees'
+import { ValidatorCard } from '#comps/ValidatorCard'
+import {
+	useVaultForAddress,
+	VaultPageLink,
+	VaultTabContent,
+} from '#comps/VaultTab'
 import { AddressCell } from '#comps/AddressCell'
 import { BalanceCell, TransferAmountCell } from '#comps/AmountCell'
 import { BreadcrumbsSlot } from '#comps/Breadcrumbs'
 import { ContractTabContent, InteractTabContent } from '#comps/Contract'
 import { Tip20TokenTabContent } from '#comps/Tip20ContractInfo'
 import { DataGrid } from '#comps/DataGrid'
+import { InfoCard } from '#comps/InfoCard'
 import { Pagination } from '#comps/Pagination'
 import { Midcut } from '#comps/Midcut'
 import { NotFound } from '#comps/NotFound'
+import { RelativeTime } from '#comps/RelativeTime'
 import { Sections } from '#comps/Sections'
 import {
 	TimeColumnHeader,
@@ -37,6 +47,14 @@ import {
 } from '#comps/TimeFormat'
 import { TimestampCell } from '#comps/TimestampCell'
 import { TokenIcon } from '#comps/TokenIcon'
+import {
+	AssetName,
+	AssetSymbol,
+	AssetIdentity,
+	AssetCurrency,
+	AssetAmount,
+	AssetValue,
+} from '#comps/AssetCells'
 import { useTokenListMembership } from '#comps/TokenListMembership'
 import { TransactionCell } from '#comps/TransactionCell'
 import {
@@ -49,8 +67,11 @@ import {
 	calculateKnownEventsTotal,
 	NORMALIZED_KNOWN_EVENT_TOTAL_DECIMALS,
 } from '#lib/domain/known-event-totals'
-import { TransactionFilters } from '#comps/TransactionFilters'
+import { TransactionFilters, TransferFilters } from '#comps/TransactionFilters'
 import { cx } from '#lib/css'
+import { useLiveFeed } from '#lib/use-live-feed'
+import { useAddressLive } from '#lib/use-address-live'
+import { mergeLiveRows } from '#lib/sse'
 import {
 	type AssetData,
 	type BalancesResponse,
@@ -74,16 +95,24 @@ import {
 	getContractInfo,
 } from '#lib/domain/contracts'
 import * as Tip20 from '#lib/domain/tip20'
+import { useErc20Metadata } from '#lib/erc20'
+import {
+	addressTabSchema,
+	resolveAddressTab,
+	resolveContractHashTab,
+	type AddressTab as TabValue,
+} from '#lib/domain/address-tabs'
 import { HexFormatter, PriceFormatter } from '#lib/formatting'
-import { useIsMounted, useMediaQuery } from '#lib/hooks'
+import { useCopy, useIsMounted, useMediaQuery } from '#lib/hooks'
 import {
 	buildAddressDescription,
 	buildAddressOgImageUrl,
+	buildZonePortalOgImageUrl,
 	buildTokenDescription,
 	buildTokenOgImageUrl,
 } from '#lib/og'
-import { withLoaderTiming } from '#lib/profiling'
 import { type HistoryResponse, historyQueryOptions } from '#lib/queries/account'
+import { validatorFeesQueryOptions } from '#lib/queries/validator-fees'
 import {
 	accountTransfersQueryOptions,
 	holdersQueryOptions,
@@ -92,6 +121,16 @@ import {
 import { areUsdPricedTokens } from '#lib/pricing'
 import { fetchAddressMetadata } from '#lib/server/address-metadata'
 import { getFeeTokenForChain } from '#lib/fee-token'
+import {
+	type ZonePortalActivityKind,
+	type ZonePortalBatchReference,
+	type ZonePortalOverview,
+	isZonePortalAddress,
+} from '#lib/domain/zones'
+import {
+	zonePortalActivityQueryOptions,
+	zonePortalOverviewQueryOptions,
+} from '#lib/zone-portal'
 import { getTempoChain, getWagmiConfig } from '#wagmi.config.ts'
 import type { EnrichedTransaction } from '#routes/api/address/history/$address.ts'
 import ChevronFirst from '~icons/lucide/chevron-first'
@@ -100,6 +139,8 @@ import ChevronLeft from '~icons/lucide/chevron-left'
 import ChevronRight from '~icons/lucide/chevron-right'
 import EyeIcon from '~icons/lucide/eye'
 import EyeOffIcon from '~icons/lucide/eye-off'
+import CopyIcon from '~icons/lucide/copy'
+import PlayIcon from '~icons/lucide/play'
 import XIcon from '~icons/lucide/x'
 
 type TokenMetadata = Actions.token.getMetadata.ReturnValue
@@ -110,24 +151,11 @@ const TEMPO_FEE_TOKEN = getFeeTokenForChain(TEMPO_CHAIN_ID)
 const defaultSearchValues = {
 	page: 1,
 	limit: 10,
-	tab: 'transactions',
 	live: false,
 } as const
 
 const ASSETS_PER_PAGE = 10
 const HISTORY_PAGE_SIZE = 10
-
-const allTabs = [
-	'transactions',
-	'holdings',
-	'transfers',
-	'holders',
-	'token',
-	'contract',
-	'interact',
-] as const
-
-type TabValue = (typeof allTabs)[number]
 
 type HistoryPosition = {
 	order: 'asc' | 'desc'
@@ -170,24 +198,12 @@ function getHistoryNavigation(
 	}
 }
 
-const TabSchema = z.prefault(
-	z.pipe(
-		z.string(),
-		z.transform((val): TabValue => {
-			if (val === 'history') return 'transactions'
-			if (val === 'assets') return 'holdings'
-			if (allTabs.includes(val as TabValue)) return val as TabValue
-			return 'transactions'
-		}),
-	),
-	defaultSearchValues.tab,
-)
-
 export const Route = createFileRoute('/_layout/address/$address')({
 	component: RouteComponent,
 	beforeLoad: ({ params, search }) => {
 		const normalized = normalizeSearchInput(params.address)
-		const page = search.tab === 'transactions' ? 1 : search.page
+		const tab = resolveAddressTab(search.tab, Tip20.isTip20Address(normalized))
+		const page = tab === 'transactions' ? 1 : search.page
 		if (normalized !== params.address || page !== search.page) {
 			throw redirect({
 				to: '/address/$address',
@@ -214,12 +230,17 @@ export const Route = createFileRoute('/_layout/address/$address')({
 			),
 			defaultSearchValues.limit,
 		),
-		tab: TabSchema,
+		tab: addressTabSchema,
+		source: z.catch(z.optional(z.string()), undefined),
+		line: z.catch(z.optional(z.coerce.number()), undefined),
+		end: z.catch(z.optional(z.coerce.number()), undefined),
 		live: z.prefault(z.boolean(), false),
-		a: z.optional(z.string()),
+		a: accountFilterSearchSchema,
 		status: z.optional(z.enum(['success', 'reverted'])),
 		dir: z.optional(z.enum(['sent', 'received'])),
+		transferDirection: z.optional(z.enum(['in', 'out'])),
 		period: z.optional(z.enum(['24h', '7d'])),
+		hideSubmitBatches: z.optional(z.boolean()),
 		voucher: z.optional(
 			z.object({
 				final_voucher: z.optional(z.string()),
@@ -245,98 +266,96 @@ export const Route = createFileRoute('/_layout/address/$address')({
 		dir,
 		period,
 	}),
-	loader: ({ deps: { page, limit, live, a }, params }) =>
-		withLoaderTiming('/_layout/address/$address', async () => {
-			const { address } = params
-			// Only throw notFound for truly invalid addresses
-			if (!Address.validate(address))
-				throw notFound({
-					routeId: rootRouteId,
-					data: { error: 'Invalid address format' },
-				})
+	loader: async ({ deps: { page, limit, live, a }, params }) => {
+		const { address } = params
+		// Only throw notFound for truly invalid addresses
+		if (!Address.validate(address))
+			throw notFound({
+				routeId: rootRouteId,
+				data: { error: 'Invalid address format' },
+			})
 
-			const offset = (page - 1) * limit
-			const account =
-				a && Address.validate(a) ? (a as Address.Address) : undefined
+		const offset = (page - 1) * limit
+		const account =
+			a && Address.validate(a) ? (a as Address.Address) : undefined
 
-			const knownContractInfo = getContractInfo(address)
-			const isKnownTokenAddress =
-				Tip20.isTip20Address(address) || knownContractInfo?.category === 'token'
+		const knownContractInfo = getContractInfo(address)
+		const isKnownTokenAddress =
+			Tip20.isTip20Address(address) || knownContractInfo?.category === 'token'
 
-			// Add timeout to prevent SSR from hanging on slow queries
-			const QUERY_TIMEOUT_MS = 3_000
-			const timeout = <T,>(
-				promise: Promise<T>,
-				ms: number,
-			): Promise<T | undefined> =>
-				Promise.race([
-					promise,
-					new Promise<undefined>((r) => setTimeout(() => r(undefined), ms)),
-				])
-
-			const config = getWagmiConfig()
-
-			// TIP-20 addresses have a reserved prefix, and legacy tokens are listed in
-			// the contract registry. Avoid probing arbitrary accounts for token methods:
-			// those calls run until the full timeout and block the initial Worker HTML.
-			const tokenMetadataPromise = isKnownTokenAddress
-				? timeout(
-						Actions.token
-							.getMetadata(config as Config, { token: address })
-							.catch(() => null),
-						QUERY_TIMEOUT_MS,
-					)
-				: Promise.resolve(null)
-			const tokenLogoURIPromise = isKnownTokenAddress
-				? timeout(
-						Tip20.fetchLogoURI(config as Config, address as Address.Address),
-						QUERY_TIMEOUT_MS,
-					)
-				: Promise.resolve(undefined)
-
-			const [tokenMetadata, tokenLogoURI] = await Promise.all([
-				tokenMetadataPromise,
-				tokenLogoURIPromise,
+		// Add timeout to prevent SSR from hanging on slow queries
+		const QUERY_TIMEOUT_MS = 3_000
+		const timeout = <T,>(
+			promise: Promise<T>,
+			ms: number,
+		): Promise<T | undefined> =>
+			Promise.race([
+				promise,
+				new Promise<undefined>((r) => setTimeout(() => r(undefined), ms)),
 			])
 
-			// Unknown account types are enriched after hydration by address metadata.
-			// A bytecode RPC here would put that enrichment back on the critical path.
-			const accountType = (
-				knownContractInfo ? 'contract' : 'empty'
-			) as AccountType
+		const config = getWagmiConfig()
 
-			// check if it's a known contract from our registry
-			const contractInfo = knownContractInfo
-			const isKnownToken = isKnownTokenAddress
-			const isToken =
-				isKnownToken || (tokenMetadata !== null && tokenMetadata !== undefined)
-			const contractSource: ContractSource | undefined = undefined
-			// History is fetched in the browser. A Worker self-fetch here reaches the
-			// timeout and delays the entire HTML response.
-			const transactionsData: HistoryResponse | undefined = undefined
-			const balancesData: BalancesResponse | undefined = undefined
-			const ogMeta:
-				| Awaited<ReturnType<typeof fetchAddressMetadata>>
-				| undefined = undefined
+		// TIP-20 addresses have a reserved prefix, and legacy tokens are listed in
+		// the contract registry. Avoid probing arbitrary accounts for token methods:
+		// those calls run until the full timeout and block the initial Worker HTML.
+		const tokenMetadataPromise = isKnownTokenAddress
+			? timeout(
+					Actions.token
+						.getMetadata(config as Config, { token: address })
+						.catch(() => null),
+					QUERY_TIMEOUT_MS,
+				)
+			: Promise.resolve(null)
+		const tokenLogoURIPromise = isKnownTokenAddress
+			? timeout(
+					Tip20.fetchLogoURI(config as Config, address as Address.Address),
+					QUERY_TIMEOUT_MS,
+				)
+			: Promise.resolve(undefined)
 
-			return {
-				live,
-				address,
-				page,
-				limit,
-				offset,
-				account,
-				accountType,
-				isToken,
-				tokenMetadata,
-				tokenLogoURI,
-				contractInfo,
-				contractSource,
-				transactionsData,
-				balancesData,
-				ogMeta,
-			}
-		}),
+		const [tokenMetadata, tokenLogoURI] = await Promise.all([
+			tokenMetadataPromise,
+			tokenLogoURIPromise,
+		])
+
+		// Unknown account types are enriched after hydration by address metadata.
+		// A bytecode RPC here would put that enrichment back on the critical path.
+		const accountType = (
+			knownContractInfo ? 'contract' : 'empty'
+		) as AccountType
+
+		// check if it's a known contract from our registry
+		const contractInfo = knownContractInfo
+		const isKnownToken = isKnownTokenAddress
+		const isToken =
+			isKnownToken || (tokenMetadata !== null && tokenMetadata !== undefined)
+		const contractSource: ContractSource | undefined = undefined
+		// History is fetched in the browser. A Worker self-fetch here reaches the
+		// timeout and delays the entire HTML response.
+		const transactionsData: HistoryResponse | undefined = undefined
+		const balancesData: BalancesResponse | undefined = undefined
+		const ogMeta: Awaited<ReturnType<typeof fetchAddressMetadata>> | undefined =
+			undefined
+
+		return {
+			live,
+			address,
+			page,
+			limit,
+			offset,
+			account,
+			accountType,
+			isToken,
+			tokenMetadata,
+			tokenLogoURI,
+			contractInfo,
+			contractSource,
+			transactionsData,
+			balancesData,
+			ogMeta,
+		}
+	},
 	head: ({ params, loaderData }) => {
 		// Never retry timed-out enrichment while generating metadata. The head
 		// must be available with the initial response; richer data can load in
@@ -352,7 +371,9 @@ export const Route = createFileRoute('/_layout/address/$address')({
 				: accountType === 'account'
 					? 'Account'
 					: 'Address'
-		const title = `${label} ${HexFormatter.truncate(params.address as Hex.Hex)} ⋅ Tempo Explorer`
+		const contractInfo = loaderData?.contractInfo
+		const contractName = !isToken ? contractInfo?.name : undefined
+		const title = `${contractName ?? `${label} ${HexFormatter.truncate(params.address as Hex.Hex)}`} ⋅ Tempo Explorer`
 
 		let description: string
 		let ogImageUrl: string
@@ -391,25 +412,21 @@ export const Route = createFileRoute('/_layout/address/$address')({
 				holders: undefined,
 				created: undefined,
 			})
+		} else if (isZonePortalAddress(params.address as Address.Address)) {
+			description =
+				'View Zone Portal deposits, withdrawals, batches, and token balances on Tempo Explorer.'
+			ogImageUrl = buildZonePortalOgImageUrl(params.address)
 		} else {
-			const txCount = 0
-			let lastActive: string | undefined
-			let created: string | undefined
-			const holdings = '—'
-
-			description = buildAddressDescription(
-				{ holdings, txCount },
-				params.address,
-			)
+			// Activity and balances load after hydration. Missing data is not zero.
+			description = contractInfo?.description
+				? `${contractInfo.description}. View contract activity on Tempo Explorer.`
+				: buildAddressDescription(null, params.address)
 
 			ogImageUrl = buildAddressOgImageUrl({
 				address: params.address,
-				holdings,
-				txCount,
 				accountType,
-				lastActive,
-				created,
-				contractName: loaderData?.contractInfo?.name,
+				contractName: contractInfo?.name,
+				contractDescription: contractInfo?.description,
 			})
 		}
 
@@ -417,6 +434,7 @@ export const Route = createFileRoute('/_layout/address/$address')({
 			title,
 			meta: [
 				{ title },
+				{ name: 'description', content: description },
 				{ property: 'og:title', content: title },
 				{ property: 'og:description', content: description },
 				{ name: 'twitter:description', content: description },
@@ -435,12 +453,29 @@ function RouteComponent() {
 	const navigate = useNavigate()
 	const location = useLocation()
 	const { address } = Route.useParams()
-	const { page, cursor, order, tab, live, limit, status, dir, period } =
-		Route.useSearch()
+	const {
+		page,
+		cursor,
+		order,
+		tab: requestedTab,
+		source,
+		line,
+		live,
+		limit,
+		status,
+		dir,
+		period,
+		hideSubmitBatches: hideSubmitBatchesSearch,
+		transferDirection,
+	} = Route.useSearch()
+	const tab = resolveAddressTab(
+		requestedTab ?? (source || line !== undefined ? 'contract' : undefined),
+		Tip20.isTip20Address(address),
+	)
 	const {
 		accountType,
-		isToken,
-		tokenMetadata,
+		isToken: isKnownToken,
+		tokenMetadata: initialTokenMetadata,
 		tokenLogoURI,
 		account,
 		contractInfo,
@@ -451,6 +486,31 @@ function RouteComponent() {
 
 	Address.assert(address)
 	const isMounted = useIsMounted()
+	const isTip20 = Tip20.isTip20Address(address)
+	// Recover token identity in the browser if the loader's bounded RPC timed out.
+	const { data: queriedTokenMetadata } = Hooks.token.useGetMetadata({
+		token: address,
+		query: {
+			enabled: isMounted && isKnownToken && !initialTokenMetadata,
+			initialData: initialTokenMetadata ?? undefined,
+		},
+	})
+	// Plain ERC-20s have no reserved prefix: probe their metadata after
+	// hydration and treat the address as a token when it answers.
+	const { data: erc20Metadata } = useErc20Metadata(address, {
+		enabled: isMounted && !isKnownToken,
+	})
+	const isToken = isKnownToken || erc20Metadata !== undefined
+	const tokenMetadata =
+		initialTokenMetadata ?? queriedTokenMetadata ?? erc20Metadata
+	const isZonePortal = isZonePortalAddress(address)
+	const hideSubmitBatches = isZonePortal && hideSubmitBatchesSearch === true
+	const [portalLive, setPortalLive] = React.useState(true)
+	const { data: zonePortalOverview } = useQuery({
+		...zonePortalOverviewQueryOptions(address),
+		enabled: isMounted && isZonePortal,
+		refetchInterval: portalLive ? 4_000 : false,
+	})
 
 	const { data: addressMetadata } = useQuery({
 		...addressMetadataQueryOptions(address),
@@ -474,8 +534,7 @@ function RouteComponent() {
 		if (!hash || !isContract || redirectedForHashRef.current === hash) return
 
 		// Determine which tab the hash should navigate to
-		const isSourceFileHash = hash.startsWith('source-file-')
-		const targetTab = isSourceFileHash ? 'contract' : 'interact'
+		const targetTab = resolveContractHashTab(hash)
 		if (tab === targetTab) return
 
 		redirectedForHashRef.current = hash
@@ -489,11 +548,20 @@ function RouteComponent() {
 	}, [hash, isContract, tab, navigate, limit])
 
 	// Build visible tabs based on address type
-	const isTip20 = Tip20.isTip20Address(address)
+	const { data: validatorFees } = useQuery({
+		...validatorFeesQueryOptions(address),
+		enabled: isMounted && !isTip20,
+	})
+	const hasUnclaimedFees = (validatorFees?.fees.length ?? 0) > 0
+	const vault = useVaultForAddress(address)
+	const isVault = !isTip20 && Boolean(vault)
 	const visibleTabs: TabValue[] = React.useMemo(() => {
-		const tabs: TabValue[] = ['transactions']
+		const tabs: TabValue[] = isZonePortal
+			? ['deposits', 'withdrawals', 'batches', 'transactions']
+			: ['transactions']
 		if (!isTip20) {
 			tabs.push('transfers', 'holdings')
+			if (hasUnclaimedFees) tabs.push('fees')
 		}
 		if (isToken) {
 			if (!tabs.includes('transfers')) tabs.push('transfers')
@@ -502,11 +570,14 @@ function RouteComponent() {
 		if (isTip20) {
 			tabs.push('token')
 		}
+		if (isVault) {
+			tabs.push('vault')
+		}
 		if (isContract) {
 			tabs.push('contract', 'interact')
 		}
 		return tabs
-	}, [isToken, isTip20, isContract])
+	}, [isToken, isTip20, isContract, isZonePortal, hasUnclaimedFees, isVault])
 
 	const setActiveSection = React.useCallback(
 		(newIndex: number) => {
@@ -543,6 +614,17 @@ function RouteComponent() {
 		[navigate],
 	)
 
+	const setTransferDirection = React.useCallback(
+		(direction: 'in' | 'out' | undefined) => {
+			navigate({
+				to: '.',
+				search: (prev) => ({ ...prev, page: 1, transferDirection: direction }),
+				resetScroll: false,
+			})
+		},
+		[navigate],
+	)
+
 	const setPeriod = React.useCallback(
 		(newPeriod: '24h' | '7d' | undefined) => {
 			navigate({
@@ -563,10 +645,43 @@ function RouteComponent() {
 	const activeSection =
 		visibleTabs.indexOf(tab) !== -1 ? visibleTabs.indexOf(tab) : 0
 
+	const setHideSubmitBatches = React.useCallback(
+		(hide: boolean) => {
+			navigate({
+				to: '.',
+				search: (prev) => ({
+					...prev,
+					page: 1,
+					cursor: undefined,
+					order: 'desc',
+					hideSubmitBatches: hide || undefined,
+				}),
+				resetScroll: false,
+			})
+		},
+		[navigate],
+	)
+	const clearTransactionFilters = React.useCallback(() => {
+		navigate({
+			to: '.',
+			search: (prev) => ({
+				...prev,
+				page: 1,
+				cursor: undefined,
+				order: 'desc',
+				status: undefined,
+				period: undefined,
+				hideSubmitBatches: undefined,
+			}),
+			resetScroll: false,
+		})
+	}, [navigate])
+
 	const { data: assetsData, isLoading: assetsLoading } = useBalancesData(
 		address,
 		balancesData,
-		isMounted && !isToken,
+		// Holdings is shown for every non-TIP-20 address, plain ERC-20s included.
+		isMounted && !isTip20,
 	)
 	// Warm the first page of every non-active tab once the active tab has had a
 	// moment to start loading, so switching tabs is instant. Runs once per
@@ -597,6 +712,7 @@ function RouteComponent() {
 							limit: HISTORY_PAGE_SIZE,
 							order,
 							status,
+							hideSubmitBatches,
 							include:
 								dir === 'sent'
 									? 'sent'
@@ -614,7 +730,12 @@ function RouteComponent() {
 					)
 				else
 					void queryClient.prefetchQuery(
-						accountTransfersQueryOptions({ account: address, page: 1, limit }),
+						accountTransfersQueryOptions({
+							account: address,
+							page: 1,
+							limit,
+							direction: transferDirection,
+						}),
 					)
 			}
 
@@ -623,7 +744,7 @@ function RouteComponent() {
 					holdersQueryOptions({ address, page: 1, limit }),
 				)
 
-			if (!isToken && tab !== 'holdings')
+			if (!isTip20 && tab !== 'holdings')
 				void queryClient.prefetchQuery(balancesQueryOptions(address))
 		}, 500)
 
@@ -632,13 +753,16 @@ function RouteComponent() {
 		account,
 		address,
 		dir,
+		transferDirection,
 		isToken,
 		limit,
 		period,
+		hideSubmitBatches,
 		queryClient,
 		status,
 		tab,
 		visibleTabs,
+		isTip20,
 	])
 
 	return (
@@ -657,6 +781,8 @@ function RouteComponent() {
 				isToken={isToken}
 				tokenMetadata={tokenMetadata}
 				tokenLogoURI={tokenLogoURI}
+				isZonePortal={isZonePortal}
+				zonePortalOverview={zonePortalOverview}
 			/>
 			<SectionsWrapper
 				address={address}
@@ -679,9 +805,19 @@ function RouteComponent() {
 				visibleTabs={visibleTabs}
 				status={status}
 				onStatusChange={setStatus}
+				transferDirection={transferDirection}
+				onTransferDirectionChange={setTransferDirection}
 				dir={dir}
 				period={period}
 				onPeriodChange={setPeriod}
+				hideSubmitBatches={hideSubmitBatches}
+				onHideSubmitBatchesChange={
+					isZonePortal ? setHideSubmitBatches : undefined
+				}
+				onClearTransactionFilters={clearTransactionFilters}
+				zonePortalOverview={zonePortalOverview}
+				portalLive={portalLive}
+				onPortalLiveChange={setPortalLive}
 			/>
 		</div>
 	)
@@ -705,18 +841,22 @@ function AccountCardWithTimestamps(props: {
 	assetsData: AssetData[]
 	accountType?: AccountType
 	addressMetadata?: Awaited<ReturnType<typeof fetchAddressMetadata>>
+	isZonePortal: boolean
 	isToken?: boolean
 	tokenLogoURI?: string | undefined
 	tokenMetadata?: TokenMetadata | null
+	zonePortalOverview?: ZonePortalOverview | undefined
 }) {
 	const {
 		address,
 		assetsData,
 		accountType: initialAccountType,
 		addressMetadata,
+		isZonePortal,
 		isToken,
 		tokenLogoURI,
 		tokenMetadata,
+		zonePortalOverview,
 	} = props
 
 	const resolvedAccountType = addressMetadata?.accountType ?? initialAccountType
@@ -737,6 +877,20 @@ function AccountCardWithTimestamps(props: {
 		[assetsData, isTokenListed],
 	)
 
+	if (isZonePortal)
+		return (
+			<ZonePortalCard
+				address={address}
+				createdTimestamp={createdTimestamp}
+				lastActivityTimestamp={
+					addressMetadata?.lastActivityTimestamp
+						? BigInt(addressMetadata.lastActivityTimestamp)
+						: undefined
+				}
+				overview={zonePortalOverview}
+			/>
+		)
+
 	return (
 		<div className="min-[800px]:self-start flex flex-col gap-2">
 			<AccountCard
@@ -753,19 +907,140 @@ function AccountCardWithTimestamps(props: {
 				isToken={isToken}
 				tokenLogoURI={tokenLogoURI}
 				tokenName={tokenMetadata?.name}
+				tokenSymbol={tokenMetadata?.symbol}
 				virtualAddressParts={virtualAddressParts}
 			/>
-			{isToken && (
+			{!isTip20 && <ValidatorCard address={address} />}
+			{/* Wallets need a symbol to add a token, and only TIP-20s can pay
+			fees, so a symbol-less ERC-20 has no wallet action to offer. */}
+			{isToken && (isTip20 || Boolean(tokenMetadata?.symbol)) && (
 				<ClientOnly fallback={null}>
 					<WalletActions
 						address={address}
 						symbol={tokenMetadata?.symbol}
 						decimals={tokenMetadata?.decimals}
 						image={Tip20.resolveLogoURI(tokenLogoURI)}
+						feeToken={isTip20}
 					/>
 				</ClientOnly>
 			)}
 		</div>
+	)
+}
+
+type ZonePortalCardProps = {
+	address: Address.Address
+	createdTimestamp?: bigint | undefined
+	lastActivityTimestamp?: bigint | undefined
+	overview?: ZonePortalOverview | undefined
+}
+
+function ZonePortalCard(props: ZonePortalCardProps): React.JSX.Element {
+	const { address, createdTimestamp, lastActivityTimestamp, overview } = props
+	const { copy, notifying } = useCopy()
+	const numberFormat = React.useMemo(() => new Intl.NumberFormat('en-US'), [])
+
+	return (
+		<InfoCard
+			title={<InfoCard.Title>Zone Portal</InfoCard.Title>}
+			className="min-[800px]:self-start min-[1240px]:w-[258px]"
+			sections={[
+				<button
+					key="address"
+					type="button"
+					onClick={() => copy(address)}
+					className="w-full text-left cursor-pointer press-down text-tertiary"
+					title={address}
+				>
+					<div className="flex items-center gap-[8px] mb-[8px]">
+						<span className="copy-13 font-normal">Address</span>
+						<div className="relative flex items-center">
+							<CopyIcon className="size-3" />
+							{notifying && (
+								<span className="absolute left-[calc(100%+8px)] copy-13 ">
+									copied
+								</span>
+							)}
+						</div>
+					</div>
+					<p className="max-w-[21ch] break-all font-mono copy-14 text-primary">
+						{address}
+					</p>
+				</button>,
+				<div key="balances" className="w-full min-w-0">
+					<p className="mb-2 copy-13 text-tertiary">Balances</p>
+					<div className="flex flex-col gap-2">
+						{overview ? (
+							overview.assets.map((asset) => (
+								<div
+									key={asset.address}
+									className="flex min-w-0 items-center justify-between gap-2 copy-13"
+								>
+									<Link
+										to="/token/$address"
+										params={{ address: asset.address }}
+										className="flex min-w-0 items-center gap-1.5 text-base-content-positive press-down"
+									>
+										<TokenIcon address={asset.address} name={asset.symbol} />
+										<span className="truncate">{asset.symbol}</span>
+									</Link>
+									<Amount.Base
+										value={BigInt(asset.balance)}
+										decimals={asset.decimals}
+										short
+										shortMaximumFractionDigits={6}
+									/>
+								</div>
+							))
+						) : (
+							<span className="copy-13 text-tertiary">…</span>
+						)}
+					</div>
+				</div>,
+				{
+					label: 'Deposits',
+					value: overview ? (
+						<span className="copy-13 text-primary">
+							{numberFormat.format(overview.counts.deposits)}
+						</span>
+					) : (
+						<span className="copy-13 text-tertiary">…</span>
+					),
+				},
+				{
+					label: 'Withdrawals',
+					value: overview ? (
+						<span className="copy-13 text-primary">
+							{numberFormat.format(overview.counts.withdrawals)}
+						</span>
+					) : (
+						<span className="copy-13 text-tertiary">…</span>
+					),
+				},
+				{
+					label: 'Active',
+					value: lastActivityTimestamp ? (
+						<RelativeTime
+							timestamp={lastActivityTimestamp}
+							className="copy-13 text-primary"
+						/>
+					) : (
+						<span className="copy-13 text-tertiary">…</span>
+					),
+				},
+				{
+					label: 'Created',
+					value: createdTimestamp ? (
+						<RelativeTime
+							timestamp={createdTimestamp}
+							className="copy-13 text-primary"
+						/>
+					) : (
+						<span className="copy-13 text-tertiary">…</span>
+					),
+				},
+			]}
+		/>
 	)
 }
 
@@ -790,9 +1065,17 @@ function SectionsWrapper(props: {
 	visibleTabs: TabValue[]
 	status?: 'success' | 'reverted' | undefined
 	onStatusChange: (status: 'success' | 'reverted' | undefined) => void
+	transferDirection?: 'in' | 'out' | undefined
+	onTransferDirectionChange: (direction: 'in' | 'out' | undefined) => void
 	dir?: 'sent' | 'received' | undefined
 	period?: '24h' | '7d' | undefined
 	onPeriodChange: (period: '24h' | '7d' | undefined) => void
+	hideSubmitBatches: boolean
+	onHideSubmitBatchesChange?: ((hide: boolean) => void) | undefined
+	onClearTransactionFilters: () => void
+	zonePortalOverview?: ZonePortalOverview | undefined
+	portalLive: boolean
+	onPortalLiveChange: (live: boolean) => void
 }) {
 	const {
 		address,
@@ -815,9 +1098,17 @@ function SectionsWrapper(props: {
 		visibleTabs,
 		status,
 		onStatusChange,
+		transferDirection,
+		onTransferDirectionChange,
 		dir,
 		period,
 		onPeriodChange,
+		hideSubmitBatches,
+		onHideSubmitBatchesChange,
+		onClearTransactionFilters,
+		zonePortalOverview,
+		portalLive,
+		onPortalLiveChange,
 	} = props
 	const { timeFormat, cycleTimeFormat, formatLabel } = useTimeFormat()
 	const { voucher } = Route.useSearch()
@@ -834,11 +1125,30 @@ function SectionsWrapper(props: {
 	// Track hydration to avoid SSR/client mismatch with query data
 	const isMounted = useIsMounted()
 
+	const vault = useVaultForAddress(address)
 	const isTransactionsTabActive = visibleTabs[activeSection] === 'transactions'
 	const isTransfersTabActive = visibleTabs[activeSection] === 'transfers'
 	const isHoldersTabActive = visibleTabs[activeSection] === 'holders'
 	const isContractTabActive = visibleTabs[activeSection] === 'contract'
+	const activeTab = visibleTabs[activeSection]
+	const isZonePortalTab =
+		activeTab === 'deposits' ||
+		activeTab === 'withdrawals' ||
+		activeTab === 'batches'
+	const zonePortalKind: ZonePortalActivityKind = isZonePortalTab
+		? activeTab
+		: 'deposits'
 	const queryClient = useQueryClient()
+	const zonePortalActivityQuery = useQuery({
+		...zonePortalActivityQueryOptions({
+			address,
+			kind: zonePortalKind,
+			page,
+			limit,
+		}),
+		enabled: isMounted && isZonePortalTab,
+		refetchInterval: portalLive && page === 1 ? 4_000 : false,
+	})
 
 	// Fetch readable source first so highlighting never delays contract data.
 	const contractSourceQuery = useQuery({
@@ -897,11 +1207,31 @@ function SectionsWrapper(props: {
 				order: position.order,
 				cursor: position.cursor,
 				status,
+				hideSubmitBatches,
 				include,
 				after,
 			}),
-		[address, after, include, status],
+		[address, after, include, status, hideSubmitBatches],
 	)
+
+	const feedScope = JSON.stringify([
+		address,
+		activeTab,
+		page,
+		cursor,
+		order,
+		limit,
+		account,
+		status,
+		transferDirection,
+		dir,
+		period,
+		hideSubmitBatches,
+	])
+	const feedEligible = isTransactionsTabActive
+		? isLatestHistoryPosition
+		: isTransfersTabActive && page === 1
+	const feed = useLiveFeed(feedScope, feedEligible, live)
 
 	const latestHistoryQuery = useQuery({
 		...historyQueryOptions({
@@ -909,18 +1239,16 @@ function SectionsWrapper(props: {
 			limit: HISTORY_PAGE_SIZE,
 			order: 'desc',
 			status,
+			hideSubmitBatches,
 			include,
 			after,
 		}),
 		initialData,
 		enabled:
 			isMounted && (isTransactionsTabActive || initialData !== undefined),
-		refetchInterval:
-			live && isTransactionsTabActive && isLatestHistoryPosition
-				? 4_000
-				: false,
-		refetchOnWindowFocus:
-			live && isTransactionsTabActive && isLatestHistoryPosition,
+		refetchInterval: false,
+		refetchOnWindowFocus: false,
+		retry: false,
 	})
 	const latestHistoryData = latestHistoryQuery.data
 	const total = latestHistoryData?.total ?? undefined
@@ -953,6 +1281,9 @@ function SectionsWrapper(props: {
 			account,
 		}),
 		enabled: isMounted && isToken && isTransfersTabActive,
+		refetchInterval: false,
+		refetchOnWindowFocus: false,
+		retry: false,
 	})
 
 	// Account-scoped transfers query (non-token addresses): the D2 split moved
@@ -968,9 +1299,169 @@ function SectionsWrapper(props: {
 			account: address,
 			page: transfersPage,
 			limit,
+			direction: transferDirection,
 		}),
 		enabled: isMounted && !isToken && isTransfersTabActive,
+		refetchInterval: false,
+		refetchOnWindowFocus: false,
+		retry: false,
 	})
+
+	const liveParams = new URLSearchParams({
+		kind: isTransactionsTabActive
+			? 'transactions'
+			: isToken
+				? 'token-transfers'
+				: 'account-transfers',
+		limit: String(isTransactionsTabActive ? HISTORY_PAGE_SIZE : limit),
+		include,
+	})
+	if (account) liveParams.set('account', account)
+	if (transferDirection) liveParams.set('direction', transferDirection)
+	if (status) liveParams.set('status', status)
+	if (after) liveParams.set('after', String(after))
+	if (hideSubmitBatches) liveParams.set('hideSubmitBatches', 'true')
+	const streamError = useAddressLive(
+		`/api/address/live/${address}?${liveParams}`,
+		feed.live,
+		(update) => {
+			if (update.kind === 'transactions') {
+				queryClient.setQueryData(
+					getHistoryQueryOptions({ order: 'desc' }).queryKey,
+					(old) => {
+						const transactions = mergeLiveRows(
+							old?.transactions ?? [],
+							update.rows,
+							(row) => row.hash,
+							HISTORY_PAGE_SIZE,
+						)
+						const last = transactions.at(-1)
+						const first = transactions[0]
+						const cursorFor = (row: typeof last) =>
+							row?.transactionIndex !== undefined
+								? btoa(
+										JSON.stringify([
+											Number(BigInt(row.blockNumber)),
+											row.transactionIndex,
+										]),
+									)
+								: undefined
+						return {
+							total: null,
+							limit: HISTORY_PAGE_SIZE,
+							nextCursor: null,
+							reverseCursor: null,
+							countCapped: false,
+							...old,
+							transactions,
+							error: null,
+							...(cursorFor(last)
+								? { nextCursor: cursorFor(last) ?? null }
+								: {}),
+							...(cursorFor(first)
+								? { reverseCursor: cursorFor(first) ?? null }
+								: {}),
+						}
+					},
+				)
+			} else if (update.kind === 'token-transfers') {
+				queryClient.setQueryData(
+					transfersQueryOptions({ address, page: 1, limit, account }).queryKey,
+					(old) => ({
+						total: 0,
+						totalCapped: true,
+						...old,
+						transfers: mergeLiveRows(
+							old?.transfers ?? [],
+							update.rows,
+							(row) => row.id,
+							limit,
+						),
+					}),
+				)
+			} else {
+				queryClient.setQueryData(
+					accountTransfersQueryOptions({
+						account: address,
+						page: 1,
+						limit,
+						direction: transferDirection,
+					}).queryKey,
+					(old) => ({
+						total: 0,
+						totalCapped: true,
+						...old,
+						transfers: mergeLiveRows(
+							old?.transfers ?? [],
+							update.rows,
+							(row) => row.id,
+							limit,
+						),
+					}),
+				)
+			}
+		},
+		feed.stop,
+	)
+
+	const feedError = isTransactionsTabActive
+		? latestHistoryQuery.error || latestHistoryQuery.data?.error
+		: isToken
+			? tokenTransfersError
+			: accountTransfersError
+	React.useEffect(() => {
+		if (feedError) feed.stop()
+	}, [feedError, feed.stop])
+
+	const liveControl = (
+		<>
+			{streamError && (
+				<span role="status" className="label-12 text-negative">
+					{streamError}
+				</span>
+			)}
+			<button
+				type="button"
+				aria-pressed={feed.live}
+				disabled={!feedEligible}
+				title={
+					!feedEligible
+						? 'Live updates are available on the newest page'
+						: feed.live
+							? 'Pause live updates'
+							: 'Start live updates; pauses when you leave this tab'
+				}
+				onClick={() => {
+					if (feed.live) {
+						feed.stop()
+						return
+					}
+					feed.start()
+				}}
+				className={cx(
+					'ml-auto flex shrink-0 items-center gap-[4px] px-[6px] py-[2px] rounded-[4px] label-12 font-medium press-down disabled:opacity-50 disabled:cursor-not-allowed',
+					feed.live
+						? 'bg-positive/10 text-positive hover:bg-positive/20'
+						: 'bg-base-alt text-tertiary hover:bg-base-alt/80',
+				)}
+			>
+				{feed.live ? (
+					<>
+						<span className="relative flex size-2">
+							<span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-positive opacity-75" />
+							<span className="relative inline-flex rounded-full size-2 bg-positive" />
+						</span>
+						<span>Live</span>
+					</>
+				) : (
+					<>
+						<PlayIcon className="size-3" />
+						<span>Paused</span>
+					</>
+				)}
+			</button>
+		</>
+	)
 
 	const {
 		transfers = [],
@@ -1003,6 +1494,7 @@ function SectionsWrapper(props: {
 		total: holdersTotal = 0,
 		totalCapped: holdersTotalCapped = false,
 		totalBalance: holdersTotalBalance = '0',
+		unavailable: holdersUnavailable = false,
 	} = holdersData ?? {}
 
 	// Only use after mount AND when the latest edge has loaded to avoid showing
@@ -1106,6 +1598,7 @@ function SectionsWrapper(props: {
 						account: address,
 						page: nextPage,
 						limit,
+						direction: transferDirection,
 					}),
 				)
 				.catch(() => {})
@@ -1113,6 +1606,7 @@ function SectionsWrapper(props: {
 	}, [
 		accountTransfersTotal,
 		accountTransfersTotalCapped,
+		transferDirection,
 		address,
 		isToken,
 		isTransfersTabActive,
@@ -1156,11 +1650,11 @@ function SectionsWrapper(props: {
 
 	// Show error state for API failures (instead of crashing the whole page)
 	const transactionsError = error ? (
-		<div className="rounded-[10px] bg-card-header p-4.5">
-			<p className="text-sm font-medium text-red-400">
+		<div className="rounded-body bg-card-header p-4.5">
+			<p className="copy-14 font-medium text-negative">
 				Failed to load transaction history
 			</p>
-			<p className="text-xs text-tertiary mt-1">
+			<p className="label-12 text-tertiary mt-1">
 				{error instanceof Error ? error.message : 'Unknown error'}
 			</p>
 		</div>
@@ -1202,13 +1696,13 @@ function SectionsWrapper(props: {
 		{ label: 'Transaction', align: 'start', minWidth: 120 },
 		{ label: 'From', align: 'start', minWidth: 140 },
 		{ label: 'To', align: 'start', minWidth: 140 },
-		{ label: 'Amount', align: 'end', minWidth: 100 },
+		{ label: 'Amount', align: 'end', width: 'max-content' },
 	]
 
 	const accountTransfersColumns: DataGrid.Column[] = [
 		...transfersColumns.slice(0, 4),
 		{ label: 'Asset', align: 'start', minWidth: 90 },
-		{ label: 'Amount', align: 'end', minWidth: 100 },
+		{ label: 'Amount', align: 'end', width: 'max-content' },
 	]
 
 	const holdersColumns: DataGrid.Column[] = [
@@ -1216,6 +1710,151 @@ function SectionsWrapper(props: {
 		{ label: 'Balance', align: 'end', minWidth: 120 },
 		{ label: 'Percentage', align: 'end', minWidth: 100 },
 	]
+
+	const zoneTimeColumn: DataGrid.Column = {
+		label: (
+			<TimeColumnHeader
+				label="Time"
+				formatLabel={formatLabel}
+				onCycle={cycleTimeFormat}
+				className="cursor-pointer text-secondary transition-colors hover:text-accent"
+			/>
+		),
+		align: 'start',
+		minWidth: 86,
+		width: '0.6fr',
+	}
+
+	const zoneDepositColumns: DataGrid.Column[] = [
+		zoneTimeColumn,
+		{ label: 'Asset / amount', align: 'start', minWidth: 160, width: '1.2fr' },
+		{ label: 'From', align: 'start', minWidth: 135, width: '1fr' },
+		{
+			label: (
+				<InfoColumnLabel
+					label="Processed in"
+					info="An accepted checkpoint proves that the zone has processed the deposit. Pending means no accepted checkpoint includes it yet."
+				/>
+			),
+			align: 'start',
+			minWidth: 145,
+			width: '0.8fr',
+		},
+		{ label: 'Hash', align: 'end', minWidth: 120, width: '1fr' },
+	]
+
+	const zoneWithdrawalColumns: DataGrid.Column[] = [
+		zoneTimeColumn,
+		{ label: 'Asset / amount', align: 'start', minWidth: 160, width: '1.2fr' },
+		{ label: 'Recipient', align: 'start', minWidth: 135, width: '1fr' },
+		{
+			label: (
+				<InfoColumnLabel
+					label="Processed in"
+					info="The checkpoint that proves this withdrawal and queues it for processing on Tempo."
+				/>
+			),
+			align: 'start',
+			minWidth: 145,
+			width: '0.8fr',
+		},
+		{ label: 'Hash', align: 'end', minWidth: 120, width: '1fr' },
+	]
+
+	const zoneBatchColumns: DataGrid.Column[] = [
+		{
+			label: (
+				<InfoColumnLabel
+					label="Checkpoint"
+					info="A checkpoint proves the zone’s execution progress to Tempo without publishing its transaction data."
+				/>
+			),
+			align: 'start',
+			minWidth: 115,
+			width: '0.7fr',
+		},
+		{
+			label: 'Transaction hash',
+			align: 'start',
+			minWidth: 180,
+			width: '1.5fr',
+		},
+		{
+			...zoneTimeColumn,
+			label: (
+				<TimeColumnHeader
+					label="Submitted"
+					formatLabel={formatLabel}
+					onCycle={cycleTimeFormat}
+					className="cursor-pointer text-secondary transition-colors hover:text-accent"
+				/>
+			),
+		},
+		{
+			label: (
+				<InfoColumnLabel
+					label="Deposits processed through"
+					info="The highest public deposit number processed by the zone and proven by this checkpoint. A dash means no deposit has been processed yet."
+				/>
+			),
+			align: 'start',
+			minWidth: 200,
+			width: '0.9fr',
+		},
+		{
+			label: (
+				<InfoColumnLabel
+					label="Withdrawal queue"
+					info="The queue index assigned when this checkpoint adds withdrawals. A dash means the checkpoint added none."
+				/>
+			),
+			align: 'start',
+			minWidth: 145,
+			width: '1.1fr',
+		},
+	]
+
+	const zonePortalContextual = (
+		<button
+			type="button"
+			onClick={() => onPortalLiveChange(!portalLive)}
+			className={cx(
+				'flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 label-12 font-medium press-down',
+				portalLive
+					? 'bg-positive/10 text-positive hover:bg-positive/20'
+					: 'bg-base-alt text-tertiary hover:bg-base-alt/80',
+			)}
+			title={portalLive ? 'Pause live updates' : 'Resume live updates'}
+		>
+			{portalLive ? (
+				<>
+					<span className="relative flex size-2">
+						<span className="absolute inline-flex size-full animate-ping rounded-full bg-positive opacity-75" />
+						<span className="relative inline-flex size-2 rounded-full bg-positive" />
+					</span>
+					<span>Live</span>
+				</>
+			) : (
+				<>
+					<PlayIcon className="size-3" />
+					<span>Paused</span>
+				</>
+			)}
+		</button>
+	)
+
+	const zonePortalError = zonePortalActivityQuery.error ? (
+		<div className="rounded-body bg-card-header p-4.5">
+			<p className="copy-14 font-medium text-negative">
+				Zone activity is temporarily unavailable
+			</p>
+			<p className="mt-1 label-12 text-tertiary">
+				{zonePortalActivityQuery.error instanceof Error
+					? zonePortalActivityQuery.error.message
+					: 'Unknown error'}
+			</p>
+		</div>
+	) : null
 
 	// Holdings uses local pagination state (decoupled from URL `page` param)
 	const [holdingsPage, setHoldingsPage] = React.useState(1)
@@ -1260,21 +1899,225 @@ function SectionsWrapper(props: {
 	// Build sections based on visible tabs
 	const sections = visibleTabs.map((tabName) => {
 		switch (tabName) {
+			case 'deposits': {
+				const deposits =
+					zonePortalActivityQuery.data?.items.filter(
+						(item) => item.kind === 'deposit',
+					) ?? []
+				const total = zonePortalActivityQuery.data?.total ?? 0
+				return {
+					title: 'Deposits',
+					totalItems: zonePortalOverview?.counts.deposits,
+					itemsLabel: 'deposits',
+					contextual: zonePortalContextual,
+					content: zonePortalError ?? (
+						<DataGrid
+							columns={{
+								stacked: zoneDepositColumns,
+								tabs: zoneDepositColumns,
+							}}
+							items={() =>
+								deposits.map((deposit) => ({
+									key: `${deposit.transactionHash}-${deposit.timestamp}`,
+									cells: [
+										<TimestampCell
+											key="time"
+											timestamp={BigInt(deposit.timestamp)}
+											link={`/tx/${deposit.transactionHash}`}
+											format={timeFormat}
+										/>,
+										<Amount
+											key="amount"
+											value={deposit.amount}
+											token={deposit.token}
+										/>,
+										<AddressCell
+											key="from"
+											address={deposit.sender}
+											label="From"
+										/>,
+										<ProcessedInBatchCell
+											key="batch"
+											batch={deposit.processedInBatch}
+											fallback="Pending"
+										/>,
+										<LinkedTransactionHash
+											key="hash"
+											hash={deposit.transactionHash}
+										/>,
+									],
+									link: {
+										href: `/tx/${deposit.transactionHash}`,
+										title: `View transaction ${deposit.transactionHash}`,
+									},
+								}))
+							}
+							totalItems={total}
+							displayCount={total}
+							page={page}
+							fetching={zonePortalActivityQuery.isFetching}
+							loading={zonePortalActivityQuery.isPending}
+							itemsLabel="deposits"
+							itemsPerPage={limit}
+							pagination="simple"
+							emptyState="No deposits found."
+						/>
+					),
+				}
+			}
+			case 'withdrawals': {
+				const withdrawals =
+					zonePortalActivityQuery.data?.items.filter(
+						(item) => item.kind === 'withdrawal',
+					) ?? []
+				const total = zonePortalActivityQuery.data?.total ?? 0
+				return {
+					title: 'Withdrawals',
+					totalItems: zonePortalOverview?.counts.withdrawals,
+					itemsLabel: 'withdrawals',
+					contextual: zonePortalContextual,
+					content: zonePortalError ?? (
+						<DataGrid
+							columns={{
+								stacked: zoneWithdrawalColumns,
+								tabs: zoneWithdrawalColumns,
+							}}
+							items={() =>
+								withdrawals.map((withdrawal) => ({
+									key: `${withdrawal.transactionHash}-${withdrawal.timestamp}`,
+									cells: [
+										<TimestampCell
+											key="time"
+											timestamp={BigInt(withdrawal.timestamp)}
+											link={`/tx/${withdrawal.transactionHash}`}
+											format={timeFormat}
+										/>,
+										<Amount
+											key="amount"
+											value={withdrawal.amount}
+											token={withdrawal.token}
+										/>,
+										<AddressCell
+											key="to"
+											address={withdrawal.recipient}
+											label="To"
+										/>,
+										<ProcessedInBatchCell
+											key="batch"
+											batch={withdrawal.processedInBatch}
+											fallback="—"
+										/>,
+										<LinkedTransactionHash
+											key="hash"
+											hash={withdrawal.transactionHash}
+										/>,
+									],
+									link: {
+										href: `/tx/${withdrawal.transactionHash}`,
+										title: `View transaction ${withdrawal.transactionHash}`,
+									},
+								}))
+							}
+							totalItems={total}
+							displayCount={total}
+							page={page}
+							fetching={zonePortalActivityQuery.isFetching}
+							loading={zonePortalActivityQuery.isPending}
+							itemsLabel="withdrawals"
+							itemsPerPage={limit}
+							pagination="simple"
+							emptyState="No withdrawals found."
+						/>
+					),
+				}
+			}
+			case 'batches': {
+				const batches =
+					zonePortalActivityQuery.data?.items.filter(
+						(item) => item.kind === 'batch',
+					) ?? []
+				const total = zonePortalActivityQuery.data?.total ?? 0
+				return {
+					title: 'Checkpoints',
+					totalItems: zonePortalOverview?.counts.batches,
+					itemsLabel: 'checkpoints',
+					contextual: zonePortalContextual,
+					content: zonePortalError ?? (
+						<DataGrid
+							columns={{
+								stacked: zoneBatchColumns,
+								tabs: zoneBatchColumns,
+							}}
+							items={() =>
+								batches.map((batch) => ({
+									key: batch.transactionHash,
+									cells: [
+										<span key="batch" className="whitespace-nowrap font-mono">
+											#{batch.batchIndex}
+										</span>,
+										<LinkedTransactionHash
+											key="hash"
+											hash={batch.transactionHash}
+											prominent
+										/>,
+										<TimestampCell
+											key="time"
+											timestamp={BigInt(batch.timestamp)}
+											link={`/tx/${batch.transactionHash}`}
+											format={timeFormat}
+										/>,
+										<span key="deposit" className="copy-13 text-primary">
+											{batch.lastProcessedDepositNumber === '0'
+												? '—'
+												: `#${batch.lastProcessedDepositNumber}`}
+										</span>,
+										<span key="queue" className="copy-13 text-primary">
+											{batch.withdrawalQueueIndex
+												? `#${batch.withdrawalQueueIndex}`
+												: '—'}
+										</span>,
+									],
+									link: {
+										href: `/tx/${batch.transactionHash}`,
+										title: `View transaction ${batch.transactionHash}`,
+									},
+								}))
+							}
+							totalItems={total}
+							displayCount={total}
+							page={page}
+							fetching={zonePortalActivityQuery.isFetching}
+							loading={zonePortalActivityQuery.isPending}
+							itemsLabel="checkpoints"
+							itemsPerPage={limit}
+							pagination="simple"
+							emptyState="No checkpoints found."
+						/>
+					),
+				}
+			}
 			case 'transactions':
 				return {
 					title: 'Transactions',
 					totalItems: totalTrxCount ?? transactions.length,
 					itemsLabel: 'transactions',
 					contextual: (
-						<TransactionFilters
-							status={status}
-							period={period}
-							onStatusChange={onStatusChange}
-							onPeriodChange={onPeriodChange}
-						/>
+						<div className="flex items-center gap-3">
+							<TransactionFilters
+								status={status}
+								period={period}
+								onStatusChange={onStatusChange}
+								onPeriodChange={onPeriodChange}
+								hideSubmitBatches={hideSubmitBatches}
+								onHideSubmitBatchesChange={onHideSubmitBatchesChange}
+								onClearAll={onClearTransactionFilters}
+							/>
+							{liveControl}
+						</div>
 					),
 					content: transactionsError ?? (
 						<DataGrid
+							liveScope={feed.live ? feedScope : undefined}
 							columns={{
 								stacked: transactionsColumns,
 								tabs: transactionsColumns,
@@ -1316,8 +2159,8 @@ function SectionsWrapper(props: {
 											/>,
 										],
 										link: {
-											href: `/receipt/${transaction.hash}`,
-											title: `View receipt ${transaction.hash}`,
+											href: `/tx/${transaction.hash}`,
+											title: `View transaction ${transaction.hash}`,
 										},
 										expanded: isVoucherMatch ? (
 											<StreamedPaymentReceipt
@@ -1338,7 +2181,7 @@ function SectionsWrapper(props: {
 							itemsLabel="transactions"
 							itemsPerPage={HISTORY_PAGE_SIZE}
 							pagination={
-								<div className="flex flex-col items-center sm:flex-row gap-[12px] border-t border-dashed border-card-border px-[16px] py-[12px] text-[12px] text-tertiary sm:justify-between">
+								<div className="flex flex-col items-center sm:flex-row gap-[12px] border-t border-solid border-card-border px-[16px] py-[12px] label-12 text-tertiary sm:justify-between">
 									<HistoryPagination
 										position={{ order: historyOrder, cursor }}
 										data={historyData}
@@ -1346,20 +2189,31 @@ function SectionsWrapper(props: {
 										pageCountCapped={countCapped}
 										onPrefetch={prefetchTransactionPages}
 									/>
-									<Pagination.Count
-										totalItems={totalTrxCount ?? 0}
-										itemsLabel="transactions"
-										loading={totalTrxCount === undefined}
-										capped={countCapped}
-									/>
+									{hideSubmitBatches ? (
+										<span>Submit batches hidden</span>
+									) : (
+										<Pagination.Count
+											totalItems={totalTrxCount ?? 0}
+											itemsLabel="transactions"
+											loading={totalTrxCount === undefined}
+											capped={countCapped}
+										/>
+									)}
 								</div>
 							}
 							emptyState={
-								status || dir || period
+								status || dir || period || hideSubmitBatches
 									? 'No matching transactions found.'
 									: 'No transactions found.'
 							}
 						/>
+					),
+				}
+			case 'fees':
+				return {
+					title: 'Unclaimed Fees',
+					content: (
+						<ValidatorFees address={address} active={activeTab === 'fees'} />
 					),
 				}
 			case 'holdings': {
@@ -1372,9 +2226,8 @@ function SectionsWrapper(props: {
 						<DataGrid
 							columns={{
 								stacked: [
-									{ label: 'Name', align: 'start', width: '1fr' },
-									{ label: 'Contract', align: 'start', width: '1fr' },
-									{ label: 'Amount', align: 'end', width: '0.5fr' },
+									{ label: 'Token', align: 'start', width: '1fr' },
+									{ label: 'Amount', align: 'end', width: '1fr' },
 								],
 								tabs: [
 									{ label: 'Name', align: 'start', width: '1fr' },
@@ -1391,13 +2244,16 @@ function SectionsWrapper(props: {
 										holdingsPage * ASSETS_PER_PAGE,
 									)
 									.map((asset) => ({
-										className: 'text-[13px]',
+										className: 'copy-13',
 										cells:
 											mode === 'stacked'
 												? [
-														<AssetName key="name" asset={asset} />,
-														<AssetContract key="contract" asset={asset} />,
-														<AssetAmount key="amount" asset={asset} />,
+														<AssetIdentity key="name" asset={asset} />,
+														<AssetAmount
+															key="amount"
+															asset={asset}
+															multiline
+														/>,
 													]
 												: [
 														<AssetName key="name" asset={asset} />,
@@ -1440,21 +2296,33 @@ function SectionsWrapper(props: {
 				}
 			}
 			case 'transfers': {
+				const filters = !isToken && (
+					<TransferFilters
+						direction={transferDirection}
+						onDirectionChange={onTransferDirectionChange}
+					/>
+				)
 				if (transfersError) {
 					return {
 						title: 'Transfers',
 						itemsLabel: 'transfers',
+						contextual: (
+							<div className="flex items-center gap-3">
+								{filters}
+								{liveControl}
+							</div>
+						),
 						content: (
-							<div className="rounded-[10px] bg-card-header p-4.5">
-								<p className="text-sm font-medium text-red-400">
+							<div className="rounded-body bg-card-header p-4.5">
+								<p className="copy-14 font-medium text-negative">
 									Transfers are temporarily unavailable
 								</p>
-								<p className="mt-1 text-xs text-tertiary">
-									The Tempo API could not complete this request.
+								<p className="mt-1 label-12 text-tertiary">
+									The indexer could not complete this request.
 								</p>
 								<button
 									type="button"
-									className="mt-3 rounded-[6px] bg-distinct px-3 py-1.5 text-xs text-primary transition-colors hover:bg-base-alt"
+									className="mt-3 rounded-body bg-distinct px-3 py-1.5 label-12 text-primary transition-colors hover:bg-base-alt"
 									onClick={() => void refetchActiveTransfers()}
 								>
 									Try again
@@ -1475,8 +2343,15 @@ function SectionsWrapper(props: {
 							accountTransfersData &&
 							(accountTotalCapped ? '10k+' : accountTotal),
 						itemsLabel: 'transfers',
+						contextual: (
+							<div className="flex items-center gap-3">
+								{filters}
+								{liveControl}
+							</div>
+						),
 						content: (
 							<DataGrid
+								liveScope={feed.live ? feedScope : undefined}
 								columns={{
 									stacked: accountTransfersColumns,
 									tabs: accountTransfersColumns,
@@ -1504,11 +2379,12 @@ function SectionsWrapper(props: {
 														: ('in' as const)
 
 											return {
+												key: transfer.id,
 												cells: [
 													<TimestampCell
 														key="time"
 														timestamp={timestamp}
-														link={`/receipt/${transfer.transactionHash}`}
+														link={`/tx/${transfer.transactionHash}`}
 														format={timeFormat}
 													/>,
 													<TransactionCell
@@ -1531,7 +2407,7 @@ function SectionsWrapper(props: {
 														params={{ address: transfer.token.address }}
 														title={transfer.token.address}
 														preload="intent"
-														className="flex items-center gap-[6px] text-[12px] text-primary hover:text-accent transition-colors press-down"
+														className="flex items-center gap-[6px] label-12 text-primary hover:text-accent transition-colors press-down"
 													>
 														<TokenIcon address={transfer.token.address} />
 														<span>
@@ -1555,8 +2431,8 @@ function SectionsWrapper(props: {
 													/>,
 												],
 												link: {
-													href: `/receipt/${transfer.transactionHash}`,
-													title: `View receipt ${transfer.transactionHash}`,
+													href: `/tx/${transfer.transactionHash}`,
+													title: `View transaction ${transfer.transactionHash}`,
 												},
 											}
 										},
@@ -1582,11 +2458,17 @@ function SectionsWrapper(props: {
 					totalItems:
 						transfersData && (transfersTotalCapped ? '100k+' : transfersTotal),
 					itemsLabel: 'transfers',
-					contextual: account && (
-						<FilterIndicator account={account} tokenAddress={address} />
+					contextual: (
+						<div className="flex items-center gap-3">
+							{account && (
+								<FilterIndicator account={account} tokenAddress={address} />
+							)}
+							{liveControl}
+						</div>
 					),
 					content: (
 						<DataGrid
+							liveScope={feed.live ? feedScope : undefined}
 							columns={{
 								stacked: transfersColumns,
 								tabs: transfersColumns,
@@ -1601,11 +2483,12 @@ function SectionsWrapper(props: {
 								})
 
 								return validTransfers.map(({ transfer, timestamp, value }) => ({
+									key: transfer.id,
 									cells: [
 										<TimestampCell
 											key="time"
 											timestamp={timestamp}
-											link={`/receipt/${transfer.transactionHash}`}
+											link={`/tx/${transfer.transactionHash}`}
 											format={timeFormat}
 										/>,
 										<TransactionCell
@@ -1633,8 +2516,8 @@ function SectionsWrapper(props: {
 										/>,
 									],
 									link: {
-										href: `/receipt/${transfer.transactionHash}`,
-										title: `View receipt ${transfer.transactionHash}`,
+										href: `/tx/${transfer.transactionHash}`,
+										title: `View transaction ${transfer.transactionHash}`,
 									},
 								}))
 							}}
@@ -1657,7 +2540,11 @@ function SectionsWrapper(props: {
 				return {
 					title: 'Holders',
 					totalItems:
-						holdersData && (holdersTotalCapped ? '100k+' : holdersTotal),
+						holdersData && !holdersUnavailable
+							? holdersTotalCapped
+								? '100k+'
+								: holdersTotal
+							: undefined,
 					itemsLabel: 'holders',
 					content: (
 						<DataGrid
@@ -1688,10 +2575,7 @@ function SectionsWrapper(props: {
 												balance={holder.balance}
 												decimals={tokenMetadata?.decimals}
 											/>,
-											<span
-												key="percentage"
-												className="text-[12px] text-primary"
-											>
+											<span key="percentage" className="label-12 text-primary">
 												{percentage.toFixed(2)}%
 											</span>,
 										],
@@ -1712,7 +2596,11 @@ function SectionsWrapper(props: {
 							itemsPerPage={limit}
 							pagination="simple"
 							onPrefetchNextPage={prefetchHoldersNextPage}
-							emptyState="No holders found."
+							emptyState={
+								holdersUnavailable
+									? "Holders are unavailable: this token's balances can't be rebuilt from its transfer history."
+									: 'No holders found.'
+							}
 						/>
 					),
 				}
@@ -1722,6 +2610,16 @@ function SectionsWrapper(props: {
 					totalItems: 0,
 					itemsLabel: 'items',
 					content: <Tip20TokenTabContent address={address} />,
+				}
+			case 'vault':
+				return {
+					title: 'Vault',
+					totalItems: 0,
+					itemsLabel: 'items',
+					contextual: vault ? <VaultPageLink vault={vault} /> : null,
+					content: vault ? (
+						<VaultTabContent vault={vault} address={address} />
+					) : null,
 				}
 			case 'contract':
 				return {
@@ -1772,11 +2670,94 @@ function SectionsWrapper(props: {
 
 	return (
 		<Sections
+			key={address}
 			mode={mode}
 			sections={sections}
+			defaultExpandedSection={
+				Tip20.isTip20Address(address)
+					? sections[activeSection]?.title
+					: undefined
+			}
 			activeSection={activeSection}
 			onSectionChange={onSectionChange}
 		/>
+	)
+}
+
+type InfoColumnLabelProps = { label: string; info: string }
+
+function InfoColumnLabel(props: InfoColumnLabelProps): React.JSX.Element {
+	return (
+		<span className="inline-flex items-center gap-1">
+			<span>{props.label}</span>
+			<span
+				className="cursor-help label-12 text-tertiary"
+				title={props.info}
+				role="img"
+				aria-label={props.info}
+			>
+				ⓘ
+			</span>
+		</span>
+	)
+}
+
+type ProcessedInBatchCellProps = {
+	batch: ZonePortalBatchReference | null
+	fallback: string
+}
+
+function ProcessedInBatchCell(
+	props: ProcessedInBatchCellProps,
+): React.JSX.Element {
+	if (!props.batch) {
+		return (
+			<span className="whitespace-nowrap copy-13 text-tertiary">
+				{props.fallback}
+			</span>
+		)
+	}
+
+	return (
+		<span className="whitespace-nowrap copy-13">
+			Checkpoint{' '}
+			<Link
+				to="/tx/$hash"
+				params={{ hash: props.batch.transactionHash }}
+				preload="intent"
+				className="text-accent transition-colors hover:text-accent/80 press-down"
+				title={`View checkpoint #${props.batch.index}`}
+			>
+				#{props.batch.index}
+			</Link>
+		</span>
+	)
+}
+
+type LinkedTransactionHashProps = { hash: Hex.Hex; prominent?: boolean }
+
+function LinkedTransactionHash(
+	props: LinkedTransactionHashProps,
+): React.JSX.Element {
+	return (
+		<Link
+			to="/tx/$hash"
+			params={{ hash: props.hash }}
+			preload="intent"
+			className={cx(
+				'w-full copy-13 press-down',
+				props.prominent
+					? 'font-medium text-accent transition-colors hover:text-accent/80'
+					: 'text-tertiary',
+			)}
+			title={props.hash}
+		>
+			<Midcut
+				value={props.hash}
+				prefix="0x"
+				align={props.prominent ? 'start' : 'end'}
+			/>
+		</Link>
 	)
 }
 
@@ -1790,7 +2771,7 @@ function TransactionTimeCell(props: {
 	return (
 		<TransactionTimestamp
 			timestamp={BigInt(safeTimestamp)}
-			link={`/receipt/${hash}`}
+			link={`/tx/${hash}`}
 			format={format}
 		/>
 	)
@@ -1907,6 +2888,12 @@ function TransactionTotalCell(props: { transaction: EnrichedTransaction }) {
 
 	const normalizedDecimals = NORMALIZED_KNOWN_EVENT_TOTAL_DECIMALS
 	const totalValue = calculateKnownEventsTotal(events)
+	if (totalValue === undefined || !showUsdPrefix)
+		return (
+			<span className="text-tertiary" title="No comparable payment total">
+				—
+			</span>
+		)
 
 	if (totalValue === 0n) {
 		const value = transaction.value
@@ -1935,81 +2922,6 @@ function TransactionTotalCell(props: { transaction: EnrichedTransaction }) {
 	)
 }
 
-function AssetName(props: { asset: AssetData }) {
-	const { asset } = props
-	if (!asset.metadata?.name) return <span className="text-tertiary">…</span>
-	return (
-		<span className="inline-flex items-center gap-2 min-w-0">
-			<TokenIcon
-				address={asset.address}
-				name={asset.metadata?.name}
-				className="size-5 shrink-0"
-			/>
-			<span className="truncate">{asset.metadata.name}</span>
-		</span>
-	)
-}
-
-function AssetSymbol(props: { asset: AssetData }) {
-	const { asset } = props
-	if (!asset.metadata?.symbol) return <span className="text-tertiary">…</span>
-	return (
-		<Link
-			to="/token/$address"
-			params={{ address: asset.address }}
-			className="text-accent hover:underline press-down truncate"
-		>
-			{asset.metadata.symbol}
-		</Link>
-	)
-}
-
-function AssetContract(props: { asset: AssetData }) {
-	return (
-		<span className="text-accent">
-			{HexFormatter.truncate(props.asset.address, 10)}
-		</span>
-	)
-}
-
-function AssetCurrency(props: { asset: AssetData }) {
-	const { asset } = props
-	if (!asset.metadata?.currency) return <span className="text-tertiary">—</span>
-	return <span>{asset.metadata.currency}</span>
-}
-
-function AssetAmount(props: { asset: AssetData }) {
-	const { asset } = props
-	if (asset.metadata?.decimals === undefined || asset.balance === undefined)
-		return <span className="text-tertiary">…</span>
-	const formatted = formatUnits(asset.balance, asset.metadata.decimals)
-	const display = PriceFormatter.formatAmountFull(formatted)
-	return (
-		<span className="truncate" title={display}>
-			{display}
-		</span>
-	)
-}
-
-function AssetValue(props: { asset: AssetData }) {
-	const { asset } = props
-	const { isTokenListed } = useTokenListMembership()
-	if (asset.metadata?.currency !== 'USD')
-		return <span className="text-tertiary">—</span>
-	if (!isTokenListed(TEMPO_CHAIN_ID, asset.address))
-		return <span className="text-tertiary">—</span>
-	if (asset.metadata?.decimals === undefined || asset.balance === undefined)
-		return <span className="text-tertiary">…</span>
-	return (
-		<span>
-			{PriceFormatter.format(asset.balance, {
-				decimals: asset.metadata.decimals,
-				format: 'short',
-			})}
-		</span>
-	)
-}
-
 export function HistoryPagination(
 	props: HistoryPagination.Props,
 ): React.JSX.Element {
@@ -2027,7 +2939,7 @@ export function HistoryPagination(
 			? pageCount
 			: getHistoryStatePage(location.state)
 	const buttonClass = cx(
-		'rounded-full border border-base-border hover:bg-alt flex items-center justify-center cursor-pointer active:translate-y-[0.5px] aria-disabled:cursor-not-allowed aria-disabled:opacity-50 size-[24px] text-primary',
+		'rounded-button border border-base-border hover:bg-alt flex items-center justify-center cursor-pointer active:translate-y-[0.5px] aria-disabled:cursor-not-allowed aria-disabled:opacity-50 size-[24px] text-primary',
 	)
 
 	return (
@@ -2191,12 +3103,12 @@ function HoldingsFooter(props: {
 		onToggleShowAll,
 	} = props
 	const btnClass = cx(
-		'rounded-full border border-base-border hover:bg-alt flex items-center justify-center cursor-pointer active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-50 size-[24px] text-primary',
+		'rounded-button border border-base-border hover:bg-alt flex items-center justify-center cursor-pointer active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-50 size-[24px] text-primary',
 	)
 	return (
-		<div className="flex flex-col gap-0 border-t border-dashed border-card-border">
+		<div className="flex flex-col gap-0 border-t border-solid border-card-border">
 			{pages > 1 && (
-				<div className="flex flex-col items-center sm:flex-row gap-[12px] px-[16px] py-[12px] text-[12px] text-tertiary sm:justify-between">
+				<div className="flex flex-col items-center sm:flex-row gap-[12px] px-[16px] py-[12px] label-12 text-tertiary sm:justify-between">
 					<div className="flex items-center justify-center sm:justify-start gap-[6px]">
 						<button
 							type="button"
@@ -2251,8 +3163,8 @@ function HoldingsFooter(props: {
 			{hasUnlisted && (
 				<div
 					className={cx(
-						'flex items-center justify-center px-[16px] py-[10px] text-[12px]',
-						pages > 1 && 'border-t border-dashed border-card-border',
+						'flex items-center justify-center px-[16px] py-[10px] label-12',
+						pages > 1 && 'border-t border-solid border-card-border',
 					)}
 				>
 					<button
@@ -2286,7 +3198,7 @@ function FilterIndicator(props: {
 }) {
 	const { account, tokenAddress } = props
 	return (
-		<div className="flex items-center gap-2 text-[12px]">
+		<div className="flex items-center gap-2 label-12">
 			<span className="text-tertiary">Filtered:</span>
 			<Link
 				to="/address/$address"
@@ -2354,7 +3266,7 @@ function StreamedPaymentReceipt(props: {
 	const digits = String(packetCount).length
 
 	return (
-		<div className="pb-4 font-mono text-[13px]">
+		<div className="pb-4 font-sans copy-13">
 			{/* On-chain settlement — visually part of the main row */}
 			<div className="bg-base-alt -mx-[16px] px-[16px] py-[10px] border-b-2 border-base-border flex items-center">
 				<span
@@ -2363,7 +3275,7 @@ function StreamedPaymentReceipt(props: {
 				>
 					↓
 				</span>
-				<span className="text-[11px] text-accent shrink-0 w-[64px] italic">
+				<span className="label-12 text-accent shrink-0 w-[64px] italic">
 					on-chain
 				</span>
 				{transaction.knownEvents
@@ -2376,9 +3288,9 @@ function StreamedPaymentReceipt(props: {
 			</div>
 
 			{/* Off-chain section header */}
-			<div className="flex items-center gap-[8px] pt-[12px] pb-[6px] text-[11px] text-tertiary uppercase tracking-wider">
+			<div className="flex items-center gap-[8px] pt-[12px] pb-[6px] label-12 text-tertiary r">
 				<span>off-chain vouchers</span>
-				<span className="flex-1 border-t border-dashed border-distinct" />
+				<span className="flex-1 border-t border-solid border-distinct" />
 				<span>{packetCount.toLocaleString()}</span>
 			</div>
 
@@ -2392,7 +3304,7 @@ function StreamedPaymentReceipt(props: {
 				return (
 					<div
 						key={i}
-						className="flex items-center py-[9px] border-b border-dashed border-distinct"
+						className="flex items-center py-[9px] border-b border-solid border-distinct"
 					>
 						<span
 							className="text-tertiary tabular-nums text-right shrink-0 mr-[10px]"
@@ -2400,7 +3312,7 @@ function StreamedPaymentReceipt(props: {
 						>
 							{i + 1}
 						</span>
-						<span className="text-[11px] text-tertiary shrink-0 w-[64px]">
+						<span className="label-12 text-tertiary shrink-0 w-[64px]">
 							off-chain
 						</span>
 						<div className="flex items-center gap-[10px] ml-auto">

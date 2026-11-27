@@ -4,7 +4,7 @@ import { toEventSelector } from 'viem'
 import { getBlock, getTransaction, getTransactionReceipt } from 'wagmi/actions'
 import {
 	type Authorization,
-	decodeKnownCall,
+	decodeKnownTransactionCalls,
 	parseAuthorizationEvents,
 	parseKnownEvent,
 	isStreamChannelAddress,
@@ -13,7 +13,10 @@ import {
 } from '#lib/domain/known-events'
 import { getFeeBreakdown } from '#lib/domain/receipt'
 import * as Tip20 from '#lib/domain/tip20'
-import { getWagmiConfig } from '#wagmi.config.ts'
+import { propAmmShapesFromLogs } from '#lib/domain/propamm-shapes'
+import { withImmutableDataCache } from '#lib/server/immutable-data-cache'
+import { getTempoChain, getWagmiConfig } from '#wagmi.config.ts'
+import type { KeyAuthorization } from '#lib/domain/access-key'
 
 const transferTopic = toEventSelector(
 	'event Transfer(address indexed, address indexed, uint256)',
@@ -29,29 +32,55 @@ export function txQueryOptions(params: { hash: Hex.Hex }) {
 	})
 }
 
-async function fetchTxData(params: { hash: Hex.Hex }) {
+async function fetchTxDataUncached(params: { hash: Hex.Hex }) {
 	const config = getWagmiConfig()
 
 	const receipt = await getTransactionReceipt(config, { hash: params.hash })
 
 	// TODO: investigate & consider batch/multicall
-	const [block, transaction, getTokenMetadata] = await Promise.all([
-		getBlock(config, { blockHash: receipt.blockHash }),
-		getTransaction(config, { hash: receipt.transactionHash }),
-		Tip20.metadataFromLogs(receipt.logs),
-	])
+	const [block, transaction, getTokenMetadata, getPropAmmShape] =
+		await Promise.all([
+			getBlock(config, { blockHash: receipt.blockHash }),
+			getTransaction(config, { hash: receipt.transactionHash }),
+			Tip20.metadataFromLogs(receipt.logs, { chainId: getTempoChain().id }),
+			propAmmShapesFromLogs(
+				getTempoChain().id,
+				receipt.logs,
+				receipt.blockNumber,
+			),
+		])
 
 	const parsedEvents = parseKnownEvents(receipt, {
 		transaction,
 		getTokenMetadata,
+		chainId: getTempoChain().id,
+		getPropAmmShape,
 	})
+	// Wagmi's mixed-chain return type omits Tempo's formatted extension fields.
+	const keyAuthorization =
+		'keyAuthorization' in transaction
+			? (transaction.keyAuthorization as KeyAuthorization | null)
+			: undefined
+	const keyTokenMetadata: Record<
+		string,
+		Pick<Tip20.Metadata, 'decimals' | 'symbol'>
+	> = {}
+	await Promise.all(
+		(keyAuthorization?.limits ?? []).map(async ({ token }) => {
+			const metadata =
+				getTokenMetadata(token) ??
+				(await Tip20.metadataForTokens([token])
+					.then((getMetadata) => getMetadata(token))
+					.catch(() => undefined))
+			if (metadata)
+				keyTokenMetadata[token.toLowerCase()] = {
+					decimals: metadata.decimals,
+					symbol: metadata.symbol,
+				}
+		}),
+	)
 
-	// Try to decode known contract calls (e.g., validator precompile)
-	// Prioritize decoded calls over fee-only events since they're more descriptive
-	const knownCall =
-		transaction.to && transaction.input && transaction.input !== '0x'
-			? decodeKnownCall(transaction.to, transaction.input)
-			: null
+	const knownCalls = decodeKnownTransactionCalls(transaction, receipt.status)
 
 	// Parse EIP-7702 authorization list for delegate account events
 	const authorizationList =
@@ -60,12 +89,8 @@ async function fetchTxData(params: { hash: Hex.Hex }) {
 			: undefined
 	const authEvents = parseAuthorizationEvents(authorizationList)
 
-	// Build knownEvents: authorization events first, then decoded call, then parsed events
-	const knownEvents = [
-		...authEvents,
-		...(knownCall ? [knownCall] : []),
-		...parsedEvents.filter((e) => (knownCall ? e.type !== 'fee' : true)),
-	]
+	// Keep evidence separate until the shared description composer selects actions.
+	const knownEvents = [...authEvents, ...parsedEvents]
 
 	const feeBreakdown = getFeeBreakdown(receipt, { getTokenMetadata })
 
@@ -109,18 +134,31 @@ async function fetchTxData(params: { hash: Hex.Hex }) {
 
 		return parseKnownEvent(log, {
 			getTokenMetadata,
+			logs: receipt.logs,
+			chainId: getTempoChain().id,
+			getPropAmmShape,
 			streamChannelToken,
 		})
 	})
 
 	return {
 		block,
+		keyAuthorization,
+		keyTokenMetadata,
 		feeBreakdown,
+		knownCalls,
 		knownEvents,
 		knownEventsByLog,
 		receipt,
 		transaction,
 	}
+}
+
+async function fetchTxData(params: { hash: Hex.Hex }) {
+	return withImmutableDataCache({
+		key: `tx-detail:v2:${getTempoChain().id}:${params.hash.toLowerCase()}`,
+		load: () => fetchTxDataUncached(params),
+	})
 }
 
 export type TxData = Awaited<ReturnType<typeof fetchTxData>>

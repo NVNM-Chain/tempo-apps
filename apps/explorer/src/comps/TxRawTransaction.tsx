@@ -83,11 +83,11 @@ export namespace TxRawTransaction {
 				className={showBorder ? 'pt-[24px] border-t border-card-border' : ''}
 			>
 				<div className="flex items-center justify-between mb-[12px]">
-					<div className="text-primary font-sans text-[13px]">{title}</div>
+					<div className="text-primary font-sans copy-13">{title}</div>
 					<button
 						type="button"
 						onClick={() => copy(stringify(data))}
-						className="flex items-center gap-[6px] text-tertiary hover:text-secondary cursor-pointer press-down text-[11px]"
+						className="flex items-center gap-[6px] text-tertiary hover:text-secondary cursor-pointer press-down label-12"
 						title={`Copy ${title.toLowerCase()} data`}
 					>
 						{notifying ? (
@@ -128,7 +128,7 @@ export namespace TxRawTransaction {
 	const linkableFields: Record<string, (value: string) => string> = {
 		blockNumber: (v) => `/block/${v}`,
 		blockHash: (v) => `/block/${v}`,
-		hash: (v) => `/receipt/${v}`,
+		hash: (v) => `/tx/${v}`,
 		from: (v) => `/address/${v}`,
 		to: (v) => `/address/${v}`,
 		contractAddress: (v) => `/address/${v}`,

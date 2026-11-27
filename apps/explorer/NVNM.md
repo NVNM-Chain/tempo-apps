@@ -1,33 +1,38 @@
 # NVNM fork notes
 
-This branch (`nvnm`) turns Tempo's explorer into a **single-chain explorer for
-NVNM**. Tempo's own mainnet/testnet/devnet/nextfork are removed, not hidden.
+Each build serves **one NVNM chain**: `nvnm` (devnet), `nvnm-testnet`, or
+`nvnm-mainnet`. The header links to the separate explorer deployments; it does
+not change the chain served by the current deployment.
 
 ## What changed and why
 
 | Area | Change |
 |---|---|
-| `src/lib/chains.ts` | Only `nvnmDevnet` (chain **787222**). Spread from viem's `tempoDevnet` so Tempo's block/tx **formatters and serializers** are inherited — our blocks carry `mainBlockGeneralGasLimit`, `sharedGasLimit`, `timestampMillisPart` and transactions use the `0x76` envelope, so a bare `defineChain` would compile and then mis-parse everything. |
-| `src/lib/env.ts` | `TempoEnv` is now the single member `'nvnm'`. `normalizeTempoEnv` **throws** on an unrecognised value instead of silently falling back — upstream's fallback turned a typo into an explorer quietly showing another chain's data. |
-| `src/wagmi.config.ts` | One chain, and the **browser** RPC target no longer points at `proxy.tempo.xyz`, which has no route for 787222. Miss that and SSR renders correctly while every client-side query 404s after hydration. |
-| `src/lib/server/env.ts` | `tempoApiUrl` defaults to our self-hosted tapimo and is overridable via `TEMPO_API_URL`. `api.tempo.xyz` rejects 787222 with `chain_id_unsupported`. |
-| `src/lib/server/tempo-queries-provider.ts` | `TIDX_URL` override. The hosted API mounts tidx under `/v1/indexer`; a self-hosted tidx serves `/query` at its root. |
-| `src/lib/explorer-network.ts` | Switcher lists NVNM only. |
-| `src/lib/explorer-indexing.ts` | NVNM hosts; the internal devnet is `noindex`. |
-| `wrangler.json` | Single `env.nvnm`. It **must** declare the `browser` binding: wrangler unions bindings across envs when generating types, and omitting it makes `env.BROWSER` optional, which breaks `routes/_layout/receipt/$hash.tsx`. |
-| `package.json`, `scripts/*.sh` | `dev:nvnm` / `deploy:nvnm` only. |
+| `src/lib/chains.ts` | NVNM devnet (**787222**), testnet (**787223**), and mainnet (**7872**). Each inherits Tempo's block/transaction formatters and serializers from viem's `tempoDevnet`. |
+| `src/lib/env.ts` | `VITE_TEMPO_ENV` selects the chain at build time. An unrecognised value throws, and the request hostname cannot override the selection. |
+| `src/wagmi.config.ts` | Wallets and browser RPC queries use only the selected chain. |
+| `src/comps/ConnectWallet.tsx` | The wallet names the selected chain; testnet hides the Fund action because its RPC does not expose `tempo_fundAddress`. |
+| `src/lib/account.ts`, `src/lib/domain/contracts.ts` | The genesis token is nUSD, the only TIP-20 in every NVNM genesis; Tempo's genesis-token labels are gone. |
+| `src/routes/api/simulate.ts` | Simulations accept only the selected chain and use its RPC. |
+| `src/lib/server/*` | No Tempo API (tapimo), whose npm package ships only the client since 0.21.0: pages read the RPC and tidx. SQL double-quotes `"from"`/`"to"`, as the public indexer's WAF refuses ``SELECT `from` ``. |
+| `src/lib/server/tempo-queries-provider.ts` | Queries use the indexer's ClickHouse engine by default; testnet's default engine does not respond. |
+| `src/lib/explorer-network.ts` | Switcher links to the separate NVNM explorers. |
+| `src/lib/explorer-indexing.ts` | NVNM hosts; the internal devnet is `noindex`, mainnet is indexed. |
+| `wrangler.json` | A Cloudflare environment per network, each with its own route, indexer setting, rate-limit namespaces, and browser binding. |
+| `package.json`, `scripts/*.sh` | `dev:` / `deploy:` per env. |
 
 ## Running
 
 ```bash
 pnpm install
 pnpm --filter explorer check:types
-pnpm --filter explorer dev:nvnm     # NOT `dev` — see below
+pnpm --filter explorer dev:nvnm-testnet
 ```
 
-`dev` is an alias for `dev:nvnm` now, but **do not** rely on
-`VITE_TEMPO_ENV=… pnpm dev`: the per-env scripts set the variable inline and
-override anything from your shell.
+Alternatively, set `VITE_TEMPO_ENV=nvnm-testnet` in the environment or
+`apps/explorer/.env` and run `pnpm --filter explorer dev`. If unset, the
+network defaults to `nvnm`. A local `TIDX_URL` overrides the indexer in the
+selected Wrangler environment, so update or remove it when changing networks.
 
 ## Deploying
 
@@ -36,11 +41,29 @@ dropping `@cloudflare/vite-plugin` and shimming `env.BROWSER`, four rate-limiter
 bindings and `request.cf.asn`.
 
 ```bash
-pnpm --filter explorer deploy:nvnm
+pnpm --filter explorer deploy:nvnm           # scan.nvnm.canary.mantrachain.dev
+pnpm --filter explorer deploy:nvnm-testnet   # scan.nvnm.testnet.nvnmchain.io
+pnpm --filter explorer deploy:nvnm-mainnet   # scan.nvnm.mainnet.nvnmchain.io
 ```
 
-Its backing services (tidx, tapimo, Postgres, ClickHouse) are deployed to GKE
-from `NVNM-Chain/nvnm-explorer`.
+Each command builds the selected network before deploying it. You can also use
+`VITE_TEMPO_ENV=nvnm-testnet pnpm --filter explorer deploy`. If both
+`CLOUDFLARE_ENV` and `VITE_TEMPO_ENV` are set, they must match.
+
+For Cloudflare Workers Builds connected to this repository, use the repository
+root as the root directory, set the build variable `CLOUDFLARE_ENV` to the
+network (for example `nvnm-testnet`), and configure:
+
+- Build command: `pnpm --filter explorer ci:build`
+- Deploy command: `pnpm --filter explorer ci:deploy`
+
+Connect the corresponding Worker (`explorer-nvnm-testnet` for testnet).
+Cloudflare applies the network at build time, so rebuild to change it. GitHub
+Actions no longer deploys the explorer.
+
+`TIDX_URL` is configured per Worker in `wrangler.json`: testnet uses
+`https://indexer.nvnm.testnet.nvnmchain.io`, mainnet uses its public indexer,
+and devnet requires an explicit override for its internal indexer.
 
 ## Rebasing on upstream
 
@@ -54,7 +77,4 @@ day upstream publishes. Pin them on this branch.
 
 ## Version coupling
 
-tapimo `0.6.0` and `0.10.x` configure chains incompatibly, and this explorer's
-generated client must agree with the deployed API. Upstream gets that alignment
-free by deploying both together; we do not. Pin tidx, tapimo and this branch as
-a matched set.
+The queries name tidx's tables, so pin tidx and this branch as a matched set.

@@ -12,8 +12,9 @@ import {
 	getInputType,
 	getPlaceholder,
 	getWriteFunctions,
+	areWriteArgsFilled,
 	isArrayType,
-	parseInputValue,
+	parseWriteArgs,
 	type WriteFunction,
 } from '#lib/domain/contracts'
 import { useCopy, useCopyPermalink, usePermalinkHighlight } from '#lib/hooks'
@@ -71,9 +72,7 @@ export function ContractWriter(props: ContractWriter.Props) {
 			))}
 
 			{writeFunctions.length === 0 && (
-				<p className="text-[13px] text-tertiary">
-					No write functions available.
-				</p>
+				<p className="copy-13 text-tertiary">No write functions available.</p>
 			)}
 		</div>
 	)
@@ -105,7 +104,11 @@ function WriteContractFunction(props: {
 	fn: WriteFunction
 }) {
 	const { fn } = props
-	const [inputs, setInputs] = React.useState<Record<string, string>>({})
+	// Arguments are kept by position and the native amount on its own, so no
+	// parameter name (`value`, empty, missing or repeated) can share a field
+	// with another argument or with the amount sent.
+	const [args, setArgs] = React.useState<string[]>([])
+	const [nativeValue, setNativeValue] = React.useState('')
 	const { copy, notifying: copyNotifying } = useCopy({ timeout: 2_000 })
 
 	const selector = getFunctionSelector(fn)
@@ -118,31 +121,20 @@ function WriteContractFunction(props: {
 	)
 	usePermalinkHighlight({ elementId: fnId, onTargetChange: handleTargetChange })
 
-	const handleInputChange = (name: string, value: string) => {
-		setInputs((prev) => ({ ...prev, [name]: value }))
+	const handleArgChange = (index: number, value: string) => {
+		setArgs((prev) => {
+			const next = [...prev]
+			next[index] = value
+			return next
+		})
 	}
 
-	const allInputsFilled = (fn.inputs ?? []).every((input) => {
-		const value = inputs[input.name ?? '']
-		return value !== undefined && value.trim() !== ''
-	})
+	const allInputsFilled = areWriteArgsFilled(fn.inputs ?? [], args)
 
-	const parsedArgs = React.useMemo(() => {
-		if (!allInputsFilled) return { args: [], error: null }
-		try {
-			const args = (fn.inputs ?? []).map((input) => {
-				const value = inputs[input.name ?? ''] ?? ''
-				return parseInputValue(value, input.type)
-			})
-			return { args, error: null }
-		} catch (error) {
-			return {
-				args: [],
-				error:
-					error instanceof Error ? error.message : 'Failed to parse inputs',
-			}
-		}
-	}, [fn.inputs, inputs, allInputsFilled])
+	const parsedArgs = React.useMemo(
+		() => parseWriteArgs(fn.inputs ?? [], args),
+		[fn.inputs, args],
+	)
 
 	const handleCopyMethod = (event: React.MouseEvent) => {
 		event.stopPropagation()
@@ -191,22 +183,22 @@ function WriteContractFunction(props: {
 	return (
 		<div
 			id={fnId}
-			className="rounded-[8px] border border-card-border bg-surface overflow-hidden"
+			className="rounded-body border border-card-border bg-surface overflow-hidden"
 		>
 			<div className="w-full flex items-center justify-between">
 				<button
 					type="button"
 					onClick={() => hasInputs && setIsExpanded(!isExpanded)}
 					className={cx(
-						'flex-1 text-left flex items-center gap-[8px] h-full py-[10px] pl-[12px] focus-visible:-outline-offset-2! focus-visible:rounded-l-[8px]!',
+						'min-w-0 flex-1 text-left flex flex-wrap items-center gap-[8px] h-full py-[10px] pl-[12px] focus-visible:-outline-offset-2! focus-visible:rounded-l-body!',
 						hasInputs && 'cursor-pointer press-down',
 					)}
 				>
-					<span className="text-[12px] text-secondary font-mono">
+					<span className="min-w-0 label-12 text-secondary font-mono [overflow-wrap:anywhere]">
 						{getFunctionDisplaySignature(fn)}
 					</span>
 					{isPayable && (
-						<span className="text-[10px] px-[6px] py-[2px] rounded-[4px] bg-amber-500/20 text-amber-500 font-medium">
+						<span className="shrink-0 label-12 px-[6px] py-[2px] rounded-[4px] bg-warning-subtle text-warning font-medium">
 							payable
 						</span>
 					)}
@@ -255,7 +247,7 @@ function WriteContractFunction(props: {
 							to: props.address,
 							data: simulateCalldata,
 							...(connection.address ? { from: connection.address } : {}),
-							...(isPayable && inputs.value ? { value: inputs.value } : {}),
+							...(isPayable && nativeValue ? { value: nativeValue } : {}),
 						}}
 						title="Simulate this call without signing"
 						onClick={(event) => event.stopPropagation()}
@@ -288,8 +280,8 @@ function WriteContractFunction(props: {
 									functionName: fn.name,
 									args: parsedArgs.args,
 									value: isPayable
-										? inputs.value
-											? BigInt(inputs.value)
+										? nativeValue
+											? BigInt(nativeValue)
 											: undefined
 										: undefined,
 								})
@@ -302,6 +294,8 @@ function WriteContractFunction(props: {
 						<button
 							type="button"
 							className="text-secondary cursor-pointer press-down h-full py-[10px] pl-[4px] pr-[12px] focus-visible:-outline-offset-2!"
+							aria-label={isExpanded ? 'Collapse function' : 'Expand function'}
+							aria-expanded={isExpanded}
 							onClick={() => setIsExpanded(!isExpanded)}
 						>
 							<ChevronDownIcon
@@ -317,45 +311,43 @@ function WriteContractFunction(props: {
 					{isPayable && (
 						<FunctionInput
 							label="Value (wei)"
-							value={inputs.value}
+							value={nativeValue}
 							input={{ name: 'value', type: 'uint256' }}
-							onChange={(value) => handleInputChange('value', value)}
+							onChange={setNativeValue}
 						/>
 					)}
 
 					{fn.inputs.map((input, index) => (
 						<FunctionInput
-							key={input.name ?? index}
+							key={index}
 							input={input}
-							value={inputs[input.name ?? ''] ?? ''}
-							onChange={(value) =>
-								handleInputChange(input.name ?? `arg${index}`, value)
-							}
+							value={args[index] ?? ''}
+							onChange={(value) => handleArgChange(index, value)}
 						/>
 					))}
 
 					{parsedArgs.error && (
-						<div className="p-2.5 rounded-md bg-red-500/10 border border-red-500/20">
-							<p className="text-[12px] text-red-400">{parsedArgs.error}</p>
+						<div className="p-2.5 rounded-body bg-negative-subtle border border-negative">
+							<p className="label-12 text-negative">{parsedArgs.error}</p>
 						</div>
 					)}
 
 					{writeContract.error && (
-						<div className="p-2.5 rounded-md bg-red-500/10 border border-red-500/20">
-							<p className="text-[12px] text-red-400">
+						<div className="p-2.5 rounded-body bg-negative-subtle border border-negative">
+							<p className="label-12 text-negative">
 								{getWriteErrorMessage(writeContract.error)}
 							</p>
 						</div>
 					)}
 
 					{writeContract.isSuccess && writeContract.data && (
-						<div className="p-2.5 rounded-md bg-green-500/10 border border-green-500/20">
-							<p className="text-[12px] text-green-400 font-mono break-all">
+						<div className="p-2.5 rounded-body bg-positive-subtle border border-positive/20">
+							<p className="label-12 text-positive font-mono break-all">
 								tx:{' '}
 								<Link
-									to="/receipt/$hash"
+									to="/tx/$hash"
 									params={{ hash: writeContract.data }}
-									className="underline hover:text-green-300"
+									className="underline hover:text-positive"
 								>
 									{writeContract.data}
 								</Link>
@@ -391,7 +383,7 @@ function FunctionInput(props: {
 					onChange={(e) => onChange(e.target.checked ? 'true' : 'false')}
 					className="w-[16px] h-[16px] rounded border-base-border"
 				/>
-				<label htmlFor={inputId} className="text-[12px] text-primary font-mono">
+				<label htmlFor={inputId} className="label-12 text-primary font-sans">
 					{displayLabel} <span className="text-secondary">({input.type})</span>
 				</label>
 			</div>
@@ -401,7 +393,7 @@ function FunctionInput(props: {
 	if (inputType === 'textarea' || isArrayType(input.type)) {
 		return (
 			<div className="flex flex-col gap-[4px]">
-				<label htmlFor={inputId} className="text-[12px] text-primary font-mono">
+				<label htmlFor={inputId} className="label-12 text-primary font-sans">
 					{displayLabel} <span className="text-secondary">({input.type})</span>
 				</label>
 				<textarea
@@ -410,7 +402,7 @@ function FunctionInput(props: {
 					onChange={(e) => onChange(e.target.value)}
 					placeholder={placeholder}
 					rows={3}
-					className="w-full rounded-[6px] border border-base-border bg-alt px-[10px] py-[6px] text-[13px] text-primary placeholder:text-secondary focus-visible:outline-1 focus-visible:outline-accent resize-none font-mono"
+					className="w-full rounded-body border border-base-border bg-alt px-[10px] py-[6px] copy-13 text-primary placeholder:text-secondary focus-visible:outline-1 focus-visible:outline-focus resize-none font-mono"
 				/>
 			</div>
 		)
@@ -418,7 +410,7 @@ function FunctionInput(props: {
 
 	return (
 		<div className="flex flex-col gap-[4px]">
-			<label htmlFor={inputId} className="text-[12px] text-primary font-mono">
+			<label htmlFor={inputId} className="label-12 text-primary font-sans">
 				{displayLabel} <span className="text-secondary">({input.type})</span>
 			</label>
 			<input
@@ -430,7 +422,7 @@ function FunctionInput(props: {
 				id={inputId}
 				placeholder={placeholder}
 				onChange={(event) => onChange(event.target.value)}
-				className="w-full rounded-[6px] border border-base-border bg-alt px-[10px] py-[6px] text-[13px] text-primary placeholder:text-secondary focus-visible:outline-1 focus-visible:outline-accent font-mono"
+				className="w-full rounded-body border border-base-border bg-alt px-[10px] py-[6px] copy-13 text-primary placeholder:text-secondary focus-visible:outline-1 focus-visible:outline-focus font-mono"
 			/>
 		</div>
 	)

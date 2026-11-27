@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { KnownEvent } from '../src/lib/domain/known-events'
-import { calculateKnownEventsTotal } from '../src/lib/domain/known-event-totals'
+import {
+	calculateKnownEventsTotal,
+	hasNonAdditiveVaultActivity,
+} from '../src/lib/domain/known-event-totals'
 
 const senderAddress = `0x${'a'.repeat(40)}` as const
 const forwardedAddress = `0x${'b'.repeat(40)}` as const
@@ -24,6 +27,7 @@ function sendEvent(params: {
 					value: params.amount,
 					decimals: params.decimals ?? 6,
 					symbol: 'PathUSD',
+					currency: 'USD',
 				},
 			},
 			{ type: 'text', value: 'to' },
@@ -81,6 +85,7 @@ describe('calculateKnownEventsTotal', () => {
 						value: maxUint256,
 						decimals: 6,
 						symbol: 'PathUSD',
+						currency: 'USD',
 					},
 				},
 				{ type: 'account', value: recipientAddress },
@@ -94,7 +99,7 @@ describe('calculateKnownEventsTotal', () => {
 		expect(calculateKnownEventsTotal(events)).toBe(100n * 10n ** 18n)
 	})
 
-	it('defaults unknown-decimal transfer amounts to 18 decimals', () => {
+	it('does not guess a monetary total without currency and decimal metadata', () => {
 		const oneThousand = 1_000n * 10n ** 18n
 		const fiveHundredPointThree = 500_300_000_000_000_000_000n
 		const events = [
@@ -110,8 +115,119 @@ describe('calculateKnownEventsTotal', () => {
 			}),
 		]
 
-		expect(calculateKnownEventsTotal(events)).toBe(
-			1_500_300_000_000_000_000_000n,
+		expect(calculateKnownEventsTotal(events)).toBeUndefined()
+	})
+})
+
+describe('hasNonAdditiveVaultActivity', () => {
+	it('suppresses aggregate totals for composed Earn receipts', () => {
+		const earnDeposit: KnownEvent = {
+			type: 'earn private deposit',
+			parts: [
+				{ type: 'action', value: 'Deposit to Earn' },
+				{
+					type: 'amount',
+					value: { token: tokenAddress, value: 1_000_000n, decimals: 6 },
+				},
+			],
+		}
+
+		expect(hasNonAdditiveVaultActivity([earnDeposit])).toBe(true)
+		expect(
+			hasNonAdditiveVaultActivity([
+				{
+					type: 'earn reward root',
+					parts: [{ type: 'action', value: 'Publish Reward Allocation' }],
+				},
+			]),
+		).toBe(true)
+	})
+
+	it('preserves aggregate totals for ordinary transfers', () => {
+		expect(
+			hasNonAdditiveVaultActivity([
+				sendEvent({
+					from: senderAddress,
+					to: recipientAddress,
+					amount: 1_000_000n,
+				}),
+			]),
+		).toBe(false)
+	})
+})
+
+describe('payment total eligibility', () => {
+	const transfer = () =>
+		sendEvent({
+			from: senderAddress,
+			to: recipientAddress,
+			amount: 232_854_000n,
+		})
+	it('does not add MEENY quantities to USD transfers', () => {
+		const unpriced: KnownEvent = {
+			type: 'transfer',
+			parts: [
+				{
+					type: 'amount',
+					value: {
+						token: tokenAddress,
+						value: 38_495_077_61472146n,
+						decimals: 8,
+						symbol: 'MEENY',
+						currency: 'MEENY',
+					},
+				},
+			],
+		}
+		expect(calculateKnownEventsTotal([unpriced, transfer()])).toBeUndefined()
+		expect(calculateKnownEventsTotal([unpriced])).toBeUndefined()
+	})
+	it.each([
+		'swap',
+		'propamm swap',
+		'mint',
+		'burn',
+	])('does not describe %s activity as a payment total', (type) => {
+		expect(calculateKnownEventsTotal([{ ...transfer(), type }])).toBeUndefined()
+	})
+	it('does not sum different fiat currencies', () => {
+		const eur = transfer()
+		for (const part of eur.parts)
+			if (part.type === 'amount') part.value.currency = 'EUR'
+		expect(calculateKnownEventsTotal([transfer(), eur])).toBeUndefined()
+	})
+	it('recognizes bidirectional indexed transfers without a decoded swap', () => {
+		const sent = {
+			...transfer(),
+			note: [['Direction', { type: 'text', value: 'out' }]],
+		} as KnownEvent
+		const received = {
+			...transfer(),
+			note: [['Direction', { type: 'text', value: 'in' }]],
+		} as KnownEvent
+		expect(calculateKnownEventsTotal([sent, received])).toBeUndefined()
+	})
+	it('recognizes an exchange from net token flows without indexed activities', () => {
+		const received = sendEvent({
+			from: recipientAddress,
+			to: senderAddress,
+			amount: 230_000_000n,
+		})
+		for (const part of received.parts)
+			if (part.type === 'amount') part.value.token = `0x${'e'.repeat(40)}`
+		expect(calculateKnownEventsTotal([transfer(), received])).toBeUndefined()
+	})
+	it('normalizes decimals for comparable USD payment tokens', () => {
+		const second = sendEvent({
+			from: senderAddress,
+			to: recipientAddress,
+			amount: 2n * 10n ** 18n,
+			decimals: 18,
+		})
+		for (const part of second.parts)
+			if (part.type === 'amount') part.value.token = `0x${'e'.repeat(40)}`
+		expect(calculateKnownEventsTotal([transfer(), second])).toBe(
+			234_854n * 10n ** 15n,
 		)
 	})
 })

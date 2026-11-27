@@ -5,16 +5,12 @@ import {
 	pickTip20CreatedTimestamp,
 } from '#lib/server/address-metadata'
 
-const { getTransactions } = vi.hoisted(() => ({
-	getTransactions: vi.fn(),
-}))
+const { indexer } = vi.hoisted(() => ({ indexer: vi.fn() }))
 
-vi.mock('#lib/server/tempo-api', () => ({
-	api: { v1: { transactions: { $get: getTransactions } } },
-}))
+vi.mock('#lib/server/dex-indexer', () => ({ indexer }))
 
 beforeEach(() => {
-	getTransactions.mockReset()
+	vi.resetAllMocks()
 })
 
 describe('address metadata', () => {
@@ -46,56 +42,32 @@ describe('address metadata', () => {
 		})
 	})
 
-	it('loads activity boundaries and count from Tempo API transaction pages', async () => {
-		getTransactions
-			.mockResolvedValueOnce(
-				Response.json({
-					data: [
-						{
-							hash: '0xoldest',
-							sender: '0xsender',
-							timestamp: '2026-01-01T00:00:00.000Z',
-						},
-					],
-					meta: { totalCount: 3 },
-					nextCursor: null,
-				}),
-			)
-			.mockResolvedValueOnce(
-				Response.json({
-					data: [{ timestamp: '2026-01-03T00:00:00.000Z' }],
-					nextCursor: null,
-				}),
-			)
-
-		await expect(
-			fetchAddressTxMetadata(
-				4217,
-				'0x1111111111111111111111111111111111111111',
-			),
-		).resolves.toEqual({
+	it('loads activity boundaries and count from tidx', async () => {
+		indexer.mockImplementation(async (_chainId: number, sql: string) => {
+			if (sql.includes('count()')) return [{ n: 3 }]
+			return sql.includes('DESC')
+				? [{ tx_hash: '0xnewest', from: '0xsender', at: 300 }]
+				: [{ tx_hash: '0xoldest', from: '0xsender', at: 100 }]
+		})
+		const address = '0x1111111111111111111111111111111111111111'
+		await expect(fetchAddressTxMetadata(4217, address)).resolves.toEqual({
 			count: 3,
-			latestTxsBlockTimestamp: '2026-01-03T00:00:00.000Z',
-			oldestTxsBlockTimestamp: '2026-01-01T00:00:00.000Z',
+			latestTxsBlockTimestamp: 300,
+			oldestTxsBlockTimestamp: 100,
 			oldestTxHash: '0xoldest',
 			oldestTxFrom: '0xsender',
 		})
-		expect(getTransactions).toHaveBeenNthCalledWith(1, {
-			query: {
-				address: '0x1111111111111111111111111111111111111111',
-				chainId: '4217',
-				include: 'totalCount',
-				limit: '5',
-				order: 'asc',
-			},
-		})
-		expect(getTransactions).toHaveBeenNthCalledWith(2, {
-			query: {
-				address: '0x1111111111111111111111111111111111111111',
-				chainId: '4217',
-				limit: '5',
-				order: 'desc',
-			},
+
+		// An address with no transactions has no receipt at either end.
+		indexer.mockImplementation(async (_chainId: number, sql: string) =>
+			sql.includes('count()') ? [{ n: 0 }] : [],
+		)
+		await expect(fetchAddressTxMetadata(4217, address)).resolves.toEqual({
+			count: 0,
+			latestTxsBlockTimestamp: undefined,
+			oldestTxsBlockTimestamp: undefined,
+			oldestTxHash: undefined,
+			oldestTxFrom: undefined,
 		})
 	})
 })

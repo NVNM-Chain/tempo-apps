@@ -1,0 +1,110 @@
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { devnetUrls, serverEnv, serverEnvSchema } from '#lib/server/env'
+import {
+	getChainBackend,
+	getDevnetBackend,
+	getExplorerRpcBackend,
+} from '#lib/server/network'
+
+vi.mock('#lib/server/env', async (importOriginal) => ({
+	...(await importOriginal<typeof import('#lib/server/env')>()),
+	devnetUrls: {},
+	serverEnv: {},
+}))
+
+const RPC_AUTH = 'Basic cnBjOnRlc3Q='
+const TIDX_AUTH = 'Basic dGlkeDp0ZXN0'
+
+afterEach(() => {
+	for (const key of Object.keys(serverEnv))
+		delete serverEnv[key as keyof typeof serverEnv]
+	for (const key of Object.keys(devnetUrls))
+		delete devnetUrls[key as keyof typeof devnetUrls]
+	vi.unstubAllEnvs()
+})
+
+describe('devnet backend overrides', () => {
+	it('keeps the default devnet backends while unset', () => {
+		expect(getDevnetBackend('devnet', 'rpc')).toBeUndefined()
+		expect(getDevnetBackend('devnet', 'tidx')).toBeUndefined()
+		expect(getExplorerRpcBackend('devnet', 'explorer:test')).toEqual({
+			chainId: 31318,
+			url: 'https://rpc.devnet.tempoxyz.dev',
+			headers: { Authorization: `Basic ${btoa('explorer:test')}` },
+		})
+	})
+
+	it('routes a devnet build to the configured RPC and TIDX', () => {
+		devnetUrls.DEVNET_RPC_URL = 'https://rpc-my-stack.devnet.tempoxyz.dev'
+		serverEnv.DEVNET_RPC_AUTH = RPC_AUTH
+		devnetUrls.DEVNET_TIDX_URL = 'https://tidx-my-stack.devnet.tempoxyz.dev'
+		serverEnv.DEVNET_TIDX_AUTH = TIDX_AUTH
+
+		expect(getExplorerRpcBackend('devnet', undefined)).toEqual({
+			chainId: 31318,
+			url: 'https://rpc-my-stack.devnet.tempoxyz.dev',
+			headers: { Authorization: RPC_AUTH },
+		})
+		vi.stubEnv('VITE_TEMPO_ENV', 'devnet')
+		expect(getChainBackend(31318, 'tidx')).toEqual({
+			url: 'https://tidx-my-stack.devnet.tempoxyz.dev',
+			headers: { Authorization: TIDX_AUTH },
+		})
+	})
+
+	it('ignores the overrides in every other build', () => {
+		devnetUrls.DEVNET_RPC_URL = 'https://rpc-my-stack.devnet.tempoxyz.dev'
+		serverEnv.DEVNET_RPC_AUTH = RPC_AUTH
+		devnetUrls.DEVNET_TIDX_URL = 'https://tidx-my-stack.devnet.tempoxyz.dev'
+		serverEnv.DEVNET_TIDX_AUTH = TIDX_AUTH
+
+		expect(getExplorerRpcBackend('nextfork', 'explorer:test')).toMatchObject({
+			chainId: 31318,
+			url: 'https://rpc-nextfork.devnet.tempoxyz.dev',
+		})
+		for (const environment of ['nextfork', 'testnet', 'mainnet']) {
+			vi.stubEnv('VITE_TEMPO_ENV', environment)
+			expect(getChainBackend(31318, 'tidx')).toBeUndefined()
+		}
+	})
+
+	it('ignores backend URLs from runtime Worker vars', () => {
+		const runtime = {
+			DEVNET_API_URL: 'https://api-pr-12.example.workers.dev',
+			DEVNET_RPC_URL: 'https://rpc-my-stack.devnet.tempoxyz.dev',
+			DEVNET_RPC_AUTH: RPC_AUTH,
+			DEVNET_TIDX_URL: 'https://tidx-my-stack.devnet.tempoxyz.dev',
+		}
+		expect(serverEnvSchema.parse(runtime)).toEqual({
+			DEVNET_RPC_AUTH: RPC_AUTH,
+		})
+		Object.assign(serverEnv, runtime)
+		vi.stubEnv('VITE_TEMPO_ENV', 'devnet')
+		expect(getDevnetBackend('devnet', 'rpc')).toBeUndefined()
+		expect(getChainBackend(31318, 'tidx')).toBeUndefined()
+		expect(getExplorerRpcBackend('devnet', 'explorer:test')).toMatchObject({
+			url: 'https://rpc.devnet.tempoxyz.dev',
+		})
+	})
+
+	it('accepts Bearer API keys', () => {
+		devnetUrls.DEVNET_TIDX_URL = 'https://tidx-my-stack.devnet.tempoxyz.dev'
+		serverEnv.DEVNET_TIDX_AUTH = 'Bearer devnet-key_1'
+		vi.stubEnv('VITE_TEMPO_ENV', 'devnet')
+		expect(getChainBackend(31318, 'tidx')).toEqual({
+			url: 'https://tidx-my-stack.devnet.tempoxyz.dev',
+			headers: { Authorization: 'Bearer devnet-key_1' },
+		})
+		serverEnv.DEVNET_TIDX_AUTH = 'Bearer key\r\nInjected: value'
+		expect(() => getChainBackend(31318, 'tidx')).toThrow('credentials')
+	})
+
+	it('fails closed when an override has no valid credentials', () => {
+		devnetUrls.DEVNET_RPC_URL = 'https://rpc-my-stack.devnet.tempoxyz.dev'
+		expect(() => getExplorerRpcBackend('devnet', 'explorer:test')).toThrow(
+			'credentials',
+		)
+		serverEnv.DEVNET_RPC_AUTH = 'Token wrong'
+		expect(() => getDevnetBackend('devnet', 'rpc')).toThrow('credentials')
+	})
+})

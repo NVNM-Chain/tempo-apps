@@ -49,9 +49,95 @@ forge script script/Mail.s.sol --verifier-url https://contracts.tempo.xyz --veri
 See [/apps/contract-verification/scripts/verify-solidity.sh](./scripts/verify-solidity.sh)
 and [/apps/contract-verification/scripts/verify-vyper.sh](./scripts/verify-vyper.sh) for small examples you can run.
 
+#### solar
+
+Contracts compiled with [solar](https://github.com/paradigmxyz/solar) verify like solc ones, straight
+from Foundry:
+
+```bash
+forge verify-contract <address> src/Foo.sol:Foo --use solar \
+  --verifier sourcify --verifier-url https://contracts.tempo.xyz
+```
+
+Forge sends the solc-compatible version solar reports as a solc wrapper (the `Version:` line of
+`SOLC_WRAPPER=1 solar --version`), such as `0.8.38+commit.e7a91fc7.solar.0.3.0`, as `compilerVersion`. The
+container compiles those with the solar build that names, through `solar --standard-json`, and
+records the compilation as compiler `solar`. It downloads releases from solar's GitHub releases
+and development builds, such as the `0.3.0-dev` one Foundry bundles, from the copies Sourcify
+publishes. Only builds listed in [container/solar-downloads.json](./container/solar-downloads.json)
+are downloaded, and each is used only when its SHA-256 matches the one listed there; any other solar
+version is refused. To support a new solar build, add its full revision, version and the SHA-256 of
+its `x86_64-unknown-linux-musl` binary (for a release, the `solar` file in its archive). Builds that
+are neither, like the one Earn uses, are pinned in [container/solar-builds.json](./container/solar-builds.json)
+and built from source by the Dockerfile.
+
+With an older Forge that sends the solc version for a solar build, pass the solar one with
+`--compiler-version` and `--compilation-profile default`. A solar-compiled contract submitted with a
+solc version fails with `solar_compiler_version_required` instead of a misleading `no_match`.
+
 #### Direct API Usage
 
 - Standard JSON: see [/apps/contract-verification/scripts/verify-via-curl.sh](./scripts/verify-via-curl.sh) for a full example.
+
+#### Repairing missing creation metadata
+
+A contract can have an exact verification (matching bytecode and compiler metadata) while its
+stored deployment lacks the creation transaction hash. To fill that gap, send a standard-JSON
+request to `POST /v2/verify/:chainId/:address` with `creationTransactionHash`. The `stdJsonInput`,
+`compilerVersion` and `contractIdentifier` fields must pass request validation, but the repair does
+not compile or compare those submitted sources. An accepted POST returns HTTP 202 with
+`verificationId`; poll `GET /v2/verify/:verificationId` for the completed job and its errors.
+
+This repair preserves the existing sources, compilation, verification ID and match flags
+(the recorded bytecode/metadata comparison results). It fills deployment metadata only: transaction
+hash, block, transaction index and deployer. It does not compile sources or compare deployment
+initcode (creation bytecode).
+
+Repairs are supported only on Tempo mainnet (4217) and testnet (42431). Their
+[mainnet](https://github.com/tempoxyz/tempo/blob/1f2b7642e85680645a536c471026b9c3103a3666/crates/chainspec/src/genesis/presto.json)
+and [testnet](https://github.com/tempoxyz/tempo/blob/1f2b7642e85680645a536c471026b9c3103a3666/crates/chainspec/src/genesis/moderato.json)
+genesis configurations enable Cancun from genesis: persisted contract code cannot be destroyed and
+replaced. Devnet and dynamically configured chains report `unsupported_creation_lifecycle` in the polled job because
+the verifier has no pinned guarantee for their complete history. Source verification remains supported
+on those chains. The restriction prevents attributing a replacement deployment to an older creation
+transaction: matching bytecode alone cannot distinguish identical code deployed twice at a reused address.
+
+For every repair, including a direct deployment, the selected chain's RPC must provide a full
+`debug_traceTransaction` call trace. The expected runtime is the deployed bytecode recorded by the
+existing verification for the requested chain and address. The verifier reconstructs these bytes from the existing deployment's stored
+compiled bytecode and the substitutions saved by its exact runtime verification: immutable values,
+linked library addresses and the library call-protection address. It never learns replacement values
+from the submitted creation transaction. The successful `CREATE` or `CREATE2` frame's output
+(the bytecode installed at that address) must equal the reconstructed bytes exactly.
+Missing or unsupported stored evidence produces
+`invalid_creation_transaction`. The creation must have no reverted parent call. The trace must
+contain exactly one successful creation of the requested address and no non-reverted
+`SELFDESTRUCT` of that address anywhere in the transaction. This also excludes contracts created and destroyed in the same
+transaction, which Cancun still permits. A receipt, factory event, later no-op call or matching
+current bytecode alone is not sufficient. The deployer remains the transaction sender, not the factory.
+
+Trace reads have strict resource limits: no automatic retries, a five-second HTTP deadline, and a
+256 KiB response cap. The receipt must report `cumulativeGasUsed` of at most 50 million: gas used
+by this transaction plus all earlier transactions in its block. Larger or unavailable values cannot
+be traced, bounding the RPC's block-replay work. Exceeding a limit leaves creation metadata unchanged.
+
+An initial source verification can still succeed without creation metadata. It requests optional
+creation evidence only after bytecode matching succeeds, using a direct-creation receipt or a factory
+trace. Metadata-only repair is stricter: invalid or unavailable trace/runtime evidence produces
+`invalid_creation_transaction` in the polled job. Retry with the correct hash and a working trace RPC;
+missing stored runtime evidence requires investigation rather than replacement with submitted sources.
+
+Successful repairs refresh the deployment record's `updated_at` and set `updated_by` to
+`verification-api`. Conflicting stored metadata or a concurrent change to the deployment's linked
+contract record produces
+`creation_transaction_conflict`; multiple exact deployment records produce
+`ambiguous_creation_transaction` when they share the queried chain and address. These cases require investigation. Every refusal leaves existing
+evidence unchanged, and re-running a queued job cannot overwrite its completed result.
+
+Entries already containing a transaction hash reject the POST with `409 already_verified`; this
+endpoint cannot replace that hash. After success, read
+`/v2/contract/:chainId/:address?fields=transactionHash,deployment` to check the result. This repair is
+V2-only; the legacy `POST /verify/vyper` endpoint does not support it.
 
 ### Development
 
@@ -85,6 +171,38 @@ pnpm db:seed:remote    # Seed native/precompile contract metadata into remote D1
 ```
 
 The seed script uses Wrangler's D1 binding path rather than opening the SQLite file directly, so the same seeding logic works for both local and remote D1.
+
+Rerunning the seed refreshes each `(contract, from_block)` snapshot in place,
+preserving its revision ID. Metadata and source links are replaced atomically per
+deployment, including removal of obsolete paths; other activation blocks are
+unchanged. A partially completed seed can be rerun without deleting existing rows.
+
+The native manifest covers Tempo's 15 fixed precompiles and the shared TIP-20
+implementation. It pins Rust source snapshots and records activation versions;
+these are native-source records, not Solidity bytecode verification. All entries
+share the `tempoCommit` snapshot declared in the manifest. Review snapshot/ABI
+alignment and activation metadata before publishing updates.
+
+Seeded pathUSD provides the TIP-20 source template. Single-chain address lookups
+reuse it for other TIP-20 addresses on the static Tempo networks only after RPC
+confirms the native `0xef` code marker. Uninitialized addresses return 404; RPC
+failures return an error rather than claiming verification. This lookup does not
+write token instances to D1, so list/all-chains endpoints enumerate stored records
+only.
+
+The Zone Portal implementation, Zone Messenger, and Zone Verifier are seeded
+individually as Solidity `system_contract` source records from the pinned
+`zonesCommit`. These expose sources with `bytecodeVerified: false`, not a compiled
+bytecode match. The Zone Factory retains its Rust precompile record.
+
+Portal instance lookups reuse the implementation's sources and ABI, like TIP-20s
+reuse pathUSD. They require a nonzero zone ID in the full reserved address prefix,
+a static Tempo chain, a seeded implementation, and the exact ERC-1167 runtime
+targeting that implementation. Empty accounts, native markers, and proxies to
+other implementations do not qualify. Instances are not inserted into D1. Rerun
+`pnpm db:seed:remote` after deployment to publish the singleton source records;
+new portal instances then resolve without further seeding. Review and refresh
+the pinned Solidity snapshot when protocol upgrades change the shared runtimes.
 
 `pnpm db:studio` uses the Drizzle D1 HTTP config. If you need to inspect the local SQLite file directly, resolve it with [local-d1.ts](./scripts/local-d1.ts) and point a SQLite-capable tool at that path instead.
 

@@ -10,6 +10,18 @@ describe('searchKnownContracts', () => {
 			'Validator Config V1 (legacy)',
 		])
 	})
+
+	it('searches the genesis token without listing Tempo-only tokens', () => {
+		expect(searchKnownContracts('nUSD')).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					address: '0x20C0000000000000000000000000000000000000',
+					label: 'nUSD',
+				}),
+			]),
+		)
+		expect(searchKnownContracts('AlphaUSD')).toEqual([])
+	})
 })
 
 describe('searchTokens', () => {

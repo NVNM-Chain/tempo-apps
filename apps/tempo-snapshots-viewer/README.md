@@ -14,7 +14,7 @@ pnpm install
 pnpm --filter tempo-snapshots-viewer gen:types
 ```
 
-Worker configuration lives in `wrangler.json`.
+Local development uses `wrangler.json`. Production builds use `wrangler.prd.json`; keep the two in sync.
 
 ## Development
 
@@ -34,7 +34,8 @@ pnpm --filter tempo-snapshots-viewer deploy  # Deploys to download.nvnm.testnet.
 apps/tempo-snapshots-viewer/
 ├── src/
 │   └── index.ts        # Main Worker logic
-├── wrangler.json       # Worker configuration
+├── wrangler.json       # Local development configuration
+├── wrangler.prd.json   # Production configuration built by the deploy broker
 ├── package.json        # Dependencies
 ├── tsconfig.json       # TypeScript config
 ├── worker-configuration.d.ts

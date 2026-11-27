@@ -4,9 +4,20 @@ import type { TempoEnv } from './env'
  * Networks offered in the header switcher.
  *
  * NVNM chains only — Tempo's public networks are not served by this build.
- * Add an entry here when a second NVNM chain (e.g. public testnet) exists.
  */
 export const EXPLORER_NETWORK_OPTIONS = [
+	{
+		env: 'nvnm-mainnet',
+		label: 'NVNM Mainnet',
+		host: 'https://scan.nvnm.mainnet.nvnmchain.io',
+		dotClassName: 'bg-positive',
+	},
+	{
+		env: 'nvnm-testnet',
+		label: 'NVNM Testnet',
+		host: 'https://scan.nvnm.testnet.nvnmchain.io',
+		dotClassName: 'bg-amber-400',
+	},
 	{
 		env: 'nvnm',
 		label: 'NVNM Devnet',
@@ -16,10 +27,11 @@ export const EXPLORER_NETWORK_OPTIONS = [
 ] as const
 
 export function getActiveExplorerNetworkOption(tempoEnv: TempoEnv) {
-	return (
-		EXPLORER_NETWORK_OPTIONS.find((option) => option.env === tempoEnv) ??
-		EXPLORER_NETWORK_OPTIONS[0]
+	const option = EXPLORER_NETWORK_OPTIONS.find(
+		(candidate) => candidate.env === tempoEnv,
 	)
+	if (!option) throw new Error(`Unknown explorer network: ${tempoEnv}`)
+	return option
 }
 
 export function buildExplorerNetworkHref(

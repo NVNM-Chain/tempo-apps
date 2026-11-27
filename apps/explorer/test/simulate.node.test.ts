@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { encodeErrorResult, type Log, parseAbi } from 'viem'
+import { SimulateResultHeader } from '#comps/SimulateResultPane'
 import {
 	decodeTraceError,
 	findDeepestFailurePath,
@@ -109,13 +112,14 @@ describe('simulation query normalization', () => {
 
 	it('keeps independent tracer errors while using the execution result', () => {
 		const result = normalizeSimulationResult(input, {
-			trace: baseTrace,
+			trace: [baseTrace],
 			prestate: null,
 			execution: {
 				status: 'success',
 				gasUsed: '0x123',
 				returnData: '0x01',
 				logs: [],
+				calls: [],
 			},
 			errors: { prestate: 'tracer unavailable' },
 		})
@@ -124,6 +128,32 @@ describe('simulation query normalization', () => {
 		expect(result.gasUsed).toBe(0x123n)
 		expect(result.errors.prestate).toBe('tracer unavailable')
 		expect(result.receipt.status).toBe('success')
+	})
+
+	it('shows the testnet name in simulation results', () => {
+		const testnetInput = { ...input, chainId: 787223 }
+		const result = normalizeSimulationResult(testnetInput, {
+			trace: null,
+			prestate: null,
+			execution: {
+				status: 'success',
+				gasUsed: '0x123',
+				returnData: '0x',
+				logs: [],
+				calls: [],
+			},
+			errors: {},
+		})
+		const html = renderToStaticMarkup(
+			createElement(SimulateResultHeader, {
+				execution: { ...result, calls: [] },
+				input: testnetInput,
+				gasLimit: 50_000_000n,
+				stale: false,
+			}),
+		)
+
+		expect(html).toContain('NVNM Testnet')
 	})
 })
 
@@ -205,6 +235,12 @@ describe('draft validation', () => {
 	it('treats an unset sender as the zero address rather than as invalid', () => {
 		const input = parseForm(base, 42431)
 		expect(input?.from).toBe('0x0000000000000000000000000000000000000000')
+	})
+
+	it.each([
+		787222, 787223, 7872,
+	])('builds an input for NVNM chain %i', (chainId) => {
+		expect(parseForm(base, chainId)).toMatchObject({ chainId })
 	})
 
 	it('refuses to build an input from an incomplete draft', () => {

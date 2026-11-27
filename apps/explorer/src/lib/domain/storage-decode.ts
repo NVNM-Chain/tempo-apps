@@ -7,7 +7,7 @@ import { isTip20Address } from './tip20'
 
 const FEE_MANAGER_ADDRESS = '0xfeec000000000000000000000000000000000000'
 const PATH_USD_ADDRESS = '0x20c0000000000000000000000000000000000000'
-const PATH_USD_META = { symbol: 'PathUSD', decimals: 6 }
+const PATH_USD_META = { symbol: 'nUSD', decimals: 6 }
 
 export type StorageDecodeContext = {
 	account: Hex.Hex

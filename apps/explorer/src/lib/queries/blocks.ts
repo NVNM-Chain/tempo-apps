@@ -4,14 +4,21 @@ import type { Block, Log, TransactionReceipt } from 'viem'
 import { getBlock } from 'wagmi/actions'
 import type { Actions } from 'wagmi/tempo'
 import {
-	decodeKnownCall,
+	decodeKnownTransactionCalls,
 	type KnownEvent,
 	parseKnownEvents,
 } from '#lib/domain/known-events'
+import { selectTransactionDescriptionEvents } from '#lib/domain/transaction-activities'
 import { isTip20Address } from '#lib/domain/tip20.ts'
-import { getBatchedClient, getWagmiConfig } from '#wagmi.config.ts'
+import { propAmmPairTokens } from '#lib/propamm'
+import { propAmmShapesFromLogs } from '#lib/domain/propamm-shapes'
+import {
+	getBatchedClient,
+	getTempoChain,
+	getWagmiConfig,
+} from '#wagmi.config.ts'
 
-export const BLOCKS_PER_PAGE = 12
+export const BLOCKS_PER_PAGE = 25
 
 export type BlockIdentifier =
 	| { kind: 'hash'; blockHash: Hex.Hex }
@@ -93,9 +100,15 @@ export function blockKnownEventsQueryOptions(
 
 			const receiptByHash = new Map<string, TransactionReceipt>()
 			for (const receipt of receipts) {
-				if (receipt) {
-					receiptByHash.set(receipt.transactionHash.toLowerCase(), receipt)
-				}
+				if (
+					!receipt ||
+					(receipt.status !== 'success' && receipt.status !== 'reverted')
+				)
+					continue
+				receiptByHash.set(receipt.transactionHash.toLowerCase(), {
+					...receipt,
+					status: receipt.status,
+				})
 			}
 
 			const allTip20Addresses = new Set<string>()
@@ -106,7 +119,19 @@ export function blockKnownEventsQueryOptions(
 						allTip20Addresses.add(log.address.toLowerCase())
 					}
 				}
+				// propAMM quotes name their pair's tokens without a log from them.
+				for (const token of propAmmPairTokens(
+					getTempoChain().id,
+					receipt.logs as Log[],
+				))
+					allTip20Addresses.add(token.toLowerCase())
 			}
+
+			const getPropAmmShape = await propAmmShapesFromLogs(
+				getTempoChain().id,
+				receipts.flatMap((receipt) => (receipt?.logs ?? []) as Log[]),
+				blockNumber,
+			)
 
 			const tip20Array = Array.from(allTip20Addresses) as Hex.Hex[]
 			const metadataResults = await Promise.all(
@@ -122,7 +147,8 @@ export function blockKnownEventsQueryOptions(
 				if (metadata) tokenMetadataMap.set(address.toLowerCase(), metadata)
 			}
 
-			const result: Record<Hex.Hex, KnownEvent[]> = {}
+			const knownEvents: Record<Hex.Hex, KnownEvent[]> = {}
+			const fees: Record<Hex.Hex, bigint> = {}
 			for (const transaction of transactions) {
 				if (!transaction.hash) continue
 				const receipt = receiptByHash.get(transaction.hash.toLowerCase())
@@ -134,23 +160,21 @@ export function blockKnownEventsQueryOptions(
 				const parsedEvents = parseKnownEvents(receipt, {
 					transaction,
 					getTokenMetadata,
+					chainId: getTempoChain().id,
+					getPropAmmShape,
 				})
 
-				// Try to decode known contract calls (e.g., validator precompile)
-				// Prioritize decoded calls over fee-only events
-				const knownCall =
-					transaction.to && transaction.input && transaction.input !== '0x'
-						? decodeKnownCall(transaction.to, transaction.input)
-						: null
+				const events = selectTransactionDescriptionEvents({
+					activityEvents: [],
+					fallbackEvents: parsedEvents,
+					knownCalls: decodeKnownTransactionCalls(transaction, receipt.status),
+				})
 
-				const events = knownCall
-					? [knownCall, ...parsedEvents.filter((e) => e.type !== 'fee')]
-					: parsedEvents
-
-				result[transaction.hash] = events
+				knownEvents[transaction.hash] = events
+				fees[transaction.hash] = receipt.effectiveGasPrice * receipt.gasUsed
 			}
 
-			return result
+			return { knownEvents, fees }
 		},
 		staleTime: Number.POSITIVE_INFINITY, // Receipts don't change
 	})

@@ -74,7 +74,7 @@ import {
 	type SimulationCallResult,
 	useAutoloadAbi,
 } from '#lib/queries'
-import { zAddress, zHash } from '#lib/zod'
+import { hex, zAddress, zHash } from '#lib/zod'
 import { getWagmiConfig } from '#wagmi.config'
 import EraserIcon from '~icons/lucide/eraser'
 import LinkIcon from '~icons/lucide/link'
@@ -116,7 +116,7 @@ const DecimalSchema = z.pipe(
 )
 
 const HexSchema = z.pipe(
-	z.string().check((ctx) => {
+	z.string().check(hex(), (ctx) => {
 		if (!OxHex.validate(ctx.value))
 			ctx.issues.push({
 				code: 'custom',
@@ -543,13 +543,11 @@ function SimulatePage(): React.JSX.Element {
 	const showOutput = pane === 'output' || pane === 'split'
 
 	return (
-		<div className="flex w-full flex-col px-[24px] pt-8 pb-12 min-[800px]:pt-14 min-[1240px]:px-[84px]">
+		<div className="flex w-full flex-col px-[24px] pt-8 pb-12 type-card min-[800px]:pt-14 min-[1240px]:px-[84px]">
 			<div className="mb-[12px] flex flex-wrap items-center gap-x-[14px] gap-y-[8px]">
-				<h1 className="shrink-0 text-[18px] font-medium text-primary">
-					Simulate
-				</h1>
+				<h1 className="shrink-0 heading-20 text-primary">Simulate</h1>
 				<p
-					className="min-w-0 flex-1 truncate font-mono text-[12px] text-tertiary"
+					className="min-w-0 flex-1 truncate type-card-data text-tertiary"
 					title={summary}
 				>
 					{summary}
@@ -595,7 +593,7 @@ function SimulatePage(): React.JSX.Element {
 				<Button tone="primary" onClick={run} title="Run this simulation (⌘↵)">
 					<PlayIcon className="size-[12px]" />
 					{runInput && !stale ? 'Run' : runInput ? 'Re-run' : 'Simulate'}
-					<span className="text-[10px] opacity-70">⌘↵</span>
+					<span className="label-12 opacity-70">⌘↵</span>
 				</Button>
 			</div>
 
@@ -607,7 +605,7 @@ function SimulatePage(): React.JSX.Element {
 				)}
 			>
 				{showInput && (
-					<section className="flex min-w-0 flex-col overflow-hidden rounded-[10px] border border-card-border bg-card-header">
+					<section className="flex min-w-0 flex-col overflow-hidden rounded-body border border-card-border bg-card-header">
 						<SimulateCallForm
 							form={form}
 							setForm={setForm}
@@ -925,7 +923,7 @@ function SimulationResults(props: {
 	}
 
 	return (
-		<section className="flex min-w-0 flex-col overflow-hidden rounded-[10px] border border-card-border bg-card-header">
+		<section className="flex min-w-0 flex-col overflow-hidden rounded-body border border-card-border bg-card-header">
 			<SimulateResultHeader
 				execution={execution}
 				input={input}
@@ -1170,9 +1168,9 @@ function SimulationEmptyState(props: {
 	onEdit: () => void
 }): React.JSX.Element {
 	return (
-		<section className="flex min-w-0 flex-col overflow-hidden rounded-[10px] border border-card-border bg-card-header">
+		<section className="flex min-w-0 flex-col overflow-hidden rounded-body border border-card-border bg-card-header">
 			<div className="flex items-center gap-[8px] border-b border-card-border px-[16px] py-[10px]">
-				<span className="text-[14px] font-medium text-content-dimmed">
+				<span className="label-14 text-content-dimmed">
 					Nothing simulated yet
 				</span>
 			</div>
@@ -1190,7 +1188,7 @@ function SimulationEmptyState(props: {
 				/>
 			</div>
 			<div className="flex flex-col gap-[12px] px-[16px] py-[16px]">
-				<p className="max-w-[520px] text-[12px] leading-[18px] text-tertiary">
+				<p className="max-w-[520px] type-card text-tertiary">
 					Fill in a call and run it, or replay an existing transaction by hash
 					against the state of its parent block. Nothing is signed and nothing
 					is broadcast.

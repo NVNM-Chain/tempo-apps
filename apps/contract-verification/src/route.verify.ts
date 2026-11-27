@@ -1,19 +1,19 @@
 import { Hono } from 'hono'
 import * as z from 'zod/mini'
 import { Hex } from 'ox'
-import { and, eq, isNull, or } from 'drizzle-orm'
+import { and, eq, isNull, min, or } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 
 import { getRandom } from '@cloudflare/containers'
-import { createPublicClient, http, keccak256 } from 'viem'
+import { createPublicClient, type http, keccak256 } from 'viem'
 
 import {
 	getDb,
 	formatError,
 	sourcifyError,
-	normalizeSourcePath,
 	filterSourcesByCompilerMetadata,
 	getCreationTransactionMetadata,
+	type CreationTransactionClient,
 } from '#lib/utilities.ts'
 import {
 	codeTable,
@@ -28,15 +28,20 @@ import {
 	compiledContractsSourcesTable,
 	compiledContractsSignaturesTable,
 } from '#database/schema.ts'
+import { sanitizeCompilerSettings } from '../container/compiler-settings.ts'
 import {
 	AuxdataStyle,
 	matchBytecode,
+	getSolarAuxdataVersion,
 	getVyperAuxdataStyle,
 	getVyperImmutableReferences,
 } from '#lib/bytecode-matching.ts'
 import type { AppEnv } from '#index.tsx'
 import type { ChainRegistry } from '#lib/chain-registry.ts'
 import { getLogger } from '#lib/logger.ts'
+import { createRpcTransport } from '#lib/rpc.ts'
+import { restoreVerifiedRuntime } from '#lib/verified-runtime.ts'
+import { tempoMainnetExtended, tempoTestnetExtended } from '#wagmi.config.ts'
 import {
 	type CompileOutput,
 	getValidationCustomCode,
@@ -49,38 +54,159 @@ import {
 const logger = getLogger(['tempo'])
 import wranglerJSON from '#wrangler.json' with { type: 'json' }
 
+/** Whether a fetch failed because its `AbortSignal.timeout` fired. */
+export function isTimeoutError(error: unknown): boolean {
+	return error instanceof Error && error.name === 'TimeoutError'
+}
+
 /** Jobs older than this are considered stale and can be retried (15 minutes). */
 const JOB_TTL_MS = 15 * 60 * 1_000
 /** Number of container instances to load-balance across. */
 const CONTAINER_INSTANCE_COUNT =
 	wranglerJSON.containers.at(0)?.max_instances ?? 10
+/**
+ * How long the Worker waits for a container compile. The container kills its compiler after
+ * 5 minutes (container/run-compiler.ts); this aborts the request a little later in case the
+ * container never answers, which also kills the compiler since the container sees the disconnect.
+ */
+export const CONTAINER_COMPILE_TIMEOUT_MS = 6 * 60 * 1_000
+
+/**
+ * solar reports a solc-compatible version with its commit and own version as build metadata, such
+ * as `0.8.38+commit.e7a91fc7.solar.0.3.0` (or `0.3.0-dev` for the solar Foundry bundles), which Forge
+ * sends as `compilerVersion` for solar builds. The container compiles those with the solar build they name.
+ */
+function isSolarCompilerVersion(compilerVersion: string): boolean {
+	return /^v?\d+\.\d+\.\d+\+commit\.[0-9a-f]{7,40}\.solar\.\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(
+		compilerVersion,
+	)
+}
 
 function timestampToMs(value: string): number {
 	const normalized = value.includes('T') ? value : `${value.replace(' ', 'T')}Z`
 	return new Date(normalized).getTime()
 }
 
-function isBlockedObjectKey(key: string): boolean {
-	return key === '__proto__' || key === 'constructor' || key === 'prototype'
+/** Upper bounds on the shape of compiler settings accepted from callers. */
+const MAX_SETTINGS_DEPTH = 64
+const MAX_SETTINGS_NODES = 100_000
+/** Upper bound on the serialized size of compiler settings, in bytes. */
+const MAX_SETTINGS_BYTES = 64 * 1024
+/**
+ * Bounds on the Yul optimizer step sequence. solc runs every step, and repeats
+ * each bracketed group up to 12 times per nesting level, so a step's cost is
+ * weighted 12^depth. solc's default sequence nests 2 deep with a weight of
+ * about 1,800.
+ */
+const MAX_OPTIMIZER_STEPS_LENGTH = 1_024
+const MAX_OPTIMIZER_STEPS_NESTING = 2
+const MAX_OPTIMIZER_STEPS_WEIGHT = 4_096
+const OPTIMIZER_STEPS_REPEAT = 12
+
+/**
+ * Adds an upper bound on a string's serialized JSON size in UTF-8 bytes to a
+ * running total, stopping as soon as the total passes the cap. Escaped control
+ * characters and lone surrogates count as 6 bytes, so the bound never
+ * undercounts.
+ */
+function addJsonStringBytes(total: number, value: string): number {
+	let bytes = total + 2
+	for (let index = 0; index < value.length; index++) {
+		const code = value.charCodeAt(index)
+		if (code < 0x20 || (code >= 0xd800 && code <= 0xdfff)) bytes += 6
+		else if (code === 0x22 || code === 0x5c) bytes += 2
+		else if (code < 0x80) bytes += 1
+		else if (code < 0x800) bytes += 2
+		else bytes += 3
+		if (bytes > MAX_SETTINGS_BYTES) return bytes
+	}
+	return bytes
 }
 
-function sanitizeJsonValue(value: unknown): unknown {
-	if (Array.isArray(value)) return value.map(sanitizeJsonValue)
+/**
+ * Checks an optimizer step sequence's length, bracket nesting and weighted
+ * step count, returning why it is rejected or undefined when it is accepted.
+ */
+function optimizerStepsError(steps: unknown): string | undefined {
+	if (steps === undefined) return undefined
+	if (typeof steps !== 'string')
+		return 'settings.optimizer.details.yulDetails.optimizerSteps must be a string'
+	if (steps.length > MAX_OPTIMIZER_STEPS_LENGTH)
+		return `settings.optimizer.details.yulDetails.optimizerSteps exceeds ${MAX_OPTIMIZER_STEPS_LENGTH} characters`
 
-	if (typeof value === 'object' && value !== null) {
-		const sanitized: Record<string, unknown> = {}
-		for (const [key, nestedValue] of Object.entries(value)) {
-			if (isBlockedObjectKey(key)) continue
-			sanitized[key] = sanitizeJsonValue(nestedValue)
+	let depth = 0
+	let weight = 0
+	for (const char of steps) {
+		if (char === '[') {
+			depth += 1
+			if (depth > MAX_OPTIMIZER_STEPS_NESTING)
+				return `settings.optimizer.details.yulDetails.optimizerSteps nests brackets more than ${MAX_OPTIMIZER_STEPS_NESTING} deep`
+		} else if (char === ']') depth = Math.max(0, depth - 1)
+		else if (/[A-Za-z]/.test(char)) {
+			weight += OPTIMIZER_STEPS_REPEAT ** depth
+			if (weight > MAX_OPTIMIZER_STEPS_WEIGHT)
+				return `settings.optimizer.details.yulDetails.optimizerSteps exceeds ${MAX_OPTIMIZER_STEPS_WEIGHT} weighted steps (each step counts ${OPTIMIZER_STEPS_REPEAT}x per enclosing bracket)`
 		}
-		return sanitized
+	}
+	return undefined
+}
+
+/**
+ * Checks compiler settings against depth, node, byte and optimizer step limits
+ * without recursion, so oversized input is rejected before anything is
+ * persisted. Returns why the settings are rejected, or undefined.
+ */
+function settingsLimitsError(root: unknown): string | undefined {
+	const tooLarge = `stdJsonInput.settings exceeds the maximum nesting depth (${MAX_SETTINGS_DEPTH}) or size (${MAX_SETTINGS_NODES} values or ${MAX_SETTINGS_BYTES} bytes)`
+	const pending: Array<{ value: unknown; depth: number }> = [
+		{ value: root, depth: 0 },
+	]
+	let visited = 0
+	// Upper bound on the serialized size, counted during the walk so oversized
+	// input is rejected without building its JSON.
+	let bytes = 0
+
+	while (pending.length > 0) {
+		const current = pending.pop()
+		if (!current) break
+		visited += 1
+		if (current.depth > MAX_SETTINGS_DEPTH || visited > MAX_SETTINGS_NODES)
+			return tooLarge
+
+		if (typeof current.value === 'string')
+			bytes = addJsonStringBytes(bytes, current.value)
+		else if (typeof current.value === 'number')
+			bytes += String(current.value).length + 1
+		else bytes += 6
+
+		if (typeof current.value === 'object' && current.value !== null) {
+			if (Array.isArray(current.value)) {
+				for (const child of current.value)
+					pending.push({ value: child, depth: current.depth + 1 })
+			} else {
+				for (const [key, child] of Object.entries(current.value)) {
+					bytes = addJsonStringBytes(bytes, key) + 1
+					if (bytes > MAX_SETTINGS_BYTES) return tooLarge
+					pending.push({ value: child, depth: current.depth + 1 })
+				}
+			}
+		}
+
+		if (bytes > MAX_SETTINGS_BYTES) return tooLarge
 	}
 
-	return value
+	return optimizerStepsError(getOptimizerSteps(root))
 }
 
-function sanitizeCompilerSettings<T extends object>(settings: T): T {
-	return sanitizeJsonValue(settings) as T
+/** Reads settings.optimizer.details.yulDetails.optimizerSteps, if present. */
+function getOptimizerSteps(settings: unknown): unknown {
+	let current: unknown = settings
+	for (const key of ['optimizer', 'details', 'yulDetails', 'optimizerSteps']) {
+		if (typeof current !== 'object' || current === null) return undefined
+		if (Array.isArray(current) || !Object.hasOwn(current, key)) return undefined
+		current = (current as Record<string, unknown>)[key]
+	}
+	return current
 }
 
 function sanitizeVerificationInput<T extends { stdJsonInput: StdJsonInput }>(
@@ -90,7 +216,10 @@ function sanitizeVerificationInput<T extends { stdJsonInput: StdJsonInput }>(
 		...input,
 		stdJsonInput: {
 			...input.stdJsonInput,
-			settings: sanitizeCompilerSettings(input.stdJsonInput.settings),
+			settings: sanitizeCompilerSettings(
+				input.stdJsonInput.language,
+				input.stdJsonInput.settings,
+			),
 		},
 	}
 }
@@ -145,6 +274,9 @@ verifyRoute
 
 	// POST /v2/verify/:chainId/:address - Verify Contract (Standard JSON)
 	.post('/:chainId/:address', async (context) => {
+		// Set while this request holds a pending job row that has not been handed
+		// to a runner, so an unexpected failure can release it.
+		let reservedJobId: string | undefined
 		try {
 			const { chainId: _chainId, address } = context.req.param()
 			let body: unknown
@@ -205,6 +337,14 @@ verifyRoute
 			}
 			Hex.assert(address)
 
+			const settingsError = settingsLimitsError(
+				parsedBody.data.stdJsonInput.settings,
+			)
+			if (settingsError) {
+				return sourcifyError(context, 400, 'invalid_settings', settingsError)
+			}
+			const verificationInput = sanitizeVerificationInput(parsedBody.data)
+
 			const { contractIdentifier } = parsedBody.data
 
 			// Parse contractIdentifier to validate format
@@ -221,33 +361,21 @@ verifyRoute
 			const db = getDb(context.env.CONTRACTS_DB)
 			const addressBytes = Hex.toBytes(address)
 
-			// Exact verifications are terminal, but partial matches must not block
-			// a later exact verification from replacing them.
-			const existingExactVerification = await db
-				.select({
-					matchId: verifiedContractsTable.id,
-					runtimeMetadataMatch: verifiedContractsTable.runtimeMetadataMatch,
-					creationMetadataMatch: verifiedContractsTable.creationMetadataMatch,
-				})
-				.from(verifiedContractsTable)
-				.innerJoin(
-					contractDeploymentsTable,
-					eq(verifiedContractsTable.deploymentId, contractDeploymentsTable.id),
-				)
-				.where(
-					and(
-						eq(contractDeploymentsTable.chainId, chainId),
-						eq(contractDeploymentsTable.address, addressBytes),
-						or(
-							eq(verifiedContractsTable.runtimeMetadataMatch, true),
-							eq(verifiedContractsTable.creationMetadataMatch, true),
-						),
-					),
-				)
-				.limit(1)
-
-			if (existingExactVerification.length > 0) {
-				const existing = existingExactVerification.at(0)
+			// Exact sources are terminal; only missing creation attribution may be repaired.
+			const existingExactVerification = await exactVerifications(
+				db,
+				chainId,
+				addressBytes,
+			)
+			const existing =
+				existingExactVerification.find(
+					(verification) => verification.deployment.transactionHash !== null,
+				) ?? existingExactVerification.at(0)
+			if (
+				existing &&
+				(existing.deployment.transactionHash !== null ||
+					!parsedBody.data.creationTransactionHash)
+			) {
 				const runtimeMatch = existing?.runtimeMetadataMatch
 					? 'exact matches'
 					: 'match'
@@ -259,6 +387,15 @@ verifyRoute
 					409,
 					'already_verified',
 					`Contract ${address} on chain ${chainId} is already verified with runtimeMatch ${runtimeMatch} and creationMatch ${creationMatch}.`,
+				)
+			}
+
+			if (existingExactVerification.length > 1) {
+				return sourcifyError(
+					context,
+					409,
+					'ambiguous_creation_transaction',
+					'Multiple exact deployments exist for this address; creation attribution requires manual investigation.',
 				)
 			}
 
@@ -321,6 +458,7 @@ verifyRoute
 				contractAddress: addressBytes,
 				verificationEndpoint: '/v2/verify',
 			})
+			reservedJobId = jobId
 
 			// Check if another job was created concurrently (first one wins)
 			const concurrentJobs = await db
@@ -345,8 +483,6 @@ verifyRoute
 				return context.json({ verificationId: firstJob.id }, 202)
 			}
 
-			const verificationInput = sanitizeVerificationInput(parsedBody.data)
-
 			// Dispatch verification to a per-job Durable Object for durable background execution
 			const doId = context.env.VERIFICATION_JOB_RUNNER.idFromName(jobId)
 			const runner = context.env.VERIFICATION_JOB_RUNNER.get(doId)
@@ -357,6 +493,7 @@ verifyRoute
 					address,
 					...verificationInput,
 				})
+				reservedJobId = undefined
 			} catch (enqueueError) {
 				logger.error('job_enqueue_failed', {
 					error: formatError(enqueueError),
@@ -383,6 +520,18 @@ verifyRoute
 				chainId,
 				address,
 			})
+			if (reservedJobId) {
+				try {
+					await getDb(context.env.CONTRACTS_DB)
+						.delete(verificationJobsTable)
+						.where(eq(verificationJobsTable.id, reservedJobId))
+				} catch (cleanupError) {
+					logger.error('verify_contract_cleanup_failed', {
+						error: formatError(cleanupError),
+						jobId: reservedJobId,
+					})
+				}
+			}
 			return sourcifyError(
 				context,
 				500,
@@ -632,15 +781,43 @@ verifyRoute
 		}
 	})
 
-type PublicClientLike = {
+function exactVerifications(
+	db: ReturnType<typeof getDb>,
+	chainId: number,
+	address: Uint8Array,
+) {
+	return (
+		db
+			.select({
+				// SQLite takes the other selected verification fields from this minimum's row.
+				matchId: min(verifiedContractsTable.id),
+				runtimeMetadataMatch: verifiedContractsTable.runtimeMetadataMatch,
+				creationMetadataMatch: verifiedContractsTable.creationMetadataMatch,
+				deployment: contractDeploymentsTable,
+			})
+			.from(verifiedContractsTable)
+			.innerJoin(
+				contractDeploymentsTable,
+				eq(verifiedContractsTable.deploymentId, contractDeploymentsTable.id),
+			)
+			.where(
+				and(
+					eq(contractDeploymentsTable.chainId, chainId),
+					eq(contractDeploymentsTable.address, address),
+					or(
+						eq(verifiedContractsTable.runtimeMetadataMatch, true),
+						eq(verifiedContractsTable.creationMetadataMatch, true),
+					),
+				),
+			)
+			// Multiple exact compilations can describe one deployment; count deployments before limiting.
+			.groupBy(contractDeploymentsTable.id)
+			.limit(2)
+	)
+}
+
+type PublicClientLike = CreationTransactionClient & {
 	getCode: (args: { address: `0x${string}` }) => Promise<`0x${string}`>
-	getTransactionReceipt?: (args: { hash: `0x${string}` }) => Promise<{
-		transactionHash: `0x${string}`
-		blockNumber: bigint
-		transactionIndex: number
-		from: `0x${string}`
-		contractAddress: `0x${string}` | null
-	}>
 }
 
 type ContainerLike = {
@@ -688,18 +865,141 @@ async function runVerificationJob(
 		const createClient = deps?.createPublicClient ?? createPublicClient
 		const client = createClient({
 			chain,
-			transport: http(rpcUrl),
+			transport: createRpcTransport(rpcUrl, chain.id, env),
 		})
 
-		const creationTransactionMetadata = sanitizedBody.creationTransactionHash
-			? await getCreationTransactionMetadata({
-					creationTransactionHash: sanitizedBody.creationTransactionHash,
-					address,
-					chainId,
-					client,
-					logContext: { jobId },
+		const existingExact = await exactVerifications(db, chainId, addressBytes)
+		const existing = existingExact[0]
+		if (existing) {
+			// A repair must never compile submitted sources or mutate an exact verification.
+			let errorCode: string | null = null
+			if (!sanitizedBody.creationTransactionHash) {
+				// An exact result appearing after admission does not verify this job's sources.
+				errorCode = 'already_verified'
+			} else if (existingExact.length !== 1) {
+				errorCode = 'ambiguous_creation_transaction'
+			} else if (
+				chainId !== tempoMainnetExtended.id &&
+				chainId !== tempoTestnetExtended.id
+			) {
+				// These two chains enable Cancun at genesis; dynamic chains and devnet lack a pinned lifecycle guarantee.
+				errorCode = 'unsupported_creation_lifecycle'
+			} else {
+				const [recorded] = await db
+					.select({
+						code: codeTable.code,
+						transformations: verifiedContractsTable.runtimeTransformations,
+						values: verifiedContractsTable.runtimeValues,
+						runtimeMetadataMatch: verifiedContractsTable.runtimeMetadataMatch,
+					})
+					.from(contractsTable)
+					.innerJoin(
+						codeTable,
+						eq(codeTable.codeHash, contractsTable.runtimeCodeHash),
+					)
+					.innerJoin(
+						verifiedContractsTable,
+						eq(verifiedContractsTable.id, existing.matchId ?? 0),
+					)
+					.where(eq(contractsTable.id, existing.deployment.contractId))
+					.limit(1)
+				const expectedRuntime =
+					recorded?.runtimeMetadataMatch && recorded.code
+						? restoreVerifiedRuntime({
+								code: new Uint8Array(recorded.code as ArrayBuffer),
+								transformations: recorded.transformations,
+								values: recorded.values,
+							})
+						: null
+				const proof = expectedRuntime
+					? await getCreationTransactionMetadata({
+							creationTransactionHash: sanitizedBody.creationTransactionHash,
+							address,
+							chainId,
+							client,
+							logContext: { jobId },
+							expectedRuntime,
+						})
+					: null
+				if (!proof) {
+					errorCode = 'invalid_creation_transaction'
+				} else {
+					// Non-null attribution is immutable, including when a concurrent job fills it.
+					const updated = await db
+						.update(contractDeploymentsTable)
+						.set({
+							...proof,
+							updatedAt: new Date().toISOString(),
+							updatedBy: 'verification-api',
+						})
+						.where(
+							and(
+								eq(contractDeploymentsTable.id, existing.deployment.id),
+								eq(
+									contractDeploymentsTable.contractId,
+									existing.deployment.contractId,
+								),
+								or(
+									isNull(contractDeploymentsTable.transactionHash),
+									eq(
+										contractDeploymentsTable.transactionHash,
+										proof.transactionHash,
+									),
+								),
+								or(
+									isNull(contractDeploymentsTable.blockNumber),
+									eq(contractDeploymentsTable.blockNumber, proof.blockNumber),
+								),
+								or(
+									isNull(contractDeploymentsTable.transactionIndex),
+									eq(
+										contractDeploymentsTable.transactionIndex,
+										proof.transactionIndex,
+									),
+								),
+								or(
+									isNull(contractDeploymentsTable.deployer),
+									eq(contractDeploymentsTable.deployer, proof.deployer),
+								),
+							),
+						)
+						.returning({ id: contractDeploymentsTable.id })
+					if (updated.length !== 1) errorCode = 'creation_transaction_conflict'
+				}
+			}
+			const messages: Record<string, string> = {
+				unsupported_creation_lifecycle:
+					'Creation metadata repair requires a chain with immutable persisted contract code from genesis. Only Tempo mainnet and testnet are supported.',
+				already_verified:
+					'This contract was verified before the queued job ran; this submission was not compiled or compared.',
+				ambiguous_creation_transaction:
+					'Multiple exact deployments exist for this address; creation attribution requires manual investigation.',
+				invalid_creation_transaction:
+					'The supplied transaction could not be proven to create the recorded runtime. Check stored runtime evidence, the creation hash and RPC trace availability before retrying.',
+				creation_transaction_conflict:
+					'The supplied creation proof conflicts with existing deployment metadata; no evidence was replaced.',
+			}
+			await db
+				.update(verificationJobsTable)
+				.set({
+					completedAt: new Date().toISOString(),
+					verifiedContractId: errorCode ? null : existing.matchId,
+					errorCode,
+					errorId: errorCode ? globalThis.crypto.randomUUID() : null,
+					errorData: errorCode
+						? JSON.stringify({ message: messages[errorCode] })
+						: null,
+					compilationTime: Date.now() - startTime,
 				})
-			: null
+				.where(
+					and(
+						eq(verificationJobsTable.id, jobId),
+						// Every repair outcome preserves a result committed by an earlier execution.
+						isNull(verificationJobsTable.completedAt),
+					),
+				)
+			return
+		}
 
 		const onchainBytecode = await client.getCode({ address })
 		if (!onchainBytecode || onchainBytecode === '0x') {
@@ -710,6 +1010,27 @@ async function runVerificationJob(
 					errorCode: 'contract_not_found',
 					errorData: JSON.stringify({
 						message: `No bytecode found at address ${address} on chain ${chainId}`,
+					}),
+					compilationTime: Date.now() - startTime,
+				})
+				.where(eq(verificationJobsTable.id, jobId))
+			return
+		}
+
+		// Forge reports a solc version for solar builds unless told the solar one, and recompiling solar
+		// output with solc can never match, so ask for the solar build instead of a misleading no_match.
+		const onchainSolarVersion =
+			isVyper || isSolarCompilerVersion(compilerVersion)
+				? null
+				: getSolarAuxdataVersion(onchainBytecode)
+		if (onchainSolarVersion) {
+			await db
+				.update(verificationJobsTable)
+				.set({
+					completedAt: new Date().toISOString(),
+					errorCode: 'solar_compiler_version_required',
+					errorData: JSON.stringify({
+						message: `The bytecode at ${address} was compiled by solar ${onchainSolarVersion}, but compilerVersion ${compilerVersion} names solc. Resubmit with the solar build's solc-compatible version (the Version line of \`SOLC_WRAPPER=1 solar --version\`, e.g. 0.8.38+commit.e7a91fc7.solar.0.3.0); with Forge, run forge verify-contract with --use solar.`,
 					}),
 					compilationTime: Date.now() - startTime,
 				})
@@ -738,6 +1059,7 @@ async function runVerificationJob(
 						contractIdentifier,
 						input: stdJsonInput,
 					}),
+					signal: AbortSignal.timeout(CONTAINER_COMPILE_TIMEOUT_MS),
 				}),
 			)
 		} catch (error) {
@@ -751,7 +1073,7 @@ async function runVerificationJob(
 				.update(verificationJobsTable)
 				.set({
 					completedAt: new Date().toISOString(),
-					errorCode: 'container_error',
+					errorCode: isTimeoutError(error) ? 'timeout' : 'container_error',
 					errorData: JSON.stringify({
 						message:
 							error instanceof Error
@@ -770,7 +1092,8 @@ async function runVerificationJob(
 				.update(verificationJobsTable)
 				.set({
 					completedAt: new Date().toISOString(),
-					errorCode: 'compilation_failed',
+					errorCode:
+						compileResponse.status === 504 ? 'timeout' : 'compilation_failed',
 					errorData: JSON.stringify({ message: errorText }),
 					compilationTime: Date.now() - startTime,
 				})
@@ -862,6 +1185,7 @@ async function runVerificationJob(
 			onchainBytecode: onchainBytecode,
 			recompiledBytecode: compiledBytecode,
 			isCreation: false,
+			deploymentAddress: address,
 			linkReferences,
 			immutableReferences,
 			auxdataStyle,
@@ -884,6 +1208,36 @@ async function runVerificationJob(
 				.where(eq(verificationJobsTable.id, jobId))
 			return
 		}
+
+		const filteredSourceEntries = filterSourcesByCompilerMetadata(
+			stdJsonInput.sources,
+			compiledContract.metadata,
+		)
+		if (filteredSourceEntries === null) {
+			await db
+				.update(verificationJobsTable)
+				.set({
+					completedAt: new Date().toISOString(),
+					errorCode: 'source_path_collision',
+					errorData: JSON.stringify({
+						message: 'Compiler source paths collide after normalization',
+					}),
+					compilationTime: Date.now() - startTime,
+				})
+				.where(eq(verificationJobsTable.id, jobId))
+			return
+		}
+
+		// Only matched source submissions may trigger optional factory tracing.
+		const creationTransactionMetadata = sanitizedBody.creationTransactionHash
+			? await getCreationTransactionMetadata({
+					creationTransactionHash: sanitizedBody.creationTransactionHash,
+					address,
+					chainId,
+					client,
+					logContext: { jobId },
+				})
+			: null
 
 		const isExactMatch = runtimeMatchResult.match === 'exact_match'
 		const auditUser = 'verification-api'
@@ -1050,7 +1404,11 @@ async function runVerificationJob(
 		}
 
 		// Get or create compiled contract
-		const compilerName = isVyper ? 'vyper' : 'solc'
+		const compilerName = isVyper
+			? 'vyper'
+			: isSolarCompilerVersion(compilerVersion)
+				? 'solar'
+				: 'solc'
 		const existingCompilation = await db
 			.select({ id: compiledContractsTable.id })
 			.from(compiledContractsTable)
@@ -1123,10 +1481,6 @@ async function runVerificationJob(
 			})
 		}
 
-		const filteredSourceEntries = filterSourcesByCompilerMetadata(
-			stdJsonInput.sources,
-			compiledContract.metadata,
-		)
 		const shouldInsertSources =
 			existingCompilation.length === 0 || shouldReplaceExistingSources
 
@@ -1138,7 +1492,7 @@ async function runVerificationJob(
 
 		// Insert sources referenced by the compiler metadata and link them to the compilation.
 		if (shouldInsertSources) {
-			for (const [sourcePath, sourceData] of filteredSourceEntries) {
+			for (const [path, sourceData] of filteredSourceEntries) {
 				const content = sourceData.content
 				const contentBytes = new TextEncoder().encode(content)
 				const sourceHashSha256 = new Uint8Array(
@@ -1159,14 +1513,13 @@ async function runVerificationJob(
 					})
 					.onConflictDoNothing()
 
-				const normalizedPath = normalizeSourcePath(sourcePath)
 				await db
 					.insert(compiledContractsSourcesTable)
 					.values({
 						id: globalThis.crypto.randomUUID(),
 						compilationId: compilationId,
 						sourceHash: sourceHashSha256,
-						path: normalizedPath,
+						path,
 					})
 					.onConflictDoNothing()
 			}

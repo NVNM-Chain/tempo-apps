@@ -12,7 +12,11 @@ import { Midcut } from '#comps/Midcut'
 import { TokenIcon } from '#comps/TokenIcon'
 import { cx } from '#lib/css'
 import { extractContractAbi, getContractAbi } from '#lib/domain/contracts.ts'
-import type { KnownEvent, KnownEventPart } from '#lib/domain/known-events.ts'
+import {
+	dexPairLabel,
+	type KnownEvent,
+	type KnownEventPart,
+} from '#lib/domain/known-events.ts'
 import {
 	DateFormatter,
 	HexFormatter,
@@ -20,6 +24,7 @@ import {
 	RoleFormatter,
 } from '#lib/formatting.ts'
 import { useLookupSignature } from '#lib/queries'
+import ArrowLeftRightIcon from '~icons/lucide/arrow-left-right'
 
 export function TxEventMemoLine(
 	props: TxEventMemoLine.Props,
@@ -28,7 +33,7 @@ export function TxEventMemoLine(
 	return (
 		<div
 			className={cx(
-				'flex min-w-0 items-center gap-2 text-[13px] text-secondary',
+				'flex min-w-0 items-center gap-2 copy-13 text-secondary',
 				className,
 			)}
 		>
@@ -124,12 +129,17 @@ function ContractCallPart(props: {
 	)
 }
 
+/** DEX route params are lowercase addresses. */
+function lower(address: AddressType.Address): AddressType.Address {
+	return address.toLowerCase() as AddressType.Address
+}
+
 export function TxEventDescription(props: TxEventDescription.Props) {
 	const { event, seenAs, className, suffix } = props
 	return (
 		<div
 			className={cx(
-				'flex flex-row items-center gap-[6px] leading-[18px] flex-wrap min-w-0 flex-1',
+				'flex flex-row items-center gap-[6px] flex-wrap min-w-0 flex-1',
 				className,
 			)}
 		>
@@ -173,15 +183,20 @@ export namespace TxEventDescription {
 			case 'action': {
 				const isFailed = part.value === 'Failed'
 				const isBlocked = part.value === 'Blocked'
+				const isPrivateZoneAction =
+					part.value === 'Private Zone Deposit' ||
+					part.value === 'Private Zone Withdrawal'
 				return (
 					<span
 						className={cx(
 							'inline-flex h-[24px] items-center rounded-[2px] px-[6px] capitalize',
-							isBlocked
-								? 'bg-amber-500/10 text-amber-700 dark:text-amber-300'
-								: isFailed
-									? 'bg-negative/[0.06] text-primary'
-									: 'bg-distinct/70 text-primary',
+							isPrivateZoneAction
+								? 'bg-inverse text-content-inverse'
+								: isBlocked
+									? 'bg-warning-subtle text-warning'
+									: isFailed
+										? 'bg-negative/[0.06] text-primary'
+										: 'bg-distinct/70 text-primary',
 						)}
 					>
 						{part.value}
@@ -190,6 +205,26 @@ export namespace TxEventDescription {
 			}
 			case 'amount':
 				return <Amount {...part.value} />
+			case 'anchoring': {
+				const { registryId, recordId } = part.value
+				return recordId === undefined ? (
+					<Link
+						to="/anchoring/$registryId"
+						params={{ registryId }}
+						className="text-accent press-down"
+					>
+						{registryId}
+					</Link>
+				) : (
+					<Link
+						to="/anchoring/$registryId/$recordId"
+						params={{ registryId, recordId }}
+						className="text-accent press-down"
+					>
+						{recordId}
+					</Link>
+				)
+			}
 			case 'duration':
 				return <span>{DateFormatter.formatDuration(part.value)}</span>
 			case 'hex':
@@ -216,8 +251,11 @@ export namespace TxEventDescription {
 			case 'role':
 				return (
 					<span className="items-end whitespace-nowrap" title={part.value}>
-						{RoleFormatter.getRoleName(part.value) ||
-							HexFormatter.shortenHex(part.value)}
+						{RoleFormatter.getRoleName(part.value) || (
+							<span className="font-mono">
+								{HexFormatter.shortenHex(part.value)}
+							</span>
+						)}
 					</span>
 				)
 			case 'text':
@@ -245,6 +283,41 @@ export namespace TxEventDescription {
 				)
 			case 'contractCall':
 				return <ContractCallPart {...part.value} seenAs={seenAs} />
+			case 'dexRoute':
+				return (
+					<Link
+						to="/dex/$from/$to"
+						params={{ from: lower(part.value.from), to: lower(part.value.to) }}
+						title="View this route on the Stablecoin DEX"
+						className="inline-flex h-[24px] items-center gap-[4px] rounded-[2px] px-[6px] whitespace-nowrap bg-accent/10 text-accent hover:bg-accent/15 press-down"
+					>
+						<ArrowLeftRightIcon className="size-[12px]" />
+						Stablecoin DEX
+					</Link>
+				)
+			case 'dexPair':
+				if (!part.value.active)
+					return (
+						<span
+							className="whitespace-nowrap text-primary"
+							title="A retired Stablecoin DEX book"
+						>
+							{dexPairLabel(part.value, ' / ')}
+						</span>
+					)
+				return (
+					<Link
+						to="/dex/$from/$to"
+						params={{
+							from: lower(part.value.base.address),
+							to: lower(part.value.quote.address),
+						}}
+						title="View this pair on the Stablecoin DEX"
+						className="whitespace-nowrap text-accent hover:underline press-down"
+					>
+						{dexPairLabel(part.value, ' / ')}
+					</Link>
+				)
 			default:
 				return null
 		}
@@ -262,6 +335,7 @@ export namespace TxEventDescription {
 			events,
 			seenAs,
 			transformEvent,
+			renderDetails,
 			emptyContent = '…',
 			limit = 3,
 		} = props
@@ -283,18 +357,20 @@ export namespace TxEventDescription {
 		return (
 			<div className="flex flex-col gap-[4px] flex-1">
 				{displayEvents.map((event, index) => (
-					<TxEventDescription
-						key={`${event.type}-${index}`}
-						event={event}
-						seenAs={seenAs}
-						className="flex flex-row items-center gap-[6px]"
-					/>
+					<React.Fragment key={`${event.type}-${index}`}>
+						<TxEventDescription
+							event={event}
+							seenAs={seenAs}
+							className="flex flex-row items-center gap-[6px]"
+						/>
+						{renderDetails?.(event)}
+					</React.Fragment>
 				))}
 				{remainingCount > 0 && (
 					<button
 						type="button"
 						onClick={() => setExpanded(true)}
-						className="text-[12px] text-accent cursor-pointer press-down self-start"
+						className="label-12 text-accent cursor-pointer press-down self-start"
 					>
 						+ Show {remainingCount} more
 					</button>
@@ -303,7 +379,7 @@ export namespace TxEventDescription {
 					<button
 						type="button"
 						onClick={() => setExpanded(false)}
-						className="text-[12px] text-accent cursor-pointer press-down self-start"
+						className="label-12 text-accent cursor-pointer press-down self-start"
 					>
 						− View less
 					</button>
@@ -317,6 +393,7 @@ export namespace TxEventDescription {
 			events: KnownEvent[]
 			seenAs?: AddressType.Address
 			transformEvent?: (event: KnownEvent) => KnownEvent
+			renderDetails?: (event: KnownEvent) => React.ReactNode
 			emptyContent?: React.ReactNode
 			limit?: number
 		}

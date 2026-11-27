@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import app from '../src/index.tsx'
 
 type Asset = {
@@ -22,6 +22,88 @@ function createAssets(files: Record<string, Asset>): Fetcher {
 }
 
 describe('token icon route', () => {
+	beforeEach(() => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn().mockResolvedValue(new Response(null, { status: 404 })),
+		)
+	})
+	afterEach(() => vi.unstubAllGlobals())
+
+	it.each([
+		'',
+		'.svg',
+		'.png',
+	])('serves API artwork for a mixed-case address with suffix %s', async (suffix) => {
+		vi.mocked(fetch).mockResolvedValue(
+			new Response('OUSD artwork', {
+				headers: {
+					'Content-Type': 'image/svg+xml',
+					'Cache-Control': 'public, max-age=3600',
+				},
+			}),
+		)
+		const response = await app.request(
+			`/icon/4217/0x20c0000000000000000000006a37DA5C996874BE${suffix}`,
+			{},
+			{},
+		)
+		expect(fetch).toHaveBeenCalledWith(
+			'https://api.tempo.xyz/assets/4217/icons/0x20c0000000000000000000006a37da5c996874be',
+			{ signal: expect.any(AbortSignal) },
+		)
+		expect(await response.text()).toBe('OUSD artwork')
+		expect(response.headers.get('Content-Type')).toBe('image/svg+xml')
+		expect(response.headers.get('Cache-Control')).toBe('public, max-age=3600')
+	})
+
+	it.each([
+		'error',
+		'unavailable',
+		'stalled',
+	])('keeps bundled artwork when the API is %s', async (failure) => {
+		if (failure === 'error')
+			vi.mocked(fetch).mockRejectedValue(new Error('offline'))
+		else if (failure === 'stalled')
+			vi.mocked(fetch).mockImplementation(
+				(_input, options) =>
+					new Promise((_resolve, reject) => {
+						options?.signal?.addEventListener(
+							'abort',
+							() => reject(options.signal?.reason),
+							{ once: true },
+						)
+					}),
+			)
+		else vi.mocked(fetch).mockResolvedValue(new Response(null, { status: 503 }))
+		const response = await app.request(
+			'/icon/4217/0x20c0000000000000000000000000000000000000.svg',
+			{},
+			{
+				ASSETS: createAssets({
+					'/4217/icons/0x20c0000000000000000000000000000000000000.svg': {
+						body: 'bundled artwork',
+					},
+				}),
+			},
+		)
+		expect(await response.text()).toBe('bundled artwork')
+	})
+
+	it('keeps named icons local', async () => {
+		const response = await app.request(
+			'/icon/4217/usd.svg',
+			{},
+			{
+				ASSETS: createAssets({
+					'/4217/icons/usd.svg': { body: 'USD artwork' },
+				}),
+			},
+		)
+		expect(await response.text()).toBe('USD artwork')
+		expect(fetch).not.toHaveBeenCalled()
+	})
+
 	it('serves a PNG icon when the token has no SVG asset', async () => {
 		const response = await app.request(
 			'/icon/4217/0x20c000000000000000000000f047dd7018e50367',
@@ -60,5 +142,38 @@ describe('token icon route', () => {
 
 		await expect(response.text()).resolves.toBe('fallback icon')
 		expect(response.headers.get('Content-Type')).toBe('image/svg+xml')
+	})
+
+	it.each([
+		'0x1111111111111111111111111111111111111111%2f..%2f0x20c0000000000000000000000000000000000000',
+		'0x1111111111111111111111111111111111111111%2F..%2F..%2F..%2F4217%2Ficons%2F0x20c0000000000000000000000000000000000000',
+		'..%2f..%2f4217%2ficons%2f0x20c0000000000000000000000000000000000000',
+		'0x1111111111111111111111111111111111111111%5c..%5c0x20c0000000000000000000000000000000000000',
+		'0x20c0000000000000000000000000000000000000%3f',
+	])('serves the fallback for a name that is not an address: %s', async (name) => {
+		const requested: string[] = []
+		const assets = createAssets({
+			'/4217/icons/0x20c0000000000000000000000000000000000000.svg': {
+				body: 'trusted artwork',
+			},
+			'/4217/icons/fallback.svg': { body: 'fallback icon' },
+			'/42431/icons/fallback.svg': { body: 'fallback icon' },
+		})
+		const response = await app.request(
+			`/icon/42431/${name}`,
+			{},
+			{
+				ASSETS: {
+					fetch: (input) => {
+						requested.push(new URL(input.toString()).pathname)
+						return assets.fetch(input)
+					},
+				} as Fetcher,
+			},
+		)
+
+		await expect(response.text()).resolves.toBe('fallback icon')
+		expect(requested).toEqual(['/42431/icons/fallback.svg'])
+		expect(fetch).not.toHaveBeenCalled()
 	})
 })

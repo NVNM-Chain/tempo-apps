@@ -38,9 +38,11 @@ Cron ──▶ mcp-docs-indexer Worker ──▶ AI Search items.upload() (inges
                                 8. save new index + llms.txt ETag to KV
 ```
 
-Once per UTC day (00:00 cron tick) the worker does a **forced deep sync** that
-bypasses every ETag, as a backstop for sources whose `llms.txt` ETag doesn't
-roll over when individual pages change.
+Each source gets one **forced deep sync** per UTC day that bypasses its ETags,
+as a backstop for `llms.txt` ETags that do not change with individual pages.
+Sources are assigned by their configured order modulo 24: the first source
+runs at 00:00 UTC, the second at 01:00 UTC, and so on. All sources still get
+their normal hourly sync.
 
 Uploaded pages are normalized before indexing: repeated Vocs sitemap comments
 and common docs UI chrome are stripped so AI Search embeds documentation text
@@ -51,6 +53,7 @@ instead of navigation boilerplate.
 | Key                 | Value                                                    |
 | ------------------- | -------------------------------------------------------- |
 | `etag:<id>`         | last-seen `llms.txt` ETag (only stored on clean syncs)   |
+| `source_url:<id>`   | source index URL from the last clean sync, used to invalidate ETags after a migration |
 | `last_sync:<id>`    | ISO timestamp of last sync attempt                       |
 | `index:<id>`        | JSON map: `{ "<key>": { "id": "...", "etag": "...", "content_hash": "..." } }` |
 
@@ -63,6 +66,17 @@ exclusively from the scheduled cron handler inside Cloudflare Workers.
 
 ## MCP search behavior
 
+Tempo uses the canonical `https://tempo.com/developers` source, including its
+`/developers/llms.txt` index. Page reads also accept legacy `tempo.xyz` and
+`docs.tempo.xyz` URLs and resolve them to that canonical prefix. Absolute URLs outside the
+configured source origin and path prefix are rejected.
+
+Changing a source index URL bypasses its cached ETags on the next hourly sync.
+The migration to a prefixed source also bypasses caches when no source URL has
+been recorded yet, so an empty legacy index can recover without waiting for
+the daily forced sync. An index with no valid pages fails without deleting
+items or advancing its ETag and index state.
+
 The local `search` tool accepts Code Mode-friendly top-level controls:
 
 | Field          | Purpose                                                        |
@@ -73,7 +87,6 @@ The local `search` tool accepts Code Mode-friendly top-level controls:
 | `max_results`  | Maximum chunks to return; defaults to `5`                      |
 | `max_chars_per_chunk` | Maximum compact text chars per chunk; defaults to `1200` |
 | `max_total_chars` | Maximum total compact chunk text chars; defaults to `2400` |
-| `include_raw`  | Return full AI Search chunks instead of compact chunks         |
 | `response_format` | Use `structured` to return data in MCP `structuredContent` with a short text summary |
 
 When `source` and `sources` are omitted, the server applies a conservative
@@ -100,15 +113,16 @@ enters an MCP client's context window. Compact output also returns at most one
 chunk per page, preserving result diversity and avoiding repeated snippets from
 the same URL. Search text is bounded by `max_total_chars` after page
 deduplication, so broad searches cannot accidentally fill the client context
-with five large excerpts. Advanced `ai_search_options` are still accepted and
-normalized into the current AI Search binding shape.
+with five large excerpts. The public tool schema exposes only bounded,
+task-specific controls; upstream AI Search configuration and raw chunk
+responses are not advertised to MCP clients.
 
 Pass `response_format: "structured"` on `search`, `find_pages`, or `read_page`
 when the client can read MCP `structuredContent`; this keeps the text content to
 a short status line while preserving the same machine-readable result object.
 
 AI Search response caching is enabled by default with the `close_enough`
-threshold. Clients can override this with `ai_search_options.cache`.
+threshold.
 The Worker also keeps a small 60-second in-memory cache of successful search
 results per isolate to skip repeated AI Search round trips for identical
 normalized searches.
@@ -168,7 +182,7 @@ pnpm --filter mcp-docs-indexer configure:metadata
 Changing AI Search custom metadata triggers a full re-index. Re-run a forced
 sync afterward if existing built-in-storage items need the new schema applied.
 
-`docs.tempo.xyz` is listed as the `tempo` source so MCP clients can explicitly
+`tempo.com/developers` is listed as the `tempo` source so MCP clients can explicitly
 pull core protocol and integration docs with `source: "tempo"` or `read_page`.
 
 ## Setup
@@ -270,14 +284,17 @@ with `invocation_logs: true`). Every cron run emits structured JSON lines via
 
 | Event                | When                                | Useful fields                                                              |
 | -------------------- | ----------------------------------- | -------------------------------------------------------------------------- |
-| `cron.start`         | scheduled handler invoked           | `cron`, `scheduled_time`, `instance`, `sources`, `force`                   |
-| `source.complete`    | source synced or 304-unchanged      | `source`, `status`, `pages`, `unchanged`, `failed`, `deleted`, `duration_ms` |
-| `source.failed`      | source threw or llms.txt non-OK     | `source`, `error`, `duration_ms`                                           |
-| `cron.complete`      | all sources processed               | `duration_ms`, `sources`, `synced`, `unchanged`, `errors`, `force`         |
+| `cron.start`         | scheduled handler invoked           | `cron`, `scheduled_time`, `instance`, `sources`, `forced_sources`          |
+| `source.complete`    | source synced without failures or 304-unchanged | `source`, `status`, `pages`, `unchanged`, `failed`, `deleted`, `duration_ms` |
+| `source.pending_deletion` | index removals awaiting confirmation | `source`, `status`, `removed`, `duration_ms` |
+| `source.pending_index` | uploads accepted, AI Search indexing is pending | `source`, `status`, `pages`, `pending`, `duration_ms` |
+| `source.failed`      | source error or partial page failure | `source`, `status`, `duration_ms`; error reports have `error`, partial reports have `pages`, `unchanged`, `failed`, `deleted` |
+| `cron.complete`      | all sources processed               | `duration_ms`, `sources`, `synced`, `unchanged`, `pending`, `errors`, `forced_sources` |
 | `page.fetch_failed`  | per-page `<page>.md` GET non-OK     | `source`, `url`, `status`                                                  |
 | `page.empty`         | empty markdown body                 | `source`, `url`                                                            |
 | `page.too_large`     | page exceeds 3.5MB upload cap       | `source`, `url`, `bytes`                                                   |
 | `page.upload_failed` | `uploadAndPoll` threw               | `source`, `url`, `error`                                                   |
+| `page.index_failed` | AI Search reported an indexing error; the item will be retried | `source`, `key`, `item_id`, `status`, `error` |
 | `page.delete_failed` | `items.delete` threw on stale page  | `source`, `key`, `item_id`, `error`                                        |
 | `index.parse_failed` | corrupt JSON in `index:<source>` KV | `key`, `error`                                                             |
 
@@ -313,12 +330,11 @@ Important metrics:
 - `tempo_docs_mcp_ingest_duration_ms`
 - `tempo_docs_mcp_source_sync_count`
 - `tempo_docs_mcp_source_pages_failed`
+- `tempo_docs_mcp_source_items_pending`
 
 ## Deploy
 
-```bash
-pnpm --filter mcp-docs-indexer deploy
-```
+Pushes to `main` that touch this app deploy it through the [Cloudflare Deploy Broker](https://github.com/tempoxyz/cloudflare-deploy-broker); CI holds no Cloudflare credential. The broker accepts only a build that matches the `mcp-docs-indexer` entry in [`cloudflare-deploy-policies`](https://github.com/tempoxyz/cloudflare-deploy-policies/blob/main/policies/tempoxyz/tempo-apps.yaml), so a new binding or domain needs a policy change first. Worker secrets such as `POSTHOG_PROJECT_API_KEY` are managed in the broker dashboard (https://cf.tehq.net/, Workers tab), and every deploy keeps them.
 
 Cron runs hourly. The Worker is not bound to a public route — `workers_dev`
 is disabled in `wrangler.jsonc`. Tail logs to confirm the cron is firing:

@@ -1,4 +1,7 @@
 import { keepPreviousData, queryOptions, useQuery } from '@tanstack/react-query'
+import { Button, TextInput } from '@tempoxyz/ds'
+import { ArrowRight, Search } from '@tempoxyz/ds/icons'
+import { useNavigate } from '@tanstack/react-router'
 import * as Address from 'ox/Address'
 import * as Hex from 'ox/Hex'
 import * as React from 'react'
@@ -12,12 +15,12 @@ import { getApiUrl } from '#lib/env.ts'
 import { normalizeSearchInput } from '#lib/tempo-address'
 import type {
 	AddressSearchResult,
+	AnchoringSearchResult,
 	BlockSearchResult,
 	SearchApiResponse,
 	SearchResult,
 	TokenSearchResult,
 } from '#routes/api/search'
-import ArrowRight from '~icons/lucide/arrow-right'
 
 const recentSearchesStorageKey = 'tempo-explorer-recent-searches'
 const recentSearchesLimit = 6
@@ -41,6 +44,8 @@ function parseBlockInput(raw: string): string | null {
 function getSearchResultKey(result: SearchResult): string {
 	if (result.type === 'block') return `block-${result.blockNumber}`
 	if (result.type === 'transaction') return `tx-${result.hash.toLowerCase()}`
+	if (result.type === 'anchoring')
+		return `anchoring-${result.registryId}-${result.recordId ?? ''}`
 	return `${result.type}-${result.address.toLowerCase()}`
 }
 
@@ -62,6 +67,14 @@ function isPersistedSearchResult(value: unknown): value is SearchResult {
 		Hex.validate(result.hash) &&
 		Hex.size(result.hash) === 32 &&
 		(result.timestamp === undefined || typeof result.timestamp === 'number')
+	)
+		return true
+
+	if (
+		result.type === 'anchoring' &&
+		Number.isSafeInteger(result.registryId) &&
+		(result.recordId === undefined || Number.isSafeInteger(result.recordId)) &&
+		typeof result.label === 'string'
 	)
 		return true
 
@@ -129,7 +142,9 @@ function persistRecentSearches(results: SearchResult[]): void {
 			recentSearchesStorageKey,
 			JSON.stringify(results.slice(0, recentSearchesLimit)),
 		)
-	} catch {}
+	} catch {
+		// Keep recent searches in memory when local storage is unavailable.
+	}
 }
 
 function toManualSearchResult(data: ManualActivation): SearchResult {
@@ -158,6 +173,7 @@ export function ExploreInput(props: ExploreInput.Props) {
 		tabIndex,
 		autoFocus,
 	} = props
+	const navigate = useNavigate()
 	const formRef = React.useRef<HTMLFormElement>(null)
 	const rootRef = React.useRef<HTMLDivElement>(null)
 	const resultsRef = React.useRef<HTMLDivElement>(null)
@@ -183,7 +199,11 @@ export function ExploreInput(props: ExploreInput.Props) {
 		(Address.validate(normalizedQuery) ||
 			(Hex.validate(normalizedQuery) && Hex.size(normalizedQuery) === 32) ||
 			parseBlockInput(normalizedQuery) !== null)
-	const { data: searchResults, isFetching } = useQuery(
+	const {
+		data: searchResults,
+		isFetching,
+		isError,
+	} = useQuery(
 		queryOptions({
 			queryKey: ['search', normalizedQuery],
 			queryFn: async ({ signal }): Promise<SearchApiResponse> => {
@@ -217,6 +237,7 @@ export function ExploreInput(props: ExploreInput.Props) {
 		const tokens: TokenSearchResult[] = []
 		const addresses: AddressSearchResult[] = []
 		const blocks: BlockSearchResult[] = []
+		const anchoring: AnchoringSearchResult[] = []
 
 		for (const suggestion of suggestions) {
 			if (suggestion.type === 'transaction')
@@ -227,6 +248,7 @@ export function ExploreInput(props: ExploreInput.Props) {
 			if (suggestion.type === 'token') tokens.push(suggestion)
 			else if (suggestion.type === 'address') addresses.push(suggestion)
 			else if (suggestion.type === 'block') blocks.push(suggestion)
+			else if (suggestion.type === 'anchoring') anchoring.push(suggestion)
 		}
 
 		const groups: ExploreInput.SuggestionGroup[] = []
@@ -243,6 +265,9 @@ export function ExploreInput(props: ExploreInput.Props) {
 
 		if (tokens.length > 0)
 			groups.push({ type: 'token', title: 'Tokens', items: tokens })
+
+		if (anchoring.length > 0)
+			groups.push({ type: 'anchoring', title: 'Anchoring', items: anchoring })
 
 		return groups
 	}, [query.length, recentSearches, suggestions])
@@ -261,6 +286,16 @@ export function ExploreInput(props: ExploreInput.Props) {
 	React.useEffect(() => {
 		setRecentSearches(loadRecentSearches())
 	}, [])
+
+	React.useEffect(() => {
+		if (
+			autoFocus &&
+			matchMedia('(min-width: 640px) and (hover: hover) and (pointer: fine)')
+				.matches
+		) {
+			inputRef.current?.focus({ preventScroll: true })
+		}
+	}, [autoFocus, inputRef])
 
 	React.useEffect(() => {
 		if (inputRef.current === document.activeElement) setHasFocus(true)
@@ -384,8 +419,20 @@ export function ExploreInput(props: ExploreInput.Props) {
 				onActivate?.({ type: 'hash', value: result.hash })
 				return
 			}
+
+			if (result.type === 'anchoring') {
+				onChange?.(result.label)
+				const registryId = String(result.registryId)
+				if (result.recordId === undefined)
+					navigate({ to: '/anchoring/$registryId', params: { registryId } })
+				else
+					navigate({
+						to: '/anchoring/$registryId/$recordId',
+						params: { registryId, recordId: String(result.recordId) },
+					})
+			}
 		},
-		[onChange, onActivate, rememberSearch, closeResults],
+		[onChange, onActivate, rememberSearch, closeResults, navigate],
 	)
 
 	return (
@@ -431,101 +478,94 @@ export function ExploreInput(props: ExploreInput.Props) {
 					}}
 					className="relative w-full"
 				>
-					<input
-						ref={inputRef}
-						autoFocus={autoFocus}
-						autoCapitalize="none"
-						autoComplete="off"
-						autoCorrect="off"
-						tabIndex={tabIndex}
-						value={value}
-						className={cx(
-							'text-search-input bg-surface border-base-border border pl-[16px] pr-[60px] w-full placeholder:text-tertiary rounded-[10px] focus-visible:border-focus outline-0',
-							size === 'large' ? 'h-[52px]' : 'h-[42px]',
-							className,
-						)}
-						data-1p-ignore
-						name="explore-query"
-						placeholder="Search by Address / Tx Hash / Block / Token"
-						spellCheck={false}
-						type="text"
-						onKeyDown={(event) => {
-							if (event.key === 'Escape' && showResults) {
-								event.preventDefault()
-								setShowResults(false)
-								setSelectedIndex(-1)
-								return
-							}
-
-							if (!showResults || flatSuggestions.length === 0) return
-
-							if (event.key === 'ArrowDown') {
-								event.preventDefault()
-								setSelectedIndex((prev) =>
-									prev < flatSuggestions.length - 1 ? prev + 1 : 0,
-								)
-								return
-							}
-
-							if (event.key === 'ArrowUp') {
-								event.preventDefault()
-								setSelectedIndex((prev) =>
-									prev > 0 ? prev - 1 : flatSuggestions.length - 1,
-								)
-								return
-							}
-
-							if (event.key === 'Enter') {
-								const index = selectedIndex >= 0 ? selectedIndex : 0
-								if (index < flatSuggestions.length) {
+					<TextInput.Group size={size} className={className}>
+						<TextInput.Prefix>
+							<Search />
+						</TextInput.Prefix>
+						<TextInput.Control
+							ref={inputRef}
+							autoCapitalize="none"
+							autoComplete="off"
+							autoCorrect="off"
+							tabIndex={tabIndex}
+							value={value}
+							className="outline-none! focus-visible:outline-none!"
+							data-1p-ignore
+							name="explore-query"
+							placeholder="Search address, hash, block, token"
+							enterKeyHint="search"
+							spellCheck={false}
+							type="text"
+							onKeyDown={(event) => {
+								if (event.key === 'Escape' && showResults) {
 									event.preventDefault()
-									handleSelect(flatSuggestions[index])
+									setShowResults(false)
+									setSelectedIndex(-1)
+									return
 								}
-								return
+
+								if (!showResults || flatSuggestions.length === 0) return
+
+								if (event.key === 'ArrowDown') {
+									event.preventDefault()
+									setSelectedIndex((prev) =>
+										prev < flatSuggestions.length - 1 ? prev + 1 : 0,
+									)
+									return
+								}
+
+								if (event.key === 'ArrowUp') {
+									event.preventDefault()
+									setSelectedIndex((prev) =>
+										prev > 0 ? prev - 1 : flatSuggestions.length - 1,
+									)
+									return
+								}
+
+								if (event.key === 'Enter') {
+									const index = selectedIndex >= 0 ? selectedIndex : 0
+									if (index < flatSuggestions.length) {
+										event.preventDefault()
+										handleSelect(flatSuggestions[index])
+									}
+									return
+								}
+							}}
+							onChange={(event) => {
+								setHasFocus(true)
+								onChange?.(event.target.value)
+							}}
+							onFocus={() => {
+								setHasFocus(true)
+								if (query.length > 0 || recentSearches.length > 0)
+									setShowResults(true)
+							}}
+							role="combobox"
+							aria-expanded={showResults}
+							aria-haspopup="listbox"
+							aria-autocomplete="list"
+							aria-controls={resultsId}
+							aria-activedescendant={
+								selectedIndex !== -1
+									? `${resultsId}-${selectedIndex}`
+									: undefined
 							}
-						}}
-						onChange={(event) => {
-							setHasFocus(true)
-							onChange?.(event.target.value)
-						}}
-						onFocus={() => {
-							setHasFocus(true)
-							if (query.length > 0 || recentSearches.length > 0)
-								setShowResults(true)
-						}}
-						role="combobox"
-						aria-expanded={showResults}
-						aria-haspopup="listbox"
-						aria-autocomplete="list"
-						aria-controls={resultsId}
-						aria-activedescendant={
-							selectedIndex !== -1 ? `${resultsId}-${selectedIndex}` : undefined
-						}
-						title="Search by Address / Tx Hash / Block / Token (Cmd+K to focus)"
-					/>
-					<div
-						className={cx(
-							'absolute top-[50%] -translate-y-[50%]',
-							size === 'large' ? 'right-[16px]' : 'right-[12px]',
-						)}
-					>
-						<button
-							type="submit"
-							aria-label="Search"
-							aria-disabled={!isValidInput}
-							className={cx(
-								'rounded-[10px]! border border-base-border bg-base-background/90 grid place-items-center press-down transition-colors hover:bg-surface',
-								size === 'large' ? 'size-[34px]' : 'size-[30px]',
-								isValidInput
-									? 'text-primary cursor-pointer'
-									: 'text-tertiary cursor-default',
-							)}
-						>
-							<ArrowRight
-								className={size === 'large' ? 'size-[16px]' : 'size-[14px]'}
-							/>
-						</button>
-					</div>
+							title="Search by Address / Tx Hash / Block / Token (Cmd+K to focus)"
+						/>
+						<TextInput.Suffix>
+							<Button
+								type="submit"
+								aria-label="Search"
+								aria-disabled={!isValidInput}
+								shape="icon"
+								size={size === 'large' ? 'small' : 'xsmall'}
+								variant="secondary"
+								className={cx(!isValidInput && 'opacity-50')}
+							>
+								<ArrowRight />
+							</Button>
+						</TextInput.Suffix>
+					</TextInput.Group>
 				</form>
 			</div>
 
@@ -537,8 +577,8 @@ export function ExploreInput(props: ExploreInput.Props) {
 					aria-label="Search suggestions"
 					className={cx(
 						'absolute left-0 right-0 mt-2 z-50',
-						'bg-surface border border-base-border rounded-[10px] overflow-hidden',
-						'shadow-[0px_4px_44px_rgba(0,0,0,0.05)]',
+						'bg-surface border border-base-border rounded-body overflow-hidden',
+						'shadow-sm max-h-[min(420px,50dvh)] overflow-y-auto overscroll-contain',
 					)}
 					style={{ opacity: 0 }}
 				>
@@ -548,8 +588,12 @@ export function ExploreInput(props: ExploreInput.Props) {
 						className="absolute top-0 left-0 right-0"
 					/>
 					{flatSuggestions.length === 0 ? (
-						<div className="px-[16px] py-[12px] text-[14px] text-tertiary">
-							{!searchResults ? 'Searching…' : 'No results'}
+						<div className="px-[16px] py-[12px] copy-14 text-tertiary">
+							{isError
+								? 'Search unavailable. Paste an address, hash, or block number.'
+								: isFetching
+									? 'Searching…'
+									: 'No results'}
 						</div>
 					) : (
 						<div className="flex flex-col py-[4px]">
@@ -561,20 +605,18 @@ export function ExploreInput(props: ExploreInput.Props) {
 											groupIndex > 0 && 'pt-[12px]',
 										)}
 									>
-										<div className="text-[12px] text-secondary">
-											{group.title}
-										</div>
+										<div className="label-12 text-secondary">{group.title}</div>
 										{group.type === 'recent' ? (
 											<button
 												type="button"
-												className="text-[12px] text-tertiary hover:text-base-content"
+												className="label-12 text-tertiary hover:text-base-content"
 												onMouseDown={(event) => event.preventDefault()}
 												onClick={clearRecentSearches}
 											>
 												Clear
 											</button>
 										) : (
-											<div className="text-[12px] text-tertiary">
+											<div className="label-12 text-tertiary">
 												{group.type === 'token'
 													? 'Address'
 													: group.type === 'transaction'
@@ -585,15 +627,9 @@ export function ExploreInput(props: ExploreInput.Props) {
 									</div>
 									{group.items.map((item) => {
 										const flatIndex = flatSuggestions.indexOf(item)
-										const key =
-											item.type === 'transaction'
-												? `tx-${item.hash}`
-												: item.type === 'block'
-													? `block-${item.blockNumber}`
-													: `${item.type}-${item.address}`
 										return (
 											<ExploreInput.SuggestionItem
-												key={key}
+												key={getSearchResultKey(item)}
 												suggestion={item}
 												isSelected={flatIndex === selectedIndex}
 												onSelect={handleSelect}
@@ -634,7 +670,7 @@ export namespace ExploreInput {
 	}
 
 	export type SuggestionGroup = {
-		type: 'recent' | 'token' | 'address' | 'transaction' | 'block'
+		type: 'recent' | 'token' | 'address' | 'transaction' | 'block' | 'anchoring'
 		title: string
 		items: SearchResult[]
 	}
@@ -668,24 +704,21 @@ export namespace ExploreInput {
 				)}
 			>
 				{suggestion.type === 'block' && (
-					<span className="text-[16px] font-medium text-base-content tabular-nums">
+					<span className="label-16 text-base-content tabular-nums">
 						#{suggestion.blockNumber}
 					</span>
 				)}
 				{suggestion.type === 'token' && (
 					<>
 						<div className="flex items-center gap-[10px] min-w-0 shrink">
-							<span className="text-[16px] font-medium text-base-content truncate">
+							<span className="label-16 text-base-content truncate">
 								{suggestion.name}
 							</span>
-							<span className="text-[11px] font-medium text-base-content bg-base-alt px-[4px] py-[2px] rounded-[4px] shrink-0">
-								{suggestion.symbol}
-							</span>
-							<span className="text-[11px] font-medium text-tertiary bg-base-alt px-[4px] py-[2px] rounded-[4px] shrink-0">
+							<span className="label-12 font-medium text-tertiary bg-base-alt px-[4px] py-[2px] rounded-[4px] shrink-0">
 								TIP-20
 							</span>
 						</div>
-						<span className="text-[13px] font-mono text-accent flex-1 text-right">
+						<span className="copy-14 font-mono text-accent flex-1 text-right">
 							<Midcut value={suggestion.address} prefix="0x" align="end" />
 						</span>
 					</>
@@ -695,49 +728,61 @@ export namespace ExploreInput {
 						<div className="flex min-w-0 flex-1 flex-col overflow-hidden">
 							<div className="flex min-w-0 max-w-full items-center gap-[8px]">
 								{suggestion.label ? (
-									<span className="min-w-0 truncate text-[15px] font-medium text-base-content">
+									<span className="min-w-0 truncate label-15 text-base-content">
 										{suggestion.label}
 									</span>
 								) : (
-									<span className="block min-w-0 flex-1 overflow-hidden text-[13px] font-mono text-accent">
+									<span className="block min-w-0 flex-1 overflow-hidden copy-14 font-mono text-accent">
 										<Midcut value={suggestion.address} prefix="0x" />
 									</span>
 								)}
 								{suggestion.category ? (
-									<span className="text-[11px] font-medium text-tertiary bg-base-alt px-[4px] py-[2px] rounded-[4px] shrink-0">
+									<span className="label-12 font-medium text-tertiary bg-base-alt px-[4px] py-[2px] rounded-[4px] shrink-0">
 										{suggestion.category}
 									</span>
 								) : suggestion.isTip20 ? (
-									<span className="text-[11px] font-medium text-tertiary bg-base-alt px-[4px] py-[2px] rounded-[4px] shrink-0">
+									<span className="label-12 font-medium text-tertiary bg-base-alt px-[4px] py-[2px] rounded-[4px] shrink-0">
 										TIP-20
 									</span>
 								) : null}
 							</div>
 							{suggestion.label && (
-								<span className="block min-w-0 max-w-full overflow-hidden text-[13px] font-mono text-accent">
+								<span className="block min-w-0 max-w-full overflow-hidden copy-14 font-mono text-accent">
 									<Midcut value={suggestion.address} prefix="0x" />
 								</span>
 							)}
 						</div>
 						{suggestion.description && (
-							<span className="hidden w-[44%] shrink-0 text-right text-[13px] leading-[1.25] text-secondary sm:block">
+							<span className="hidden w-[44%] shrink-0 text-right copy-14 text-secondary sm:block">
 								{suggestion.description}
 							</span>
 						)}
 					</>
 				)}
+				{suggestion.type === 'anchoring' && (
+					<>
+						<span className="text-[15px] text-base-content truncate min-w-0 flex-1">
+							{suggestion.label}
+						</span>
+						<span className="text-[12px] text-tertiary shrink-0 tabular-nums">
+							{suggestion.recordId === undefined
+								? `Registry #${suggestion.registryId}`
+								: `Record #${suggestion.recordId} · registry #${suggestion.registryId}`}
+						</span>
+					</>
+				)}
 				{suggestion.type === 'transaction' && (
 					<>
-						<span className="text-[13px] font-mono text-accent truncate min-w-0 flex-1">
+						<span className="copy-14 font-mono text-accent truncate min-w-0 flex-1">
 							<Midcut value={suggestion.hash} prefix="0x" />
 						</span>
 						{suggestion.timestamp ? (
 							<RelativeTime
 								timestamp={BigInt(suggestion.timestamp)}
-								className="text-[12px] text-tertiary"
+								className="label-12 text-tertiary"
 							/>
 						) : (
-							<span className="text-[12px] text-tertiary">−</span>
+							<span className="label-12 text-tertiary">−</span>
 						)}
 					</>
 				)}

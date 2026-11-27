@@ -2,8 +2,9 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { buildEnvSchema } from '../src/lib/build-env'
+import { buildEnvSchema, devnetUrlsSchema } from '../src/lib/build-env'
 import { serverEnvSchema } from '../src/lib/server/env'
+import wrangler from '../wrangler.json' with { type: 'json' }
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -13,12 +14,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
  * primary source of truth for everything else.
  */
 const CLIENT_AND_BINDING_VARS = [
-	'DATADOG_APPLICATION_ID',
-	'DATADOG_CLIENT_TOKEN',
-	'DATADOG_SITE',
+	'BLOCKED_ASNS',
 	'SENTRY_DSN',
 	'SENTRY_TRACES_SAMPLE_RATE',
 	'VITE_CONTRACT_VERIFICATION_API_BASE_URL',
+	'VITE_EXPLORER_POSTHOG_KEY',
+	'VITE_POSTHOG_HOST',
 	'VITE_SENTRY_DSN',
 	'VITE_SENTRY_TRACES_SAMPLE_RATE',
 	'VITE_TEMPO_ENV',
@@ -30,6 +31,7 @@ function schemaKeys(schema: { shape: Record<string, unknown> }): string[] {
 
 const ALL_VARS = new Set([
 	...schemaKeys(buildEnvSchema),
+	...schemaKeys(devnetUrlsSchema),
 	...schemaKeys(serverEnvSchema),
 	...CLIENT_AND_BINDING_VARS,
 ])
@@ -60,5 +62,34 @@ describe('env sync', () => {
 			unknown,
 			`Unknown vars in .env.example: ${unknown.join(', ')}`,
 		).toEqual([])
+	})
+
+	it('configures the testnet worker to use its own indexer and domain', () => {
+		expect(wrangler.env['nvnm-testnet']).toMatchObject({
+			name: 'explorer-nvnm-testnet',
+			vars: {
+				VITE_TEMPO_ENV: 'nvnm-testnet',
+				TIDX_URL: 'https://indexer.nvnm.testnet.nvnmchain.io',
+			},
+			routes: [
+				{
+					custom_domain: true,
+					pattern: 'scan.nvnm.testnet.nvnmchain.io',
+				},
+			],
+			browser: { binding: 'BROWSER' },
+		})
+	})
+
+	it('does not deploy the explorer through GitHub Actions', () => {
+		const workflows = resolve(__dirname, '../../../.github/workflows')
+		const main = readFileSync(resolve(workflows, 'main.yml'), 'utf-8')
+		const pullRequest = readFileSync(
+			resolve(workflows, 'pull-request.yml'),
+			'utf-8',
+		)
+
+		expect(main).not.toMatch(/^ {2}deploy-explorer:/m)
+		expect(pullRequest).not.toMatch(/^\s*-\s+app:\s*explorer\s*$/m)
 	})
 })

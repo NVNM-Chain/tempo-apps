@@ -1,19 +1,15 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { createFileRoute } from '@tanstack/react-router'
 import * as React from 'react'
+import { formatUnits } from 'viem'
 import * as z from 'zod/mini'
 import { Address } from '#comps/Address'
 import { DataGrid } from '#comps/DataGrid'
 import { Sections } from '#comps/Sections'
-import {
-	FormattedTimestamp,
-	TimeColumnHeader,
-	useTimeFormat,
-} from '#comps/TimeFormat'
 import { TokenIcon } from '#comps/TokenIcon'
 import { PREFETCH_PAGE_COUNT } from '#lib/constants'
+import { PriceFormatter } from '#lib/formatting'
 import { useMediaQuery } from '#lib/hooks'
-import { withLoaderTiming } from '#lib/profiling'
 import { TOKENS_PER_PAGE, tokensListQueryOptions } from '#lib/queries'
 import type { Token } from '#lib/server/tokens'
 import { OG_BASE_URL } from '#lib/og'
@@ -41,22 +37,19 @@ export const Route = createFileRoute('/_layout/tokens')({
 	}),
 	validateSearch: z.object({
 		page: z.optional(z.number()),
-	}).parse,
+	}),
 	loader: ({ context }) =>
-		withLoaderTiming('/_layout/tokens', async () =>
-			context.queryClient.ensureQueryData(
-				tokensListQueryOptions({
-					page: 1,
-					limit: TOKENS_PER_PAGE,
-				}),
-			),
+		context.queryClient.ensureQueryData(
+			tokensListQueryOptions({
+				page: 1,
+				limit: TOKENS_PER_PAGE,
+			}),
 		),
 })
 
 function TokensPage() {
 	const { page = 1 } = Route.useSearch()
 	const loaderData = Route.useLoaderData()
-	const { timeFormat, cycleTimeFormat, formatLabel } = useTimeFormat()
 	const queryClient = useQueryClient()
 
 	const { data, isPending, isFetching } = useQuery({
@@ -106,7 +99,7 @@ function TokensPage() {
 		{
 			label: 'Token',
 			align: 'start',
-			width: 120,
+			width: 'max-content',
 		},
 		{
 			label: 'Name',
@@ -121,26 +114,24 @@ function TokensPage() {
 		},
 		{
 			label: 'Holders',
-			align: 'start',
+			align: 'end',
 			width: 110,
 		},
 		{
-			label: 'Address',
-			align: 'start',
-			width: '3fr' as const,
-			minWidth: 200,
+			label: 'Decimals',
+			align: 'end',
+			width: 90,
 		},
 		{
-			label: (
-				<TimeColumnHeader
-					label="Created"
-					formatLabel={formatLabel}
-					onCycle={cycleTimeFormat}
-					className="text-secondary hover:text-accent cursor-pointer transition-colors"
-				/>
-			),
+			label: 'Supply',
 			align: 'end',
-			width: 240,
+			width: 130,
+		},
+		{
+			label: 'Address',
+			align: 'end',
+			width: '3fr' as const,
+			minWidth: 200,
 		},
 	]
 	const stackedColumns: DataGrid.Column[] = [
@@ -149,18 +140,6 @@ function TokensPage() {
 			align: 'start',
 			width: '1fr',
 			minWidth: 110,
-		},
-		{
-			label: (
-				<TimeColumnHeader
-					label="Created"
-					formatLabel={formatLabel}
-					onCycle={cycleTimeFormat}
-					className="text-secondary hover:text-accent cursor-pointer transition-colors"
-				/>
-			),
-			align: 'end',
-			width: 210,
 		},
 	]
 
@@ -179,32 +158,16 @@ function TokensPage() {
 								columns={{ stacked: stackedColumns, tabs: columns }}
 								items={(gridMode) =>
 									tokens.map((token: Token) => {
-										const createdCell =
-											token.createdAt == null ? (
-												<span
-													key="created"
-													className="font-mono text-secondary whitespace-nowrap"
-												>
-													-
-												</span>
-											) : (
-												<FormattedTimestamp
-													key="created"
-													timestamp={BigInt(token.createdAt)}
-													format={timeFormat}
-													className="font-mono text-secondary whitespace-nowrap"
-												/>
-											)
-
 										const tokenCell = (
 											<div key="token" className="flex flex-col min-w-0 gap-1">
-												<span className="inline-flex items-center gap-2 text-base-content-positive font-medium">
+												<span className="inline-flex min-w-0 items-center gap-2 text-base-content-positive font-medium">
 													<TokenIcon
 														address={token.address}
 														name={token.symbol}
-														logoURI={token.logoURI}
 													/>
-													{token.symbol}
+													<span className="truncate" title={token.symbol}>
+														{token.symbol}
+													</span>
 												</span>
 												<span className="truncate text-secondary">
 													{token.name}
@@ -218,7 +181,7 @@ function TokensPage() {
 										return {
 											cells:
 												gridMode === 'stacked'
-													? [tokenCell, createdCell]
+													? [tokenCell]
 													: [
 															<span
 																key="symbol"
@@ -227,7 +190,6 @@ function TokensPage() {
 																<TokenIcon
 																	address={token.address}
 																	name={token.symbol}
-																	logoURI={token.logoURI}
 																/>
 																{token.symbol}
 															</span>,
@@ -242,16 +204,37 @@ function TokensPage() {
 															</span>,
 															<span
 																key="holders"
-																className="font-mono text-secondary"
+																className="font-sans text-secondary"
 															>
 																{formatHoldersCount(token)}
+															</span>,
+															<span
+																key="decimals"
+																className="font-sans text-secondary"
+															>
+																{token.decimals ?? '—'}
+															</span>,
+															<span
+																key="supply"
+																className="font-sans text-secondary"
+																title={token.totalSupply}
+															>
+																{token.totalSupply !== undefined &&
+																token.decimals !== undefined
+																	? PriceFormatter.formatAmountShort(
+																			formatUnits(
+																				BigInt(token.totalSupply),
+																				token.decimals,
+																			),
+																		)
+																	: '—'}
 															</span>,
 															<Address
 																key="address"
 																address={token.address}
+																align="end"
 																className="w-full"
 															/>,
-															createdCell,
 														],
 											link: {
 												href: `/token/${token.address}`,

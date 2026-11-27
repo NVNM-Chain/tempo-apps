@@ -1,11 +1,15 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
 	MAX_SIMULATION_CALLDATA_BYTES,
 	SimulationRequestSchema,
 } from '#routes/api/simulate'
 
+vi.mock('#wagmi.config', () => ({
+	getTempoChain: () => ({ id: 787223 }),
+}))
+
 const validRequest = {
-	chainId: 42431,
+	chainId: 787223,
 	from: '0x0000000000000000000000000000000000000001',
 	to: '0x20c0000000000000000000000000000000000001',
 	data: '0x06fdde03',
@@ -17,6 +21,14 @@ const validRequest = {
 describe('simulation request validation', () => {
 	it('accepts a valid call', () => {
 		expect(SimulationRequestSchema.safeParse(validRequest).success).toBe(true)
+	})
+
+	it.each([
+		787222, 7872, 42431,
+	])('rejects a request for a different network (%i)', (chainId) => {
+		expect(
+			SimulationRequestSchema.safeParse({ ...validRequest, chainId }).success,
+		).toBe(false)
 	})
 
 	it('rejects malformed addresses and numeric fields', () => {

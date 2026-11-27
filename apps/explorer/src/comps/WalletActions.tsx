@@ -69,7 +69,7 @@ export function WalletActions(
 			? 'Switching network…'
 			: !isConnected
 				? `Connect ${walletName}`
-				: `Switch to Tempo`
+				: 'Switch to Tempo'
 
 	return (
 		<InfoCard
@@ -100,20 +100,23 @@ export function WalletActions(
 								decimals={props.decimals}
 								image={props.image}
 							/>,
-							<SetAsFeeToken
-								key="fee"
-								address={props.address}
-								connectors={supported}
-								symbol={props.symbol}
-							/>,
-						]
+							// Only TIP-20 tokens can pay fees.
+							props.feeToken !== false && (
+								<SetAsFeeToken
+									key="fee"
+									address={props.address}
+									connectors={supported}
+									symbol={props.symbol}
+								/>
+							),
+						].filter(Boolean)
 					: [
 							<button
 								key="connect"
 								type="button"
 								disabled={busy}
 								className={cx(
-									'flex items-center gap-2 w-full text-[13px] font-sans font-medium transition-colors',
+									'flex items-center gap-2 w-full copy-13 font-sans font-medium transition-colors',
 									busy
 										? 'text-secondary animate-pulse'
 										: 'text-secondary hover:text-primary cursor-pointer press-down',
@@ -135,5 +138,7 @@ export declare namespace WalletActions {
 		symbol?: string | undefined
 		decimals?: number | undefined
 		image?: string | undefined
+		/** Offer setting it as the fee token; false for non-TIP-20 tokens. */
+		feeToken?: boolean | undefined
 	}
 }

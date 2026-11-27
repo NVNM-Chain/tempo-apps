@@ -2,18 +2,21 @@
 
 ## Getting Started
 
-To run this application (defaults to `testnet` chain):
+To run this application (defaults to NVNM devnet):
 
 ```bash
 pnpm install
 pnpm dev
 ```
 
-To run `devnet` chain:
+To run NVNM testnet:
 
 ```sh
-pnpm dev:devnet
+pnpm dev:nvnm-testnet
 ```
+
+For network selection and Cloudflare Workers Builds configuration, see
+[NVNM.md](./NVNM.md).
 
 ### Styling
 
@@ -41,3 +44,8 @@ When adding new features, please read TanStack Router and Start docs first.
 
 [TanStack Router](https://tanstack.com/router/latest/docs)
 [TanStack Start](https://tanstack.com/start/latest/docs)
+
+# RPC backend configuration
+
+See [RPC.md](./RPC.md) for the `/api/rpc` endpoint, per-Worker Orchestra secrets,
+and rollout verification.

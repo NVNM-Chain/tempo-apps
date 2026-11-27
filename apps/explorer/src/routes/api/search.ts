@@ -1,12 +1,8 @@
 import { createFileRoute } from '@tanstack/react-router'
 import * as Address from 'ox/Address'
 import * as Hex from 'ox/Hex'
-import {
-	getBlock,
-	getBlockNumber,
-	getChainId,
-	getTransaction,
-} from 'wagmi/actions'
+import * as z from 'zod/mini'
+import { getBlock, getChainId, getTransaction } from 'wagmi/actions'
 import { getAccountTag } from '#lib/account'
 import {
 	contractRegistry,
@@ -15,8 +11,10 @@ import {
 } from '#lib/domain/contracts'
 import { isTip20Address } from '#lib/domain/tip20'
 import { normalizeSearchInput } from '#lib/tempo-address'
+import { findAnchoring } from '#lib/server/anchoring'
 import { getVerifiedTokens } from '#lib/server/verified-tokens'
 import { getWagmiConfig } from '#wagmi.config.ts'
+import { readBlockNumber } from '#lib/server/block-number'
 
 export type SearchResult =
 	| {
@@ -43,6 +41,13 @@ export type SearchResult =
 			type: 'block'
 			blockNumber: number
 	  }
+	| {
+			/** A registry, or one of its records when `recordId` is set. */
+			type: 'anchoring'
+			registryId: number
+			recordId?: number
+			label: string
+	  }
 
 export type SearchApiResponse = {
 	results: SearchResult[]
@@ -56,6 +61,31 @@ export type TransactionSearchResult = Extract<
 	{ type: 'transaction' }
 >
 export type BlockSearchResult = Extract<SearchResult, { type: 'block' }>
+export type AnchoringSearchResult = Extract<SearchResult, { type: 'anchoring' }>
+
+/** Anchoring registries named like `query` and records with it as checksum; none on failure. */
+export async function searchAnchoringResults(
+	query: string,
+): Promise<AnchoringSearchResult[]> {
+	try {
+		const { registries, records } = await findAnchoring(query, 4)
+		return [
+			...registries.map((registry) => ({
+				type: 'anchoring' as const,
+				registryId: registry.id,
+				label: registry.name,
+			})),
+			...records.map((record) => ({
+				type: 'anchoring' as const,
+				registryId: record.registryId,
+				recordId: record.recordId,
+				label: record.checksum,
+			})),
+		]
+	} catch {
+		return []
+	}
+}
 
 type IndexedToken = {
 	address: Address.Address
@@ -255,12 +285,17 @@ function dedupeSearchResults(results: SearchResult[]): SearchResult[] {
 	return deduped
 }
 
+export const SearchQuerySchema = z.object({ q: z.optional(z.string()) })
+
 export const Route = createFileRoute('/api/search')({
 	server: {
 		handlers: {
 			GET: async ({ request }) => {
 				const url = new URL(request.url)
-				const rawQuery = url.searchParams.get('q')?.trim() ?? ''
+				const { q } = SearchQuerySchema.parse(
+					Object.fromEntries(url.searchParams),
+				)
+				const rawQuery = q?.trim() ?? ''
 				const query = normalizeSearchInput(rawQuery)
 
 				if (!query)
@@ -271,7 +306,6 @@ export const Route = createFileRoute('/api/search')({
 
 				const config = getWagmiConfig()
 				const chainId = getChainId(config)
-				const verifiedTokens = await getVerifiedTokens(chainId)
 				const results: SearchResult[] = []
 
 				// block number (plain digits or #-prefixed)
@@ -285,7 +319,7 @@ export const Route = createFileRoute('/api/search')({
 					blockNumber >= 0
 				) {
 					try {
-						const latestBlock = await getBlockNumber(config)
+						const latestBlock = await readBlockNumber(config.getClient())
 						if (blockNumber <= Number(latestBlock))
 							results.push({ type: 'block', blockNumber })
 					} catch {
@@ -300,7 +334,10 @@ export const Route = createFileRoute('/api/search')({
 
 				// hash
 				if (isHash) {
+					// A record's checksum can be hash-shaped too, as EVM tools write a sha256.
+					const anchoring = searchAnchoringResults(query)
 					let timestamp: number | undefined
+					let blockNumber: number | undefined
 					try {
 						const transaction = await getTransaction(config, { hash: query })
 						if (transaction.blockNumber) {
@@ -310,16 +347,28 @@ export const Route = createFileRoute('/api/search')({
 							timestamp = Number(block.timestamp)
 						}
 					} catch {
-						// unknown or pending — return the hash without a timestamp
+						// No transaction has it: a block may, else it is unknown or pending.
+						blockNumber = await getBlock(config, { blockHash: query })
+							.then(({ number }) => Number(number))
+							.catch(() => undefined)
 					}
 
-					results.push({ type: 'transaction', hash: query, timestamp })
+					results.push(
+						blockNumber === undefined
+							? { type: 'transaction', hash: query, timestamp }
+							: { type: 'block', blockNumber },
+						...(await anchoring),
+					)
 				} else {
-					if (!Address.validate(query))
-						results.push(...searchKnownContracts(query))
+					const isAddress = Address.validate(query)
+					// Only here, so a hash waits for no token list.
+					const tokens = getVerifiedTokens(chainId)
+					const anchoring = isAddress ? [] : searchAnchoringResults(query)
+					if (!isAddress) results.push(...searchKnownContracts(query))
 
 					// search for token matches (even if an address was found)
-					results.push(...searchTokens(query, verifiedTokens))
+					results.push(...searchTokens(query, await tokens))
+					results.push(...(await anchoring))
 				}
 
 				return Response.json(

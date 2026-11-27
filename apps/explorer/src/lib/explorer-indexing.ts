@@ -1,20 +1,21 @@
 import type { TempoEnv } from '#lib/env'
 
-export const EXPLORER_ORGANIZATION_ID =
-	'https://mantrachain.io/#organization'
+export const EXPLORER_ORGANIZATION_ID = 'https://mantrachain.io/#organization'
 
 const CANONICAL_EXPLORER_ORIGINS: Partial<Record<TempoEnv, string>> = {
 	nvnm: 'https://scan.nvnm.canary.mantrachain.dev',
+	'nvnm-testnet': 'https://scan.nvnm.testnet.nvnmchain.io',
+	'nvnm-mainnet': 'https://scan.nvnm.mainnet.nvnmchain.io',
 }
 
 const EXPLORER_HOST_REDIRECTS = new Map([
-	['scan.787222.nvnm.canary.mantrachain.dev', 'scan.nvnm.canary.mantrachain.dev'],
+	[
+		'scan.787222.nvnm.canary.mantrachain.dev',
+		'scan.nvnm.canary.mantrachain.dev',
+	],
 ])
 
-/**
- * Hosts served with `noindex`. The internal devnet must never be indexed —
- * every NVNM host stays here until a public network exists.
- */
+/** Hosts served with `noindex`: the internal devnet must never be indexed; mainnet is public. */
 const NON_INDEXABLE_EXPLORER_HOSTS = new Set([
 	'scan.nvnm.canary.mantrachain.dev',
 ])

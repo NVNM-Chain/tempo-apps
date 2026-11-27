@@ -1,9 +1,7 @@
 {
 	"$schema": "https://esm.sh/wrangler/config-schema.json",
 	"compatibility_date": "2026-03-01",
-	"compatibility_flags": [
-		"nodejs_compat"
-	],
+	"compatibility_flags": ["nodejs_compat"],
 	"version_metadata": {
 		"binding": "CF_VERSION_METADATA"
 	},
@@ -60,18 +58,9 @@
 			],
 			"vars": {
 				"VITE_TEMPO_ENV": "nvnm",
-				"VITE_DATADOG_ENABLED": "false",
-				"VITE_DATADOG_ALLOWED_TRACING_URLS": "",
-				"VITE_DATADOG_ENV": "nvnm",
-				"VITE_DATADOG_SERVICE": "explorer",
-				"VITE_DATADOG_SESSION_REPLAY_SAMPLE_RATE": "0",
-				"VITE_DATADOG_SESSION_SAMPLE_RATE": "100",
-				"VITE_DATADOG_TRACE_SAMPLE_RATE": "20",
 				"SENTRY_TRACES_SAMPLE_RATE": "0",
 				"VITE_SENTRY_TRACES_SAMPLE_RATE": "0",
-				"VITE_CONTRACT_VERIFICATION_API_BASE_URL": "https://contracts.tempo.xyz",
-				"TEMPO_API_URL": "https://api.nvnm.canary.mantrachain.dev",
-				"TIDX_URL": "https://api.nvnm.canary.mantrachain.dev/v1/indexer"
+				"VITE_CONTRACT_VERIFICATION_API_BASE_URL": "https://contracts.tempo.xyz"
 			},
 			"browser": {
 				"binding": "BROWSER"
@@ -104,6 +93,128 @@
 				{
 					"name": "GLOBAL_RATE_LIMITER",
 					"namespace_id": "1004",
+					"simple": {
+						"limit": 10000,
+						"period": 10
+					}
+				}
+			],
+			"version_metadata": {
+				"binding": "CF_VERSION_METADATA"
+			},
+			"workers_dev": true,
+			"observability": {
+				"enabled": true
+			}
+		},
+		"nvnm-testnet": {
+			"name": "explorer-nvnm-testnet",
+			"routes": [
+				{
+					"custom_domain": true,
+					"zone_name": "testnet.nvnmchain.io",
+					"pattern": "scan.nvnm.testnet.nvnmchain.io"
+				}
+			],
+			"vars": {
+				"VITE_TEMPO_ENV": "nvnm-testnet",
+				"TIDX_URL": "https://indexer.nvnm.testnet.nvnmchain.io",
+				"SENTRY_TRACES_SAMPLE_RATE": "0",
+				"VITE_SENTRY_TRACES_SAMPLE_RATE": "0",
+				"VITE_CONTRACT_VERIFICATION_API_BASE_URL": "https://contracts.tempo.xyz"
+			},
+			"browser": {
+				"binding": "BROWSER"
+			},
+			"ratelimits": [
+				{
+					"name": "REQUESTS_RATE_LIMITER",
+					"namespace_id": "1201",
+					"simple": {
+						"limit": 100,
+						"period": 10
+					}
+				},
+				{
+					"name": "SIMULATE_RATE_LIMITER",
+					"namespace_id": "1205",
+					"simple": {
+						"limit": 30,
+						"period": 10
+					}
+				},
+				{
+					"name": "ASN_RATE_LIMITER",
+					"namespace_id": "1203",
+					"simple": {
+						"limit": 2000,
+						"period": 10
+					}
+				},
+				{
+					"name": "GLOBAL_RATE_LIMITER",
+					"namespace_id": "1204",
+					"simple": {
+						"limit": 10000,
+						"period": 10
+					}
+				}
+			],
+			"version_metadata": {
+				"binding": "CF_VERSION_METADATA"
+			},
+			"workers_dev": true,
+			"observability": {
+				"enabled": true
+			}
+		},
+		"nvnm-mainnet": {
+			"name": "explorer-nvnm-mainnet",
+			"routes": [
+				{
+					"custom_domain": true,
+					"zone_name": "mainnet.nvnmchain.io",
+					"pattern": "scan.nvnm.mainnet.nvnmchain.io"
+				}
+			],
+			"vars": {
+				"VITE_TEMPO_ENV": "nvnm-mainnet",
+				"TIDX_URL": "https://indexer.nvnm.mainnet.nvnmchain.io",
+				"SENTRY_TRACES_SAMPLE_RATE": "0",
+				"VITE_SENTRY_TRACES_SAMPLE_RATE": "0",
+				"VITE_CONTRACT_VERIFICATION_API_BASE_URL": "https://contracts.tempo.xyz"
+			},
+			"browser": {
+				"binding": "BROWSER"
+			},
+			"ratelimits": [
+				{
+					"name": "REQUESTS_RATE_LIMITER",
+					"namespace_id": "1101",
+					"simple": {
+						"limit": 100,
+						"period": 10
+					}
+				},
+				{
+					"name": "SIMULATE_RATE_LIMITER",
+					"namespace_id": "1105",
+					"simple": {
+						"limit": 30,
+						"period": 10
+					}
+				},
+				{
+					"name": "ASN_RATE_LIMITER",
+					"namespace_id": "1103",
+					"simple": {
+						"limit": 2000,
+						"period": 10
+					}
+				},
+				{
+					"name": "GLOBAL_RATE_LIMITER",
+					"namespace_id": "1104",
 					"simple": {
 						"limit": 10000,
 						"period": 10

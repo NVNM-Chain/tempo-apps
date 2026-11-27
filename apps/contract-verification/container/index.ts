@@ -1,6 +1,17 @@
 import * as Bun from 'bun'
 
-import { getSolcPath, getVyperPath } from './compiler.ts'
+import {
+	getSolarPath,
+	getSolcPath,
+	getVyperPath,
+	parseSolarVersion,
+} from './compiler.ts'
+import { allowlistSoliditySettings } from './compiler-settings.ts'
+import {
+	compileFailureResponse,
+	getActiveCompiles,
+	runCompiler,
+} from './run-compiler.ts'
 
 const headers = new Headers({
 	'X-Request-Id': Bun.randomUUIDv7(),
@@ -13,33 +24,6 @@ function log(
 	properties?: Record<string, unknown>,
 ) {
 	console[level](JSON.stringify({ event, ...properties }))
-}
-
-/** Under the 15-minute limit on the job runner's alarm that waits for the compile. */
-const COMPILE_TIMEOUT_MS = 10 * 60 * 1_000
-
-/** Runs `compiler --standard-json` on `input`, killing it when the request ends or the time runs out. */
-async function compile(
-	request: Request,
-	compiler: string,
-	input: object,
-	env?: Record<string, string | undefined>,
-) {
-	const timeout = AbortSignal.timeout(COMPILE_TIMEOUT_MS)
-	const proc = Bun.spawn([compiler, '--standard-json'], {
-		env,
-		signal: AbortSignal.any([request.signal, timeout]),
-		stdin: new TextEncoder().encode(JSON.stringify(input)),
-		stdout: 'pipe',
-		stderr: 'pipe',
-	})
-
-	const stdout = await new Response(proc.stdout).text()
-	const stderr = await new Response(proc.stderr).text()
-	await proc.exited
-
-	if (timeout.aborted) throw new Error('Compilation timed out')
-	return { stdout, stderr }
 }
 
 const server = Bun.serve({
@@ -67,9 +51,48 @@ const server = Bun.serve({
 						{ status: 400 },
 					)
 
-				const solcPath = await getSolcPath(body.compilerVersion)
+				// A solar version (e.g. 0.8.38+commit.e7a91fc7.solar.0.3.0) runs that solar build
+				// through its solc-compatible standard JSON interface, the way Forge drives it through a
+				// solc wrapper; every other version runs solc.
+				const solar = parseSolarVersion(body.compilerVersion)
+				let compilerPath: string
+				let env: Record<string, string | undefined> | undefined
+				if (solar) {
+					try {
+						compilerPath = (await getSolarPath(body.compilerVersion)).path
+					} catch (error) {
+						return Response.json(
+							{ error: error instanceof Error ? error.message : String(error) },
+							{ status: 400 },
+						)
+					}
+					env = {
+						...Bun.env,
+						SOLC_WRAPPER: '1',
+						SOLC_WRAPPER_VERSION: solar.solcVersion,
+					}
+				} else compilerPath = await getSolcPath(body.compilerVersion)
 
-				const { stdout, stderr } = await compile(request, solcPath, body.input)
+				// Only settings that change bytecode or metadata reach the compiler, whatever the caller sent.
+				const input = {
+					...body.input,
+					settings: allowlistSoliditySettings(
+						(body.input as { settings?: unknown }).settings,
+					),
+				}
+
+				// solc and solar --standard-json read from stdin
+				const result = await runCompiler({
+					command: [compilerPath, '--standard-json'],
+					env,
+					input,
+					signal: request.signal,
+				})
+				if (result.kind !== 'done') {
+					log('warn', 'compile_not_completed', { reason: result.kind })
+					return compileFailureResponse(result)
+				}
+				const { stdout, stderr } = result
 
 				if (stderr) log('error', 'compile_stderr', { stderr })
 
@@ -116,7 +139,17 @@ const server = Bun.serve({
 
 				const vyperPath = await getVyperPath(body.compilerVersion)
 
-				const { stdout, stderr } = await compile(request, vyperPath, body.input)
+				// vyper --standard-json reads from stdin
+				const result = await runCompiler({
+					command: [vyperPath, '--standard-json'],
+					input: body.input,
+					signal: request.signal,
+				})
+				if (result.kind !== 'done') {
+					log('warn', 'compile_vyper_not_completed', { reason: result.kind })
+					return compileFailureResponse(result)
+				}
+				const { stdout, stderr } = result
 
 				// Vyper < 0.4.0 outputs warnings to stderr, so only log if it looks like an error
 				if (stderr && !stderr.includes('Warning'))
@@ -144,7 +177,9 @@ const server = Bun.serve({
 		},
 		'/health': new Response('ok'),
 		'/metrics': (_, server) =>
-			new Response(`Active requests: ${server.pendingRequests}`),
+			new Response(
+				`Active requests: ${server.pendingRequests}\nActive compiles: ${getActiveCompiles()}`,
+			),
 	},
 	error: (error) => {
 		log('error', 'unhandled_server_error', {

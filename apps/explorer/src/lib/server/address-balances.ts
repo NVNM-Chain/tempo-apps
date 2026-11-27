@@ -1,59 +1,47 @@
 import { createServerFn } from '@tanstack/react-start'
-import { type InferResponseType, parseResponse } from 'hono/client'
 import type { Address } from 'ox'
-import { formatUnits } from 'viem'
+import { erc20Abi, formatUnits } from 'viem'
 import { getChainId } from 'wagmi/actions'
 
 import type { BalancesResponse, TokenBalance } from '#lib/address-balances'
-import { api } from '#lib/server/tempo-api'
+import { indexer } from '#lib/server/dex-indexer'
+import {
+	getTokensMetadata,
+	getVerifiedTokens,
+} from '#lib/server/verified-tokens'
 import { zAddress } from '#lib/zod'
-import { getWagmiConfig } from '#wagmi.config.ts'
+import { getBatchedClient, getWagmiConfig } from '#wagmi.config.ts'
 
 export const TIP20_DECIMALS = 6
 export const MAX_TOKENS = 50
 
-type BalancesApiResponse = InferResponseType<
-	(typeof api.v1.addresses)[':address']['balances']['$get'],
-	200
->
+/** USD-denominated tokens first by value, then others by raw balance. */
+function sortBalances(balances: TokenBalance[]): TokenBalance[] {
+	return balances.sort((a, b) => {
+		const aIsUsd = a.currency === 'USD'
+		const bIsUsd = b.currency === 'USD'
 
-/**
- * Maps API balance rows (token metadata included) into the page's shape,
- * sorted USD-denominated tokens first by value, then others by raw balance.
- */
-export function mapBalances(data: BalancesApiResponse['data']): TokenBalance[] {
-	return data
-		.map(
-			(item): TokenBalance => ({
-				token: item.token.address,
-				balance: item.amount,
-				name: item.token.name,
-				symbol: item.token.symbol,
-				currency: item.token.currency,
-				decimals: item.token.decimals,
-			}),
-		)
-		.sort((a, b) => {
-			const aIsUsd = a.currency === 'USD'
-			const bIsUsd = b.currency === 'USD'
+		if (aIsUsd && bIsUsd) {
+			const aValue = Number(
+				formatUnits(BigInt(a.balance), a.decimals ?? TIP20_DECIMALS),
+			)
+			const bValue = Number(
+				formatUnits(BigInt(b.balance), b.decimals ?? TIP20_DECIMALS),
+			)
+			return bValue - aValue
+		}
 
-			if (aIsUsd && bIsUsd) {
-				const aValue = Number(
-					formatUnits(BigInt(a.balance), a.decimals ?? TIP20_DECIMALS),
-				)
-				const bValue = Number(
-					formatUnits(BigInt(b.balance), b.decimals ?? TIP20_DECIMALS),
-				)
-				return bValue - aValue
-			}
+		if (aIsUsd) return -1
+		if (bIsUsd) return 1
 
-			if (aIsUsd) return -1
-			if (bIsUsd) return 1
-
-			return Number(BigInt(b.balance) - BigInt(a.balance))
-		})
+		return Number(BigInt(b.balance) - BigInt(a.balance))
+	})
 }
 
+/**
+ * The address's `maxTokens` largest balances, read from the node for the tokens
+ * tidx has seen it hold and every listed token: tidx misses balances set at genesis.
+ */
 export async function fetchAddressBalancesData(params: {
 	address: Address.Address
 	chainId: number
@@ -62,14 +50,43 @@ export async function fetchAddressBalancesData(params: {
 	const { address, chainId } = params
 	const maxTokens = params.maxTokens ?? MAX_TOKENS
 
-	const { data } = await parseResponse(
-		api.v1.addresses[':address'].balances.$get({
-			param: { address },
-			query: { chainId: String(chainId), limit: String(maxTokens) },
-		}),
-	)
+	const [held, listed] = await Promise.all([
+		indexer(
+			chainId,
+			`SELECT DISTINCT token FROM address_holder_deltas
+			WHERE holder = '${address.toLowerCase()}' LIMIT ${maxTokens}`,
+		),
+		getVerifiedTokens(chainId),
+	])
+	const tokens = [
+		...new Set([
+			...held.map((row) => String(row.token) as Address.Address),
+			...listed.map((token) => token.address),
+		]),
+	]
 
-	return { balances: mapBalances(data) }
+	const client = getBatchedClient()
+	const [amounts, metadata] = await Promise.all([
+		Promise.all(
+			tokens.map((token) =>
+				client
+					.readContract({
+						address: token,
+						abi: erc20Abi,
+						functionName: 'balanceOf',
+						args: [address],
+					})
+					.catch(() => undefined),
+			),
+		),
+		getTokensMetadata(tokens),
+	])
+	const balances = tokens.flatMap((token, i): TokenBalance[] => {
+		const balance = amounts[i]
+		return balance ? [{ token, balance: String(balance), ...metadata[i] }] : []
+	})
+
+	return { balances: sortBalances(balances).slice(0, maxTokens) }
 }
 
 export const fetchAddressBalances = createServerFn({ method: 'GET' })

@@ -54,20 +54,8 @@ const taggedAccounts: Record<Address.Address, AccountTag> = {
 	},
 	// genesis tip20 tokens
 	'0x20c0000000000000000000000000000000000000': {
-		id: 'genesis-token:pathusd',
-		label: 'pathUSD',
-	},
-	'0x20c0000000000000000000000000000000000001': {
-		id: 'genesis-token:alphausd',
-		label: 'AlphaUSD',
-	},
-	'0x20c0000000000000000000000000000000000002': {
-		id: 'genesis-token:betausd',
-		label: 'BetaUSD',
-	},
-	'0x20c0000000000000000000000000000000000003': {
-		id: 'genesis-token:thetausd',
-		label: 'ThetaUSD',
+		id: 'genesis-token:nusd',
+		label: 'nUSD',
 	},
 	// mpp
 	'0x33b901018174ddabe4841042ab76ba85d4e24f25': {

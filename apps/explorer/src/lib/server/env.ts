@@ -7,20 +7,38 @@ import * as z from 'zod/mini'
  * Variables injected per-request via Cloudflare bindings (e.g. SENTRY_DSN,
  * SENTRY_TRACES_SAMPLE_RATE) are accessed via the `env` parameter in request
  * handlers and are not included here.
+ *
+ * `DEVNET_*` credentials go with the `devnet` build's backend overrides (see
+ * `devnetUrls`). Other builds ignore them.
  */
 export const serverEnvSchema = z.object({
-	TEMPO_API_KEY: z.optional(z.string()),
-	TEMPO_API_URL: z.optional(z.string()),
+	DEVNET_RPC_AUTH: z.optional(z.string()),
+	DEVNET_TIDX_AUTH: z.optional(z.string()),
+	RPC_AUTH: z.optional(z.string()),
 	TIDX_URL: z.optional(z.string()),
+	ZONE_PROVER_RPC_AUTH: z.optional(z.string()),
+	ZONE_PROVER_TIDX_AUTH: z.optional(z.string()),
 })
+
+export type ServerEnv = z.infer<typeof serverEnvSchema>
 
 export const serverEnv = serverEnvSchema.parse(process.env)
 
 /**
- * Base URL for the Tempo API.
- *
- * Defaults to our self-hosted tapimo: api.tempo.xyz serves Tempo's own chains
- * and rejects 787222 with `chain_id_unsupported`.
+ * Backends that point a `devnet` build at another chain-31318 devnet, such as
+ * a per-devnet preview. They are compiled in from the build's own
+ * configuration (see vite.config.ts) and never read from runtime Worker vars:
+ * `keep_vars` carries a var from one uploaded version into the next, so one
+ * preview's override would otherwise reach every later version.
  */
-export const tempoApiUrl =
-	serverEnv.TEMPO_API_URL ?? 'https://api.nvnm.canary.mantrachain.dev'
+export const devnetUrls: DevnetUrls = {
+	DEVNET_API_URL: import.meta.env.DEVNET_API_URL || undefined,
+	DEVNET_RPC_URL: import.meta.env.DEVNET_RPC_URL || undefined,
+	DEVNET_TIDX_URL: import.meta.env.DEVNET_TIDX_URL || undefined,
+}
+
+export type DevnetUrls = {
+	DEVNET_API_URL?: string | undefined
+	DEVNET_RPC_URL?: string | undefined
+	DEVNET_TIDX_URL?: string | undefined
+}

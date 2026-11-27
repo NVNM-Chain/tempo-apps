@@ -4,17 +4,20 @@ import {
 	toEnrichedTransaction,
 } from '#lib/server/address-history'
 
-const { getTransactions } = vi.hoisted(() => ({
-	getTransactions: vi.fn(),
+const { indexer, getTransaction, getTransactionReceipt } = vi.hoisted(() => ({
+	indexer: vi.fn(),
+	getTransaction: vi.fn(),
+	getTransactionReceipt: vi.fn(),
 }))
 
-vi.mock('#lib/server/tempo-api', () => ({
-	api: { v1: { transactions: { $get: getTransactions } } },
+vi.mock('#lib/server/dex-indexer', async (importOriginal) => ({
+	...(await importOriginal<typeof import('#lib/server/dex-indexer')>()),
+	indexer,
 }))
-
-beforeEach(() => {
-	getTransactions.mockReset()
-})
+vi.mock('#wagmi.config', () => ({
+	getBatchedClient: () => ({ getTransaction, getTransactionReceipt }),
+	getTempoChain: () => ({ id: 787222 }),
+}))
 
 const SENDER = '0x286ad6cfc7279c8a6d86d15dcefcb77a65aa7e92'
 const RECIPIENT = '0x20c0000000000000000000000000000000000003'
@@ -23,57 +26,50 @@ const HASH =
 
 function receipt(overrides: Record<string, unknown> = {}) {
 	return {
-		blockHash: null,
-		blockNumber: 21_846_856,
+		transactionHash: HASH,
+		blockNumber: 21_846_856n,
 		contractAddress: null,
-		cumulativeGasUsed: 52_570,
-		effectiveGasPrice: '20000000000',
-		feeAmount: '1051',
-		feePayer: SENDER,
-		feeToken: RECIPIENT,
-		gasUsed: 52_570,
+		effectiveGasPrice: 20_000_000_000n,
+		from: SENDER,
+		gasUsed: 52_570n,
 		logs: [],
-		recipient: RECIPIENT,
-		sender: SENDER,
 		status: 'success',
-		timestamp: '2026-06-12T03:58:20.000Z',
-		...overrides,
-	}
-}
-
-function row(overrides: Record<string, unknown> = {}) {
-	return {
-		blockHash: null,
-		blockNumber: 21_846_856,
-		feeToken: RECIPIENT,
-		gas: 56_474,
-		hash: HASH,
-		input: '0x',
-		maxFeePerGas: '24000000000',
-		maxPriorityFeePerGas: '0',
-		meta: { receipt: receipt() },
-		nonce: 9_388,
-		recipient: RECIPIENT,
-		sender: SENDER,
-		timestamp: '2026-06-12T03:58:20.000Z',
-		transactionIndex: 17,
-		type: 'tempo',
-		value: '12345',
+		to: RECIPIENT,
 		...overrides,
 	} as never
 }
 
-describe('toEnrichedTransaction', () => {
-	it('maps a Cadent row + humanized receipt to the UI contract', () => {
-		const result = toEnrichedTransaction(row(), {
-			includeKnownEvents: false,
-			getTokenMetadata: () => undefined,
-		})
+const transaction = { hash: HASH, input: '0x', value: 12_345n } as never
 
-		expect(result).toEqual({
+/** Answers the page query with `rows` and the count query with `total`. */
+function answer(rows: Record<string, unknown>[], total = 0) {
+	indexer.mockImplementation(async (_chainId: number, sql: string) =>
+		sql.includes('count()') ? [{ n: total }] : rows,
+	)
+}
+
+const ADDRESS = '0x1111111111111111111111111111111111111111'
+
+beforeEach(() => {
+	vi.resetAllMocks()
+	getTransaction.mockResolvedValue(transaction)
+	getTransactionReceipt.mockImplementation(async ({ hash }) =>
+		receipt({ transactionHash: hash }),
+	)
+})
+
+describe('toEnrichedTransaction', () => {
+	it('maps the node’s transaction and receipt to the UI contract', () => {
+		expect(
+			toEnrichedTransaction(transaction, receipt(), {
+				timestamp: 1_781_236_700,
+				includeKnownEvents: false,
+				getTokenMetadata: () => undefined,
+			}),
+		).toEqual({
 			hash: HASH,
 			blockNumber: '0x14d5b48',
-			timestamp: Date.parse('2026-06-12T03:58:20.000Z') / 1000,
+			timestamp: 1_781_236_700,
 			from: '0x286ad6cfc7279C8a6D86D15dcEFcB77A65Aa7E92',
 			to: '0x20C0000000000000000000000000000000000003',
 			value: '0x3039',
@@ -84,22 +80,15 @@ describe('toEnrichedTransaction', () => {
 		})
 	})
 
-	it('defaults gas fields and status when the receipt is missing', () => {
-		const result = toEnrichedTransaction(row({ meta: {} }), {
-			includeKnownEvents: true,
-			getTokenMetadata: () => undefined,
-		})
-
-		expect(result.status).toBe('success')
-		expect(result.gasUsed).toBe('0x0')
-		expect(result.effectiveGasPrice).toBe('0x0')
-		expect(result.knownEvents).toEqual([])
-	})
-
 	it('marks reverted transactions from the receipt status', () => {
 		const result = toEnrichedTransaction(
-			row({ meta: { receipt: receipt({ status: 'reverted' }) } }),
-			{ includeKnownEvents: false, getTokenMetadata: () => undefined },
+			transaction,
+			receipt({ status: 'reverted' }),
+			{
+				timestamp: 0,
+				includeKnownEvents: false,
+				getTokenMetadata: () => undefined,
+			},
 		)
 
 		expect(result.status).toBe('reverted')
@@ -110,122 +99,132 @@ describe('fetchAddressHistoryData', () => {
 	it('rejects page sizes above 10', async () => {
 		await expect(
 			fetchAddressHistoryData({
-				address: '0x1111111111111111111111111111111111111111',
+				address: ADDRESS,
 				chainId: 4217,
 				includeKnownEvents: false,
-				searchParams: {
-					include: 'all',
-					limit: 11,
-					sort: 'desc',
-				},
+				searchParams: { include: 'all', limit: 11, sort: 'desc' },
 			}),
 		).rejects.toThrowError('Limit is too high')
-		expect(getTransactions).not.toHaveBeenCalled()
+		expect(indexer).not.toHaveBeenCalled()
 	})
 
-	it('requests the total at the latest edge and reuses it on cursor pages', async () => {
-		getTransactions.mockImplementation((options) => {
-			const { cursor, include } = (
-				options as { query: { cursor?: string; include: string } }
-			).query
-			return Promise.resolve(
-				Response.json(
-					include.includes('totalCount')
-						? {
-								data: [],
-								meta: { totalCount: 1_750, totalCountCapped: false },
-								nextCursor: 'cursor-1',
-							}
-						: { data: [], nextCursor: cursor ? null : 'cursor-1' },
-				),
-			)
-		})
-
+	it('counts at the latest edge and reuses the count on cursor pages', async () => {
+		// One row past the page says there is another.
+		answer(
+			[
+				{ tx_hash: HASH, block_num: 9, tx_idx: 1, timestamp: 1 },
+				{ tx_hash: HASH, block_num: 8, tx_idx: 0, timestamp: 1 },
+			],
+			1_750,
+		)
 		const params = {
-			address: '0x1111111111111111111111111111111111111111' as const,
+			address: ADDRESS,
 			chainId: 4217,
 			includeKnownEvents: false,
 			searchParams: {
 				include: 'all' as const,
-				limit: 10,
+				limit: 1,
 				sort: 'desc' as const,
 			},
 		}
 
-		await expect(fetchAddressHistoryData(params)).resolves.toMatchObject({
-			countCapped: false,
-			nextCursor: 'cursor-1',
-			total: 1_750,
-		})
+		const first = await fetchAddressHistoryData(params)
+		expect(first).toMatchObject({ total: 1_750, countCapped: false })
+		expect(first.transactions).toHaveLength(1)
+		expect(first.nextCursor).toBe(btoa('[9,1]'))
+
+		answer([{ tx_hash: HASH, block_num: 8, tx_idx: 0, timestamp: 1 }])
 		await expect(
 			fetchAddressHistoryData({
 				...params,
-				searchParams: { ...params.searchParams, cursor: 'cursor-1' },
+				searchParams: {
+					...params.searchParams,
+					cursor: first.nextCursor ?? '',
+				},
 			}),
-		).resolves.toMatchObject({
-			countCapped: false,
-			nextCursor: null,
-			total: 1_750,
-		})
+		).resolves.toMatchObject({ total: 1_750, nextCursor: null })
 
-		expect(getTransactions).toHaveBeenCalledTimes(2)
-		expect(getTransactions).toHaveBeenNthCalledWith(1, {
-			query: {
-				address: params.address,
-				chainId: '4217',
-				include: 'receipt,totalCount',
-				limit: '10',
-				order: 'desc',
-			},
-		})
-		expect(getTransactions).toHaveBeenNthCalledWith(2, {
-			query: {
-				address: params.address,
-				chainId: '4217',
-				cursor: 'cursor-1',
-				include: 'receipt',
-				limit: '10',
-				order: 'desc',
-			},
-		})
+		const queries = indexer.mock.calls.map(([, sql]) => sql as string)
+		// Counted once, as stored and then without copies.
 		expect(
-			getTransactions.mock.calls.filter(([options]) =>
-				(options as { query: { include: string } }).query.include.includes(
-					'totalCount',
-				),
-			),
-		).toHaveLength(1)
+			queries
+				.filter((sql) => sql.includes('count()'))
+				.map((sql) => sql.includes('FINAL')),
+		).toEqual([false, true])
+		expect(queries.at(-1)).toContain('(block_num, tx_idx) < (9, 1)')
 	})
 
-	it('fetches and reverses the oldest edge without positional pagination', async () => {
+	it.each([
+		['ends where the history does', [], null],
+		['pages on past the duplicate', [{ block_num: 7, tx_idx: 0 }], '[8,0]'],
+	])('lists a transaction tidx holds twice once and %s', async (_, after, next) => {
+		const [a, b] = [
+			{ tx_hash: HASH, block_num: 9, tx_idx: 1, timestamp: 1 },
+			{ tx_hash: HASH, block_num: 8, tx_idx: 0, timestamp: 1 },
+		]
+		// The first batch is [A, A, B]; what follows B is `after`.
+		indexer.mockImplementation(async (_chainId: number, sql: string) =>
+			sql.includes('count()')
+				? [{ n: 0 }]
+				: sql.includes('< (8, 0)')
+					? after.map((row) => ({ tx_hash: HASH, timestamp: 1, ...row }))
+					: [a, a, b],
+		)
+
+		const first = await fetchAddressHistoryData({
+			address: ADDRESS,
+			chainId: 4217,
+			includeKnownEvents: false,
+			searchParams: { include: 'all', limit: 2, sort: 'desc' },
+		})
+
+		expect(first.transactions).toHaveLength(2)
+		expect(first.nextCursor).toBe(next && btoa(next))
+	})
+
+	it.each([
+		['leaves tidx’s copies out of a short history’s total', 40, 20, 20],
+		['keeps them when the recount fails', 41, undefined, 41],
+		['keeps them in one too long to recount', 200_000, 199_940, 200_000],
+	])('%s', async (_, stored, exact, total) => {
+		indexer.mockImplementation(async (_chainId: number, sql: string) => {
+			if (!sql.includes('count()')) return []
+			if (!sql.includes('FINAL')) return [{ n: stored }]
+			if (exact === undefined) throw new Error('Indexer query failed (422)')
+			return [{ n: exact }]
+		})
+
+		await expect(
+			fetchAddressHistoryData({
+				// Totals are cached by address.
+				address: `0x${String(stored).padStart(40, '3')}`,
+				chainId: 4217,
+				includeKnownEvents: false,
+				searchParams: { include: 'all', limit: 10, sort: 'desc' },
+			}),
+		).resolves.toMatchObject({ total })
+	})
+
+	it('fetches and reverses the oldest edge without counting', async () => {
 		const olderHash = `0x${'1'.repeat(64)}`
 		const oldestHash = `0x${'2'.repeat(64)}`
-		getTransactions.mockResolvedValue(
-			Response.json({
-				data: [
-					row({ hash: oldestHash, blockNumber: 1, transactionIndex: 0 }),
-					row({ hash: olderHash, blockNumber: 2, transactionIndex: 0 }),
-				],
-				nextCursor: 'toward-head',
-			}),
-		)
+		answer([
+			{ tx_hash: oldestHash, block_num: 1, tx_idx: 0, timestamp: 1 },
+			{ tx_hash: olderHash, block_num: 2, tx_idx: 0, timestamp: 2 },
+		])
 
 		await expect(
 			fetchAddressHistoryData({
 				address: '0x2222222222222222222222222222222222222222',
 				chainId: 4217,
 				includeKnownEvents: false,
-				searchParams: {
-					include: 'all',
-					limit: 10,
-					sort: 'asc',
-				},
+				searchParams: { include: 'all', limit: 10, sort: 'asc' },
 			}),
 		).resolves.toEqual({
 			countCapped: false,
 			error: null,
 			limit: 10,
-			nextCursor: 'toward-head',
+			nextCursor: null,
 			reverseCursor: 'WzEsMF0=',
 			total: null,
 			transactions: [
@@ -234,15 +233,9 @@ describe('fetchAddressHistoryData', () => {
 			],
 		})
 
-		expect(getTransactions).toHaveBeenCalledOnce()
-		expect(getTransactions).toHaveBeenCalledWith({
-			query: {
-				address: '0x2222222222222222222222222222222222222222',
-				chainId: '4217',
-				include: 'receipt',
-				limit: '10',
-				order: 'asc',
-			},
-		})
+		expect(indexer).toHaveBeenCalledOnce()
+		expect(indexer.mock.calls[0]?.[1]).toContain(
+			'ORDER BY block_num ASC, tx_idx ASC',
+		)
 	})
 })

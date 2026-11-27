@@ -2,6 +2,20 @@ import { describe, expect, it } from 'vitest'
 import { parseLlmsTxt, toMarkdownUrl } from './llms-txt.js'
 
 describe('parseLlmsTxt', () => {
+	it('indexes canonical Tempo links while excluding marketing and other origins', () => {
+		const body = `
+- [API Keys](https://tempo.xyz/developers/docs/api/api-keys)
+- [Legacy](https://docs.tempo.xyz/docs/api/api-keys)
+- [Authentication](/docs/api/authentication)
+- [Marketing](https://tempo.xyz/about)
+- [Other](https://example.com/docs)
+`
+		expect(parseLlmsTxt(body, 'https://tempo.xyz/developers')).toEqual([
+			'https://tempo.xyz/developers/docs/api/api-keys',
+			'https://tempo.xyz/developers/docs/api/authentication',
+		])
+	})
+
 	it('extracts absolute same-origin URLs', () => {
 		const body = `
 # Viem
@@ -45,6 +59,17 @@ describe('parseLlmsTxt', () => {
 			'https://tips.sh/0000.md',
 			'https://tips.sh/1026.md',
 			'https://tips.sh/1061-1.md',
+		])
+	})
+
+	it('extracts TIP pages from the HTML homepage', () => {
+		const body = `<!DOCTYPE html><html><body>
+<a href="/0000">TIP-0000</a><a href="/1000-1">TIP-1000-1</a>
+<a href="/assets/main.js">Asset</a><a href="https://example.com/0001">Other</a>
+<a href="/0000">Duplicate</a></body></html>`
+		expect(parseLlmsTxt(body, 'https://tips.sh')).toEqual([
+			'https://tips.sh/0000.md',
+			'https://tips.sh/1000-1.md',
 		])
 	})
 

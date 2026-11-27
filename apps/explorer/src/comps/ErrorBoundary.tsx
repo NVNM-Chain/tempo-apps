@@ -1,14 +1,9 @@
+import { Button } from 'regen-ui'
 import type { ErrorComponentProps } from '@tanstack/react-router'
 import * as React from 'react'
 import { Footer } from '#comps/Footer'
 import { Header } from '#comps/Header'
 import { useCopy } from '#lib/hooks'
-import {
-	captureEvent,
-	getNavigationId,
-	normalizePathPattern,
-	ProfileEvents,
-} from '#lib/profiling'
 import CopyIcon from '~icons/lucide/copy'
 
 export class ErrorBoundary extends React.Component<
@@ -19,25 +14,14 @@ export class ErrorBoundary extends React.Component<
 	constructor(props: ErrorComponentProps) {
 		super(props)
 
-		this.state = { error: props.error }
+		this.state = {
+			error: props.error instanceof Error ? props.error : null,
+		}
 	}
 
 	componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
 		this.setState({ error })
 		console.error(error, errorInfo)
-
-		captureEvent(ProfileEvents.ERROR, {
-			error_type: 'react_error_boundary',
-			message: error.message,
-			stack: error.stack?.slice(0, 1000),
-			component_stack: errorInfo.componentStack?.slice(0, 1000),
-			path: typeof window !== 'undefined' ? window.location.pathname : '',
-			route_pattern:
-				typeof window !== 'undefined'
-					? normalizePathPattern(window.location.pathname)
-					: '',
-			navigation_id: getNavigationId(),
-		})
 	}
 
 	render() {
@@ -46,28 +30,29 @@ export class ErrorBoundary extends React.Component<
 				<Header />
 				<section className="flex flex-1 flex-col size-full items-center justify-center px-[16px] max-w-[600px] gap-[16px] m-auto">
 					<div className="flex flex-col items-center gap-[8px]">
-						<h1 className="text-[24px] lg:text-[40px] font-medium text-base-content">
+						<h1 className="heading-24 lg:heading-40 text-base-content">
 							Something went wrong
 						</h1>
-						<p className="text-base-content-secondary text-[15px] lg:text-[18px] text-center">
+						<p className="text-base-content-secondary copy-15 lg:copy-16 text-center">
 							An unexpected error occurred while loading this page.
 						</p>
 					</div>
 					{this.state.error?.message && (
-						<div className="bg-surface border border-base-border rounded-[10px] p-[16px] max-w-full overflow-hidden relative">
-							<pre className="text-[13px] text-base-content-secondary whitespace-pre-wrap pr-[32px] leading-[20px] min-h-[40px]">
+						<div className="bg-surface border border-base-border rounded-body p-[16px] max-w-full overflow-hidden relative">
+							<pre className="copy-13 text-base-content-secondary whitespace-pre-wrap pr-[32px] min-h-[40px]">
 								{this.state.error.message}
 							</pre>
 							<CopyButton text={this.state.error.message} />
 						</div>
 					)}
-					<button
+					<Button
+						variant="primary"
 						type="button"
-						onClick={() => window.history.back()}
-						className="text-accent rounded-[8px] press-down"
+						onClick={() => window.location.assign('/')}
+						className="text-accent rounded-body press-down"
 					>
-						Return home ⏎
-					</button>
+						Return home
+					</Button>
 				</section>
 				<Footer />
 			</main>
@@ -80,12 +65,13 @@ function CopyButton({ text }: { text: string }) {
 	return (
 		<>
 			{copy.notifying && (
-				<span className="absolute bottom-[12px] right-[40px] text-[13px] leading-[16px] text-base-content-secondary whitespace-nowrap">
+				<span className="absolute bottom-[12px] right-[40px] copy-13 text-base-content-secondary whitespace-nowrap">
 					copied
 				</span>
 			)}
 			<button
 				type="button"
+				aria-label="Copy error details"
 				onClick={() => copy.copy(text)}
 				className="absolute bottom-[8px] right-[8px] p-[4px] text-base-content-secondary press-down cursor-pointer"
 			>
