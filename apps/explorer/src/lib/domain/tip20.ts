@@ -3,6 +3,7 @@ import type { Log } from 'viem'
 import { parseEventLogs } from 'viem'
 import { readContract } from 'wagmi/actions'
 import { Abis } from '#lib/abis'
+import { propAmmPairTokens } from '#lib/propamm'
 import { Actions } from 'wagmi/tempo'
 import type { Config } from 'wagmi'
 import { getWagmiConfig } from '#wagmi.config.ts'
@@ -60,13 +61,18 @@ export async function fetchLogoURI(
 
 export async function metadataFromLogs(
 	logs: Log[],
+	options?: { chainId?: number },
 ): Promise<GetTip20MetadataFn> {
 	const events = parseEventLogs({ abi, logs })
 
 	const tip20Addresses = events
 		.map(({ address }) => address)
 		.filter(isTip20Address)
-	return metadataForTokens(tip20Addresses)
+	// propAMM quotes name their pair's tokens without a log from them.
+	return metadataForTokens([
+		...tip20Addresses,
+		...propAmmPairTokens(options?.chainId, logs),
+	])
 }
 
 export async function metadataForTokens(
@@ -83,14 +89,19 @@ export async function metadataForTokens(
 	const config = getWagmiConfig()
 
 	// TODO: investigate & consider batch/multicall
+	// One token's failed read leaves only that token unnamed.
 	const metadataResults = await Promise.all(
 		tip20Addresses.map((token) =>
-			Actions.token.getMetadata(config as Config, { token }),
+			Actions.token
+				.getMetadata(config as Config, { token })
+				.catch(() => undefined),
 		),
 	)
 	const map = new Map<string, Metadata>()
-	for (const [index, address] of tip20Addresses.entries())
-		map.set(address.toLowerCase(), metadataResults[index])
+	for (const [index, address] of tip20Addresses.entries()) {
+		const metadata = metadataResults[index]
+		if (metadata) map.set(address.toLowerCase(), metadata)
+	}
 
 	return (address: Address.Address) => map.get(address.toLowerCase())
 }

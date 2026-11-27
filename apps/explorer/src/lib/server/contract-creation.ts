@@ -3,6 +3,7 @@ import type * as Hex from 'ox/Hex'
 import { getTransactionReceipt } from 'viem/actions'
 import { getChainId, getPublicClient } from 'wagmi/actions'
 import { getWagmiConfig } from '#wagmi.config'
+import { readBlockNumber } from '#lib/server/block-number'
 
 export type ContractCreationData = {
 	blockNumber: bigint
@@ -59,11 +60,11 @@ export async function fetchContractCreationData(
 	const bytecode = await client.getCode({ address })
 	if (!bytecode || bytecode === '0x') return null
 
-	const latestBlock = await client.getBlockNumber()
+	const latestBlock = await readBlockNumber(client)
 	const creationBlock = await binarySearchCreationBlock(
 		client,
 		address,
-		1n,
+		0n,
 		latestBlock,
 	)
 
@@ -156,18 +157,12 @@ async function binarySearchCreationBlock(
 	while (high - low > BigInt(MAX_BATCH_SIZE)) {
 		const mid = (low + high) / 2n
 
-		try {
-			const code = await client.getCode({
-				address,
-				blockNumber: mid,
-			})
-
-			if (code && code !== '0x') {
-				high = mid
-			} else {
-				low = mid + 1n
-			}
-		} catch {
+		// Unavailable historical state is not evidence that code did not exist.
+		// Propagate failures rather than caching a fabricated deployment block.
+		const code = await client.getCode({ address, blockNumber: mid })
+		if (code && code !== '0x') {
+			high = mid
+		} else {
 			low = mid + 1n
 		}
 	}
@@ -179,15 +174,8 @@ async function binarySearchCreationBlock(
 
 	const results = await Promise.all(
 		blocksToCheck.map(async (blockNum) => {
-			try {
-				const code = await client.getCode({
-					address,
-					blockNumber: blockNum,
-				})
-				return { blockNum, hasCode: Boolean(code && code !== '0x') }
-			} catch {
-				return { blockNum, hasCode: false }
-			}
+			const code = await client.getCode({ address, blockNumber: blockNum })
+			return { blockNum, hasCode: Boolean(code && code !== '0x') }
 		}),
 	)
 

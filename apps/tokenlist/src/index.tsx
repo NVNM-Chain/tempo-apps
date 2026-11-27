@@ -74,6 +74,10 @@ function getTokenIconBaseName(address: string): string {
 	return lowercased
 }
 
+/** Bundled icon names: a token address or a plain named icon (e.g. `usdc`). */
+const tokenIconBaseNamePattern = /^(?:0x[0-9a-f]{40}|[a-z0-9]+)$/
+const tokenAddressPattern = /^0x[0-9a-f]{40}$/
+
 app
 	.get('/', (context) => context.redirect('/docs'))
 	.get('/health', (_context) => new Response('ok'))
@@ -124,13 +128,24 @@ app.get('/icon/:chain_id/:address', async (context) => {
 
 	if (!CHAIN_IDS.includes(Number(chainId))) return context.notFound()
 
+	const iconBaseName = getTokenIconBaseName(address)
+	// Only look up names that cannot change the asset path; anything else
+	// gets the fallback icon.
+	const isValidBaseName = tokenIconBaseNamePattern.test(iconBaseName)
+	// Contract artwork is managed by the API; keep bundled icons as a fallback.
+	if (tokenAddressPattern.test(iconBaseName)) {
+		const response = await fetch(
+			`${tempoApiUrl}/assets/${chainId}/icons/${iconBaseName}`,
+			{ signal: AbortSignal.timeout(2_000) },
+		).catch(() => undefined)
+		if (response?.ok) return response
+	}
+
 	const assets = context.env.ASSETS
 	if (!assets) return new Response(staticAssetBindingError, { status: 500 })
-
-	const iconBaseName = getTokenIconBaseName(address)
 	let assetResponse: Response | undefined
 	let contentType = 'image/svg+xml'
-	for (const extension of tokenIconExtensions) {
+	for (const extension of isValidBaseName ? tokenIconExtensions : []) {
 		const assetUrl = new URL(
 			`/${chainId}/icons/${iconBaseName}.${extension}`,
 			'http://assets',

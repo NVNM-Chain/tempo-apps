@@ -5,15 +5,15 @@ runs:
   using: 'composite'
   steps:
     - name: Set up pnpm
-      uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320
+      uses: tempoxyz/gh-actions/vendor/pnpm/action-setup@35019557465e3c38ee3468be171771fd73577584 # 2026-10-20T06-22-38Z-35019557
 
     - name: Set up Node
-      uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f
+      uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
       with:
         cache: 'pnpm'
         # `lts/*` lags a few days to a week
         # up to date LTS can be found here https://endoflife.date/nodejs
-        node-version: '24.14.0'
+        node-version: '24.22.1'
 
     - name: Install dependencies
       shell: bash

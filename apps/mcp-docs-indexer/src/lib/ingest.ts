@@ -1,29 +1,61 @@
+import { fetchSourceDocument, readDocumentText } from './document-fetch.js'
+import { withTimeout } from './timeout.js'
 import { log } from './log.js'
 import { parseLlmsTxt, toMarkdownUrl } from './llms-txt.js'
+import {
+	isHtmlDocument,
+	MARKDOWN_ACCEPT,
+	normalizeDocsMarkdown,
+} from './markdown.js'
 import type { Source } from './sources.js'
+import { sourceIndexUrl } from './sources.js'
 
 /** Recorded state for one AI Search item, persisted to KV per source. */
-type IndexEntry = { id: string; etag?: string; content_hash?: string }
+type IndexEntry = {
+	id: string
+	etag?: string
+	content_hash?: string
+	metadata_hash?: string
+	index_pending?: boolean
+	index_retry?: boolean
+	source_url?: string
+}
 /** Per-source map of AI Search item key → {item id, last-seen ETag}. */
 type SourceIndex = Record<string, IndexEntry>
+type PageRetry = { attempts: number; after: number }
 
 export type SyncReport =
 	| { source: string; status: 'unchanged'; duration_ms: number }
 	| {
 			source: string
-			status: 'synced'
+			status: 'pending_deletion'
+			removed: number
+			duration_ms: number
+	  }
+	| {
+			source: string
+			status: 'synced' | 'pending_index'
 			pages: number
 			unchanged: number
 			failed: number
+			deferred?: number
 			deleted: number
+			pending: number
 			duration_ms: number
 	  }
 	| { source: string; status: 'error'; error: string; duration_ms: number }
 
 /** Concurrent page fetches per source. Tuned to stay well under Workers' 50-subrequest budget. */
 const CONCURRENCY = 8
-/** Skip pages larger than AI Search's 4MB per-file cap (with margin). */
+/** Bound page reads and uploads below AI Search's 4 MB limit. */
 const MAX_PAGE_BYTES = 3_500_000
+const DELETION_CONFIRMATION_MS = 5 * 60_000
+const MAX_PENDING_CHECKS = 20
+const CALL_TIMEOUT_MS = 15_000
+const SOURCE_TIMEOUT_MS = 90_000
+type IngestCall = <T>(
+	operation: (signal: AbortSignal) => Promise<T>,
+) => Promise<T>
 
 export async function syncSource(args: {
 	source: Source
@@ -33,22 +65,90 @@ export async function syncSource(args: {
 	force?: boolean
 }): Promise<SyncReport> {
 	const { source, instance, etagCache, force = false } = args
-	const indexKey = `index:${source.id}`
-	const etagKey = `etag:${source.id}`
+	const stateId = source.instanceId
+		? `${source.id}:${source.instanceId}`
+		: source.id
+	const indexKey = `index:${stateId}`
+	const etagKey = `etag:${stateId}`
+	const sourceUrlKey = `source_url:${stateId}`
+	const pendingDeletionKey = `pending_deletion:${stateId}`
+	const retryForceKey = `retry_force:${stateId}`
+	const cursorKey = `index_cursor:${stateId}`
+	const retriesKey = `page_retries:${stateId}`
+	const retryBase = Date.now()
 	const startedAt = performance.now()
 	const elapsed = () => Math.round(performance.now() - startedAt)
+	const controller = new AbortController()
+	const timer = setTimeout(
+		() => controller.abort(new Error('Source sync timed out')),
+		SOURCE_TIMEOUT_MS,
+	)
+	const call: IngestCall = (operation) =>
+		withTimeout(operation, CALL_TIMEOUT_MS, controller.signal)
 
 	try {
-		const prevSourceEtag = force ? null : await etagCache.get(etagKey)
-		const res = await fetch(
-			new URL(source.indexPath ?? '/llms.txt', source.base).toString(),
-			{
-				headers: prevSourceEtag ? { 'If-None-Match': prevSourceEtag } : {},
-				cf: { cacheTtl: 60 },
-			},
+		const indexUrl = sourceIndexUrl(source)
+		const previousIndexUrl = await call(() => etagCache.get(sourceUrlKey))
+		const sourceChanged =
+			previousIndexUrl === null
+				? new URL(source.base).pathname !== '/'
+				: previousIndexUrl !== indexUrl
+		const prevIndex = await call(() => loadIndex(etagCache, indexKey))
+		const retries: Record<string, PageRetry> = JSON.parse(
+			(await call(() => etagCache.get(retriesKey))) ?? '{}',
 		)
+		const reconciled = await reconcilePendingItems({
+			index: prevIndex,
+			instance,
+			etagCache,
+			indexKey,
+			cursorKey,
+			sourceId: source.id,
+			call,
+		})
+		const hasRetries = Object.values(prevIndex).some(
+			(entry) => entry.index_retry,
+		)
+		const retryForce = (await call(() => etagCache.get(retryForceKey))) === '1'
+		const prevSourceEtag =
+			force ||
+			sourceChanged ||
+			hasRetries ||
+			retryForce ||
+			Object.keys(retries).length > 0
+				? null
+				: await call(() => etagCache.get(etagKey))
+		const { res, body } = await call(async (signal) => {
+			const res = await fetchSourceDocument(indexUrl, source.base, signal, {
+				accept: MARKDOWN_ACCEPT,
+				...(prevSourceEtag ? { 'If-None-Match': prevSourceEtag } : {}),
+			})
+			return { res, body: res.ok ? await readDocumentText(res) : '' }
+		})
 		if (res.status === 304) {
-			return { source: source.id, status: 'unchanged', duration_ms: elapsed() }
+			if (await call(() => etagCache.get(pendingDeletionKey))) {
+				await call(() => etagCache.delete(pendingDeletionKey))
+			}
+			if ((hasRetries || retryForce) && reconciled.pending === 0) {
+				return {
+					source: source.id,
+					status: 'error',
+					error: 'index returned 304 during retry',
+					duration_ms: elapsed(),
+				}
+			}
+			return reconciled.pending > 0
+				? {
+						source: source.id,
+						status: 'pending_index',
+						pages: 0,
+						unchanged: 0,
+						failed: 0,
+						deleted: 0,
+						pending: reconciled.pending,
+						duration_ms: elapsed(),
+					}
+				: { source: source.id, status: 'unchanged', duration_ms: elapsed() }
 		}
 		if (!res.ok) {
 			return {
@@ -59,19 +159,81 @@ export async function syncSource(args: {
 			}
 		}
 
-		const pageUrls = parseLlmsTxt(await res.text(), source.base)
-		const prevIndex = await loadIndex(etagCache, indexKey)
+		const pageUrls = parseLlmsTxt(body, source.base)
+		if (pageUrls.length === 0) {
+			return {
+				source: source.id,
+				status: 'error',
+				error: 'index contains no documentation pages',
+				duration_ms: elapsed(),
+			}
+		}
+		const intendedKeys = new Set(pageUrls.map((url) => pageKey(url, source.id)))
+		const removedKeys = Object.keys(prevIndex)
+			.filter((key) => !intendedKeys.has(key))
+			.sort()
+		const hasRemovals = removedKeys.length > 0
+		const pendingDeletion = await call(() => etagCache.get(pendingDeletionKey))
+		if (hasRemovals && !sourceChanged) {
+			const signature = await sha256(removedKeys.join('\n'))
+			const [observedAt, previousSignature] = pendingDeletion?.split(':') ?? []
+			const observedAtMs = Number(observedAt)
+			if (
+				previousSignature !== signature ||
+				!Number.isFinite(observedAtMs) ||
+				Date.now() - observedAtMs < DELETION_CONFIRMATION_MS
+			) {
+				if (previousSignature !== signature || !Number.isFinite(observedAtMs)) {
+					await call(() =>
+						etagCache.put(pendingDeletionKey, `${Date.now()}:${signature}`),
+					)
+				}
+				return {
+					source: source.id,
+					status: 'pending_deletion',
+					removed: removedKeys.length,
+					duration_ms: elapsed(),
+				}
+			}
+		} else if (pendingDeletion) {
+			await call(() => etagCache.delete(pendingDeletionKey))
+		}
+		const metadataHash = await sha256(source.description ?? '')
 		const next: SourceIndex = {}
 		let pages = 0
 		let unchanged = 0
 		let failed = 0
+		let deferred = 0
+		const failedKeys: string[] = []
 
 		for (let i = 0; i < pageUrls.length; i += CONCURRENCY) {
+			if (controller.signal.aborted) {
+				failed += pageUrls.length - i
+				break
+			}
 			const batch = pageUrls.slice(i, i + CONCURRENCY)
 			const results = await Promise.allSettled(
-				batch.map((url) =>
-					syncPage({ url, source, instance, prevIndex, force }),
-				),
+				batch.map((url) => {
+					const key = pageKey(url, source.id)
+					if ((retries[key]?.after ?? 0) > Date.now()) {
+						deferred++
+						return Promise.resolve({
+							key,
+							outcome: 'deferred' as const,
+							entry: prevIndex[key],
+						})
+					}
+					return syncPage({
+						url,
+						source,
+						instance,
+						prevIndex,
+						force: force || sourceChanged,
+						refreshMetadata: sourceChanged,
+						metadataHash,
+						call,
+					})
+				}),
 			)
 			for (const r of results) {
 				if (r.status !== 'fulfilled') {
@@ -82,7 +244,22 @@ export async function syncSource(args: {
 				if (out.entry) next[out.key] = out.entry
 				if (out.outcome === 'uploaded') pages++
 				else if (out.outcome === 'unchanged') unchanged++
-				else failed++
+				else if (out.outcome === 'failed') failed++
+				if (out.outcome === 'failed') failedKeys.push(out.key)
+				else if (out.outcome !== 'deferred') delete retries[out.key]
+			}
+		}
+
+		for (const key of failedKeys) {
+			// Whole-source outages and source deadlines should retry on the next run.
+			if (controller.signal.aborted || pages + unchanged === 0) {
+				delete retries[key]
+				continue
+			}
+			const attempts = Math.min(6, (retries[key]?.attempts ?? 0) + 1)
+			retries[key] = {
+				attempts,
+				after: retryBase + Math.min(24, 2 ** (attempts - 1)) * 60 * 60_000,
 			}
 		}
 
@@ -90,13 +267,22 @@ export async function syncSource(args: {
 		// every intended page was accounted for — otherwise a transient page
 		// failure would look like a removal.
 		let deleted = 0
-		if (failed === 0) {
+		if (failed === 0 && deferred === 0) {
 			for (const [key, entry] of Object.entries(prevIndex)) {
 				if (next[key]) continue
 				try {
-					await instance.items.delete(entry.id)
+					await call(() => instance.items.delete(entry.id))
 					deleted++
 				} catch (err) {
+					// An already-missing item satisfies the stale-page deletion.
+					if (
+						err instanceof Error &&
+						(err.message === 'item_not_found' ||
+							err.message === 'AiSearchNotFoundError: item_not_found')
+					) {
+						deleted++
+						continue
+					}
 					log.warn('page.delete_failed', {
 						source: source.id,
 						key,
@@ -108,22 +294,42 @@ export async function syncSource(args: {
 			}
 		}
 
-		// Only advance ETag + persisted index after a fully clean sync. Otherwise
-		// the next 304 on llms.txt would mask retries for failed pages, and a
-		// partial index could re-delete items on the following run.
-		if (failed === 0) {
+		// Reserve a bounded persistence phase even if the source deadline expired.
+		const save: IngestCall = (operation) => withTimeout(operation, 5000)
+		// Advance the source ETag only after a clean sync. Preserve successful
+		// uploads on partial runs without dropping stale entries awaiting deletion.
+		const savedIndex =
+			failed === 0 && deferred === 0 ? next : { ...prevIndex, ...next }
+		for (const key of Object.keys(retries))
+			if (!intendedKeys.has(key)) delete retries[key]
+		await save(() => etagCache.put(retriesKey, JSON.stringify(retries)))
+		if (failed === 0 && deferred === 0) {
 			const etag = res.headers.get('etag')
-			if (etag) await etagCache.put(etagKey, etag)
-			await etagCache.put(indexKey, JSON.stringify(next))
+			await save(() => etagCache.put(indexKey, JSON.stringify(next)))
+			await save(() => etagCache.put(sourceUrlKey, indexUrl))
+			if (hasRemovals) await save(() => etagCache.delete(pendingDeletionKey))
+			if (retryForce) await save(() => etagCache.delete(retryForceKey))
+			if (etag) await save(() => etagCache.put(etagKey, etag))
+		} else {
+			await save(() => etagCache.put(indexKey, JSON.stringify(savedIndex)))
+			await save(() => etagCache.put(retryForceKey, '1'))
+			await save(() => etagCache.delete(etagKey))
 		}
-		await etagCache.put(`last_sync:${source.id}`, new Date().toISOString())
+		await save(() =>
+			etagCache.put(`last_sync:${stateId}`, new Date().toISOString()),
+		)
+		const pending = Object.values(savedIndex).filter(
+			(entry) => entry.index_pending,
+		).length
 		return {
 			source: source.id,
-			status: 'synced',
+			status: pending > 0 ? 'pending_index' : 'synced',
 			pages,
 			unchanged,
 			failed,
+			...(deferred ? { deferred } : {}),
 			deleted,
+			pending,
 			duration_ms: elapsed(),
 		}
 	} catch (err) {
@@ -133,6 +339,8 @@ export async function syncSource(args: {
 			error: err instanceof Error ? err.message : String(err),
 			duration_ms: elapsed(),
 		}
+	} finally {
+		clearTimeout(timer)
 	}
 }
 
@@ -151,6 +359,72 @@ async function loadIndex(kv: KVNamespace, key: string): Promise<SourceIndex> {
 	return {}
 }
 
+async function reconcilePendingItems(args: {
+	index: SourceIndex
+	instance: AiSearchInstance
+	etagCache: KVNamespace
+	indexKey: string
+	cursorKey: string
+	sourceId: string
+	call: IngestCall
+}): Promise<{ pending: number }> {
+	const { index, instance, etagCache, indexKey, cursorKey, sourceId, call } =
+		args
+	const pendingKeys = Object.keys(index).filter(
+		(key) => index[key]?.index_pending,
+	)
+	if (pendingKeys.length === 0) return { pending: 0 }
+
+	const cursor =
+		Math.max(0, Number(await call(() => etagCache.get(cursorKey))) || 0) %
+		pendingKeys.length
+	const checks = Math.min(MAX_PENDING_CHECKS, pendingKeys.length)
+	let changed = false
+	for (let i = 0; i < checks; i++) {
+		const key = pendingKeys[(cursor + i) % pendingKeys.length]
+		const entry = index[key]
+		let status: AiSearchItemInfo['status']
+		let error: string | undefined
+		try {
+			const info = await call(() => instance.items.get(entry.id).info())
+			status = info.status
+			error = info.error
+		} catch (err) {
+			if (!(err instanceof Error) || !err.message.includes('item_not_found'))
+				throw err
+			status = 'error'
+			error = err.message
+		}
+		if (status === 'completed') {
+			index[key] = { ...entry, index_pending: false }
+			changed = true
+		} else if (
+			status === 'error' ||
+			status === 'skipped' ||
+			status === 'outdated'
+		) {
+			index[key] = { ...entry, index_pending: false, index_retry: true }
+			changed = true
+			log.warn('page.index_failed', {
+				source: sourceId,
+				key,
+				item_id: entry.id,
+				status,
+				error,
+			})
+		}
+	}
+	if (changed) await call(() => etagCache.put(indexKey, JSON.stringify(index)))
+	if (pendingKeys.length > MAX_PENDING_CHECKS) {
+		await call(() =>
+			etagCache.put(cursorKey, String((cursor + checks) % pendingKeys.length)),
+		)
+	}
+	return {
+		pending: Object.values(index).filter((entry) => entry.index_pending).length,
+	}
+}
+
 type PageOutcome = 'uploaded' | 'unchanged' | 'failed'
 type SyncPageResult = {
 	key: string
@@ -165,21 +439,44 @@ async function syncPage(args: {
 	instance: AiSearchInstance
 	prevIndex: SourceIndex
 	force: boolean
+	refreshMetadata: boolean
+	metadataHash: string
+	call: IngestCall
 }): Promise<SyncPageResult> {
-	const { url, source, instance, prevIndex, force } = args
+	const {
+		url,
+		source,
+		instance,
+		prevIndex,
+		force,
+		refreshMetadata,
+		metadataHash,
+		call,
+	} = args
 	const key = pageKey(url, source.id)
 	const prev = prevIndex[key]
+	const retryEntry = prev ? { ...prev, index_retry: true } : undefined
 
 	try {
-		const headers: Record<string, string> = {}
-		if (prev?.etag && !force) headers['If-None-Match'] = prev.etag
+		const headers: Record<string, string> = { accept: MARKDOWN_ACCEPT }
+		if (prev?.etag && !force && !prev.index_retry)
+			headers['If-None-Match'] = prev.etag
 
-		const res = await fetch(toMarkdownUrl(url), {
-			headers,
-			cf: { cacheTtl: 60 },
+		const { res, body } = await call(async (signal) => {
+			const res = await fetchSourceDocument(
+				toMarkdownUrl(url),
+				source.base,
+				signal,
+				headers,
+			)
+			return {
+				res,
+				body: res.ok ? await readDocumentText(res, MAX_PAGE_BYTES) : '',
+			}
 		})
 
 		if (res.status === 304 && prev) {
+			if (prev.index_retry) return { key, outcome: 'failed', entry: retryEntry }
 			return { key, outcome: 'unchanged', entry: prev }
 		}
 		if (!res.ok) {
@@ -189,24 +486,34 @@ async function syncPage(args: {
 				status: res.status,
 			})
 			// Keep the old entry so the page is not treated as removed.
-			return { key, outcome: 'failed', entry: prev }
+			return { key, outcome: 'failed', entry: retryEntry }
+		}
+		if (isHtmlDocument(body, res.headers.get('content-type'))) {
+			log.warn('page.html_response', { source: source.id, url })
+			return { key, outcome: 'failed', entry: retryEntry }
 		}
 
-		const content = preparePageContent(await res.text())
+		const content = normalizeDocsMarkdown(body)
 		if (!content) {
 			log.warn('page.empty', { source: source.id, url })
-			return { key, outcome: 'failed', entry: prev }
+			return { key, outcome: 'failed', entry: retryEntry }
 		}
-		if (content.length > MAX_PAGE_BYTES) {
+		const bytes = new TextEncoder().encode(content).byteLength
+		if (bytes > MAX_PAGE_BYTES) {
 			log.warn('page.too_large', {
 				source: source.id,
 				url,
-				bytes: content.length,
+				bytes,
 			})
-			return { key, outcome: 'failed', entry: prev }
+			return { key, outcome: 'failed', entry: retryEntry }
 		}
 		const contentHash = await sha256(content)
-		if (prev?.content_hash === contentHash && !force) {
+		if (
+			prev?.content_hash === contentHash &&
+			prev.metadata_hash === metadataHash &&
+			(!refreshMetadata || prev.source_url === sourceIndexUrl(source)) &&
+			!prev.index_retry
+		) {
 			const etag = res.headers.get('etag') ?? prev.etag
 			return {
 				key,
@@ -225,21 +532,40 @@ async function syncPage(args: {
 		// completion (AI Search indexes in the background). Polling per page
 		// serializes with our 8-way concurrency and trips the internal poll
 		// timeout, causing whole batches to fail.
-		const item = await instance.items.upload(key, content, {
-			metadata: {
+		const item = await call(() =>
+			instance.items.upload(key, content, {
+				metadata: {
+					source: source.id,
+					url,
+					...(source.description
+						? { source_description: source.description }
+						: {}),
+					...(title ? { title } : {}),
+				},
+			}),
+		)
+		if (item.status === 'error' || item.status === 'skipped') {
+			log.warn('page.index_failed', {
 				source: source.id,
-				url,
-				...(source.description
-					? { source_description: source.description }
-					: {}),
-				...(title ? { title } : {}),
-			},
-		})
+				key,
+				item_id: item.id,
+				status: item.status,
+				error: item.error,
+			})
+			return { key, outcome: 'failed', entry: retryEntry }
+		}
 		const etag = res.headers.get('etag') ?? undefined
 		return {
 			key,
 			outcome: 'uploaded',
-			entry: { id: item.id, etag, content_hash: contentHash },
+			entry: {
+				id: item.id,
+				etag,
+				content_hash: contentHash,
+				metadata_hash: metadataHash,
+				source_url: sourceIndexUrl(source),
+				index_pending: item.status !== 'completed',
+			},
 		}
 	} catch (err) {
 		log.error('page.upload_failed', {
@@ -247,8 +573,67 @@ async function syncPage(args: {
 			url,
 			error: err instanceof Error ? err.message : String(err),
 		})
-		return { key, outcome: 'failed', entry: prev }
+		return { key, outcome: 'failed', entry: retryEntry }
 	}
+}
+
+/** Indexing states reported by AI Search for uploaded items. */
+export const ITEM_STATUSES = [
+	'completed',
+	'queued',
+	'running',
+	'error',
+	'skipped',
+	'outdated',
+] as const
+
+export type SourceIndexStatus = {
+	source: string
+	counts: Partial<Record<(typeof ITEM_STATUSES)[number], number>>
+	/** First indexing error AI Search reports for the source, if any. */
+	sample_error?: string
+}
+
+/**
+ * Count a source's uploaded items by AI Search indexing state. A source can
+ * sync cleanly while AI Search never makes its items searchable; these counts
+ * make that visible in logs and metrics.
+ */
+export async function sourceIndexStatus(
+	instance: AiSearchInstance,
+	sourceId: string,
+): Promise<SourceIndexStatus> {
+	const metadataFilter = JSON.stringify({ source: sourceId })
+	const status: SourceIndexStatus = { source: sourceId, counts: {} }
+	await Promise.all(
+		ITEM_STATUSES.map(async (itemStatus) => {
+			try {
+				const response = await withTimeout(
+					() =>
+						instance.items.list({
+							status: itemStatus,
+							metadata_filter: metadataFilter,
+							per_page: 1,
+						}),
+					CALL_TIMEOUT_MS,
+				)
+				const count = response.result_info?.total_count
+				if (typeof count !== 'number')
+					throw new Error('item listing missing total_count')
+				status.counts[itemStatus] = count
+				if (itemStatus === 'error' && response.result[0]?.error) {
+					status.sample_error = response.result[0].error
+				}
+			} catch (err) {
+				log.warn('source.index_status_failed', {
+					source: sourceId,
+					status: itemStatus,
+					error: err instanceof Error ? err.message : String(err),
+				})
+			}
+		}),
+	)
+	return status
 }
 
 async function sha256(content: string): Promise<string> {
@@ -268,40 +653,8 @@ function extractTitle(content: string): string | undefined {
 	return undefined
 }
 
-function preparePageContent(content: string): string {
-	return stripSitemapComment(content)
-		.split('\n')
-		.map((line) => line.trimEnd())
-		.filter((line) => !isDocsChromeLine(line))
-		.join('\n')
-		.replace(/\n{3,}/g, '\n\n')
-		.trim()
-}
-
-function stripSitemapComment(content: string): string {
-	return content
-		.replace(/\r\n/g, '\n')
-		.replace(/^<!--\nSitemap:\n[\s\S]*?\n-->\n*/, '')
-}
-
-function isDocsChromeLine(line: string): boolean {
-	return [
-		/^skip to content$/i,
-		/^\[skip to content\]\(/i,
-		/^search\.\.\.$/i,
-		/^\[\]\(\/\)$/i,
-		/^⌘$/i,
-		/^k$/i,
-		/^i$/i,
-		/^was this helpful\?$/i,
-		/^copy page for ai$/i,
-		/^ask ai\.\.\.$/i,
-		/^suggest changes to this page$/i,
-	].some((pattern) => pattern.test(line.trim()))
-}
-
 /** Derive a stable AI Search item key from a page URL and source id. */
 function pageKey(url: string, sourceId: string): string {
 	const path = new URL(toMarkdownUrl(url)).pathname.replace(/^\/+|\/+$/g, '')
-	return `${sourceId}/${path.replace(/\//g, '_')}`
+	return `${sourceId}/${path}`
 }

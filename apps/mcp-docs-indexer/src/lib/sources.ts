@@ -1,5 +1,6 @@
 export type Source = {
 	id: string
+	instanceId?: string
 	base: string
 	indexPath?: string
 	description?: string
@@ -7,6 +8,7 @@ export type Source = {
 
 type SourceConfig = {
 	id?: unknown
+	instanceId?: unknown
 	base?: unknown
 	indexPath?: unknown
 	description?: unknown
@@ -43,6 +45,14 @@ function normalizeSource(source: SourceConfig, index: number): Source {
 
 	return {
 		id,
+		...(source.instanceId === undefined
+			? {}
+			: {
+					instanceId: expectString(
+						source.instanceId,
+						`SOURCES[${index}].instanceId`,
+					),
+				}),
 		base,
 		indexPath: indexPath.startsWith('/') ? indexPath : `/${indexPath}`,
 		...(description ? { description } : {}),
@@ -59,7 +69,65 @@ function normalizeBase(value: string, index: number): string {
 	if (url.protocol !== 'https:') {
 		throw new Error(`SOURCES[${index}].base must be an https URL`)
 	}
-	return url.origin
+	return `${url.origin}${url.pathname.replace(/\/+$/, '')}`
+}
+
+export function sourceIndexUrl(source: Source): string {
+	return new URL(
+		`.${source.indexPath ?? '/llms.txt'}`,
+		`${source.base}/`,
+	).toString()
+}
+
+// Tempo's docs moved from tempo.xyz to tempo.com; links on either origin (and
+// on the legacy docs.tempo.xyz host) belong to the same `/developers` source.
+const tempoDocsOrigins = new Set([
+	'https://tempo.com',
+	'https://www.tempo.com',
+	'https://tempo.xyz',
+	'https://www.tempo.xyz',
+])
+
+export function resolveSourcePageUrl(
+	raw: string,
+	base: string,
+): URL | undefined {
+	try {
+		const root = new URL(base)
+		const prefix = root.pathname.replace(/\/+$/, '')
+		let url = new URL(raw, `${base.replace(/\/+$/, '')}/`)
+		const tempoDocs =
+			tempoDocsOrigins.has(root.origin) && prefix === '/developers'
+		if (tempoDocs && url.origin === 'https://docs.tempo.xyz') {
+			url = new URL(`${prefix}${url.pathname}`, root.origin)
+		} else if (
+			tempoDocs &&
+			url.origin !== root.origin &&
+			tempoDocsOrigins.has(url.origin)
+		) {
+			url = new URL(url.pathname, root.origin)
+		} else if (
+			raw.startsWith('/') &&
+			!raw.startsWith('//') &&
+			prefix &&
+			url.pathname !== prefix &&
+			!url.pathname.startsWith(`${prefix}/`)
+		) {
+			url.pathname = `${prefix}${url.pathname}`
+		}
+		if (
+			url.origin !== root.origin ||
+			(prefix &&
+				url.pathname !== prefix &&
+				!url.pathname.startsWith(`${prefix}/`))
+		)
+			return undefined
+		url.hash = ''
+		url.search = ''
+		return url
+	} catch {
+		return undefined
+	}
 }
 
 function expectString(value: unknown, name: string): string {

@@ -4,13 +4,14 @@ import { InfoCard } from '#comps/InfoCard'
 import { RelativeTime } from '#comps/RelativeTime'
 import { TokenIcon } from '#comps/TokenIcon'
 import type { AccountType } from '#lib/account'
+import { cx } from '#lib/css'
 import { PriceFormatter } from '#lib/formatting'
 import { useCopy } from '#lib/hooks'
 import CopyIcon from '~icons/lucide/copy'
 
 const Route = getRouteApi('/_layout/address/$address')
 
-export function AccountCard(props: AccountCard.Props) {
+export function AccountCard(props: AccountCard.Props): React.JSX.Element {
 	const params = Route.useParams()
 	const {
 		address = params.address,
@@ -23,6 +24,7 @@ export function AccountCard(props: AccountCard.Props) {
 		isToken,
 		tokenLogoURI,
 		tokenName,
+		tokenSymbol,
 		virtualAddressParts,
 	} = props
 
@@ -36,22 +38,35 @@ export function AccountCard(props: AccountCard.Props) {
 				? 'Contract'
 				: 'Address'
 
-	const titleVisible = virtualAddressParts || accountType === 'contract'
+	const titleVisible =
+		isToken || virtualAddressParts || accountType === 'contract'
+	const tokenLabel = tokenName || tokenSymbol || 'Token'
 
 	return (
 		<InfoCard
 			title={
 				titleVisible ? (
-					<InfoCard.Title>
-						{isToken && tokenName ? (
+					<InfoCard.Title
+						className={cx(isToken && 'min-w-0 w-full py-3 gap-3')}
+					>
+						{isToken ? (
 							<>
 								<TokenIcon
 									address={address as Address.Address}
-									name={tokenName}
-									className="size-4"
+									name={tokenLabel}
+									className="size-8"
 									logoURI={tokenLogoURI}
 								/>
-								<span className="text-primary">{tokenName}</span>
+								<span className="min-w-0 flex-1">
+									<span className="block wrap-anywhere text-primary">
+										{tokenLabel}
+									</span>
+									{tokenSymbol && tokenSymbol !== tokenLabel && (
+										<span className="block wrap-anywhere label-12 text-tertiary font-normal mt-0.5">
+											{tokenSymbol}
+										</span>
+									)}
+								</span>
 							</>
 						) : (
 							titleLabel
@@ -67,20 +82,18 @@ export function AccountCard(props: AccountCard.Props) {
 					onClick={() => copy(address)}
 					className="w-full text-left cursor-pointer press-down text-tertiary"
 					title={address}
+					aria-label={notifying ? 'Address copied' : 'Copy address'}
 				>
 					<div className="flex items-center gap-[8px] mb-[8px]">
-						<span className="text-[13px] font-normal capitalize">Address</span>
+						<span className="capitalize">Address</span>
 						<div className="relative flex items-center">
 							<CopyIcon className="w-[12px] h-[12px]" />
 							{notifying && (
-								<span className="absolute left-[calc(100%+8px)] text-[13px] leading-[16px]">
-									copied
-								</span>
+								<span className="absolute left-[calc(100%+8px)]">copied</span>
 							)}
 						</div>
 					</div>
-					{/* 42 chars / 2 lines = 21ch */}
-					<p className="text-[14px] font-normal leading-[17px] text-primary break-all max-w-[21ch] font-mono">
+					<p className="font-mono copy-13 text-primary break-all leading-relaxed max-w-[32ch]">
 						{address}
 					</p>
 				</button>,
@@ -89,7 +102,7 @@ export function AccountCard(props: AccountCard.Props) {
 							{
 								label: 'Master ID',
 								value: (
-									<span className="text-[13px] text-primary">
+									<span className="text-primary font-mono">
 										{virtualAddressParts.masterId}
 									</span>
 								),
@@ -97,7 +110,7 @@ export function AccountCard(props: AccountCard.Props) {
 							{
 								label: 'User Tag',
 								value: (
-									<span className="text-[13px] text-primary">
+									<span className="text-primary font-mono">
 										{virtualAddressParts.userTag}
 									</span>
 								),
@@ -108,9 +121,7 @@ export function AccountCard(props: AccountCard.Props) {
 					? [
 							{
 								label: 'Holdings',
-								value: (
-									<span className="text-[13px] text-tertiary">Forwarded</span>
-								),
+								value: <span className="text-tertiary">Forwarded</span>,
 							},
 						]
 					: !hideHoldings
@@ -119,13 +130,11 @@ export function AccountCard(props: AccountCard.Props) {
 									label: 'Holdings',
 									value: (
 										<ClientOnly
-											fallback={
-												<span className="text-tertiary text-[13px]">…</span>
-											}
+											fallback={<span className="text-tertiary">…</span>}
 										>
 											{totalValue !== undefined ? (
 												<span
-													className="text-[13px] text-primary"
+													className="text-primary"
 													title={PriceFormatter.format(totalValue)}
 												>
 													{PriceFormatter.format(totalValue, {
@@ -133,7 +142,7 @@ export function AccountCard(props: AccountCard.Props) {
 													})}
 												</span>
 											) : (
-												<span className="text-tertiary text-[13px]">…</span>
+												<span className="text-tertiary">…</span>
 											)}
 										</ClientOnly>
 									),
@@ -143,16 +152,19 @@ export function AccountCard(props: AccountCard.Props) {
 				{
 					label: 'Active',
 					value: (
-						<ClientOnly
-							fallback={<span className="text-tertiary text-[13px]">…</span>}
-						>
+						<ClientOnly fallback={<span className="text-tertiary">…</span>}>
 							{lastActivityTimestamp ? (
 								<RelativeTime
 									timestamp={lastActivityTimestamp}
-									className="text-[13px] text-primary"
+									className="text-primary"
 								/>
 							) : (
-								<span className="text-tertiary text-[13px]">…</span>
+								<span
+									className="text-tertiary"
+									title="Last activity unavailable"
+								>
+									—
+								</span>
 							)}
 						</ClientOnly>
 					),
@@ -160,16 +172,19 @@ export function AccountCard(props: AccountCard.Props) {
 				{
 					label: 'Created',
 					value: (
-						<ClientOnly
-							fallback={<span className="text-tertiary text-[13px]">…</span>}
-						>
+						<ClientOnly fallback={<span className="text-tertiary">…</span>}>
 							{createdTimestamp ? (
 								<RelativeTime
 									timestamp={createdTimestamp}
-									className="text-[13px] text-primary"
+									className="text-primary"
 								/>
 							) : (
-								<span className="text-tertiary text-[13px]">…</span>
+								<span
+									className="text-tertiary"
+									title="Creation time unavailable"
+								>
+									—
+								</span>
 							)}
 						</ClientOnly>
 					),
@@ -191,6 +206,7 @@ export declare namespace AccountCard {
 		isToken?: boolean | undefined
 		tokenLogoURI?: string | undefined
 		tokenName?: string | undefined
+		tokenSymbol?: string | undefined
 		virtualAddressParts?:
 			| {
 					masterId: string

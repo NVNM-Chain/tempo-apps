@@ -42,6 +42,48 @@ function loader() {
 				address: tokenAddress,
 				topics: encodeEventTopics({
 					abi: Abis.tip20,
+					eventName: 'Transfer',
+					args: { from: recipientAddress, to: zeroAddress },
+				}) as [Hex.Hex, ...Hex.Hex[]],
+				data: encodeAbiParameters([{ type: 'uint256' }], [2_000_000n]),
+			}),
+			mockLog({
+				address: tokenAddress,
+				topics: encodeEventTopics({
+					abi: Abis.tip20,
+					eventName: 'BurnAt',
+					args: {
+						burner: updaterAddress,
+						from: recipientAddress,
+						amount: 2_000_000n,
+					},
+				}) as [Hex.Hex, ...Hex.Hex[]],
+			}),
+			mockLog({
+				address: tokenAddress,
+				topics: encodeEventTopics({
+					abi: Abis.tip20,
+					eventName: 'Transfer',
+					args: { from: recipientAddress, to: zeroAddress },
+				}) as [Hex.Hex, ...Hex.Hex[]],
+				data: encodeAbiParameters([{ type: 'uint256' }], [1_000_000n]),
+			}),
+			mockLog({
+				address: tokenAddress,
+				topics: encodeEventTopics({
+					abi: Abis.tip20,
+					eventName: 'BurnAt',
+					args: {
+						burner: spenderAddress,
+						from: recipientAddress,
+						amount: 1_000_000n,
+					},
+				}) as [Hex.Hex, ...Hex.Hex[]],
+			}),
+			mockLog({
+				address: tokenAddress,
+				topics: encodeEventTopics({
+					abi: Abis.tip20,
 					eventName: 'TransferWithMemo',
 					args: {
 						from: updaterAddress,
@@ -561,7 +603,7 @@ function Component() {
 	const data = Route.useLoaderData()
 
 	return (
-		<div className="font-mono text-[13px] flex flex-col items-center justify-center gap-8 pt-16 pb-8 grow">
+		<div className="font-sans copy-13 flex flex-col items-center justify-center gap-8 pt-16 pb-8 grow">
 			<Receipt {...data} />
 		</div>
 	)

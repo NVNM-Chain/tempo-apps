@@ -7,6 +7,7 @@ import { getCode } from 'viem/actions'
 import { type AccountType, getAccountType } from '#lib/account'
 import { TOKEN_CREATED_EVENT } from '#lib/abis'
 import { isTip20Address } from '#lib/domain/tip20'
+import { fetchContractCreationData } from '#lib/server/contract-creation'
 import { indexer } from '#lib/server/dex-indexer'
 import {
 	fetchTokenTransferBoundaries,
@@ -223,12 +224,27 @@ async function loadAddressMetadata(
 			}),
 		}
 	} else {
+		// Transaction history describes activity, not contract deployment.
 		const [bytecode, stats] = await Promise.all([
 			bytecodePromise,
 			fetchAddressTxMetadata(chainId, address),
 		])
 		const accountType = getAccountType(bytecode)
 		const metadata = buildAddressTxMetadata(stats)
+		if (accountType === 'contract') {
+			const creation = await fetchContractCreationData(address).catch(
+				(error) => {
+					console.error(
+						`Failed to fetch contract creation for ${address}:`,
+						error,
+					)
+					return null
+				},
+			)
+			metadata.createdTimestamp = parseTimestamp(creation?.timestamp)
+			metadata.createdTxHash = creation?.hash ?? undefined
+			metadata.createdBy = creation?.from ?? undefined
+		}
 
 		response = {
 			address,
