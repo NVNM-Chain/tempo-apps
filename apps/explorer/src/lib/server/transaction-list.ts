@@ -43,7 +43,10 @@ export async function readTransactions(
 	const receipts = rows.length
 		? await indexer(
 				chainId,
-				`SELECT tx_hash, status FROM receipts WHERE tx_hash IN (${list(rows.map((row) => String(row.hash)))})`,
+				// `receipts` sorts by block, so the page's blocks spare a scan of every hash.
+				`SELECT tx_hash, status FROM receipts
+				WHERE block_num >= ${Number(rows.at(-1)?.block_num)} AND block_num <= ${Number(rows[0]?.block_num)}
+					AND tx_hash IN (${list(rows.map((row) => String(row.hash)))})`,
 			)
 		: []
 	const failed = new Set(
