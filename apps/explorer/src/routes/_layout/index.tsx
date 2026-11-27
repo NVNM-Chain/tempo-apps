@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useSuspenseQuery } from '@tanstack/react-query'
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import * as React from 'react'
 import * as z from 'zod/mini'
@@ -19,9 +19,10 @@ export const Route = createFileRoute('/_layout/')({
 	validateSearch: z.object({
 		q: z.optional(z.coerce.string()),
 	}).parse,
-	// Without an indexer the page is the search box alone.
-	loader: ({ context }) =>
-		context.queryClient.prefetchQuery(homeStatsQueryOptions()),
+	// Not awaited: the page paints first and the dashboard streams in.
+	loader: ({ context }) => {
+		void context.queryClient.prefetchQuery(homeStatsQueryOptions())
+	},
 })
 
 function Component() {
@@ -29,7 +30,6 @@ function Component() {
 	const { q } = Route.useSearch()
 	const query = q?.trim() ?? ''
 	const [inputValue, setInputValue] = React.useState(query)
-	const { data: stats } = useQuery(homeStatsQueryOptions())
 
 	React.useEffect(() => {
 		setInputValue(query)
@@ -37,12 +37,8 @@ function Component() {
 
 	return (
 		<div className="flex flex-1 w-full flex-col text-[16px]">
-			<div
-				className={cx(
-					'flex flex-col justify-end',
-					stats ? 'min-h-[18svh]' : 'min-h-[42svh]',
-				)}
-			>
+			{/* Short above the dashboard or its place; tall when the page is the search box alone. */}
+			<div className="flex flex-col justify-end min-h-[42svh] [&:has(+*_[data-dashboard])]:min-h-[18svh]">
 				<div className="flex justify-center select-none [@media(max-height:360px)]:hidden">
 					<LandingWords />
 				</div>
@@ -88,10 +84,33 @@ function Component() {
 						}}
 					/>
 				</div>
-				<SpotlightLinks example={stats?.example} />
-				{stats && <HomeDashboard stats={stats} />}
+				<React.Suspense
+					fallback={
+						<>
+							<SpotlightLinks />
+							<div data-dashboard hidden />
+						</>
+					}
+				>
+					<Dashboard />
+				</React.Suspense>
 			</div>
 		</div>
+	)
+}
+
+/** The links with their examples and the dashboard; the links alone when the stats could not be read. */
+function Dashboard() {
+	const { data: stats } = useSuspenseQuery(homeStatsQueryOptions())
+	return (
+		<>
+			<SpotlightLinks example={stats?.example} />
+			{stats && (
+				<div data-dashboard className="contents">
+					<HomeDashboard stats={stats} />
+				</div>
+			)}
+		</>
 	)
 }
 
