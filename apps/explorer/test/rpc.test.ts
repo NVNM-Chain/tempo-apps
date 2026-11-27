@@ -30,6 +30,15 @@ describe('Explorer Orchestra routing', () => {
 		})
 	})
 	it.each([
+		['nvnm', 787222],
+		['nvnm-testnet', 787223],
+		['nvnm-mainnet', 7872],
+	])('selects the %s chain RPC without credentials', (environment, chainId) => {
+		const target = getExplorerRpcBackend(environment, undefined)
+		expect(target).toMatchObject({ chainId, headers: {} })
+		expect(target.url).toMatch(/^https:\/\//)
+	})
+	it.each([
 		undefined,
 		'',
 	])('uses the public endpoint without credentials %s', (auth) => {

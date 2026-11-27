@@ -1,3 +1,4 @@
+import { nvnmChainByEnv } from '#lib/chains'
 import {
 	ZONE_PROVER_CHAIN_ID,
 	ZONE_PROVER_RPC_URL,
@@ -29,6 +30,15 @@ export function getExplorerRpcBackend(
 	}
 	const devnetTarget = getDevnetBackend(environment, 'rpc')
 	if (devnetTarget) return { ...devnetTarget, chainId: DEVNET_CHAIN_ID }
+	// NVNM's chain RPCs are public: no credentials to add.
+	if (environment && Object.hasOwn(nvnmChainByEnv, environment)) {
+		const chain = nvnmChainByEnv[environment as keyof typeof nvnmChainByEnv]
+		return {
+			chainId: chain.id as number,
+			url: chain.rpcUrls.default.http[0],
+			headers: {} as Record<string, string>,
+		}
+	}
 	if (!environment || !Object.hasOwn(RPC_BACKENDS, environment))
 		throw new Error('RPC network is not configured')
 	// Without an Orchestra credential, public networks fall back to the

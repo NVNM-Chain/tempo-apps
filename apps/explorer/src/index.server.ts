@@ -16,7 +16,8 @@ export const redirects: Array<{
 	{ from: /^\/tokens\/(.+)$/, to: (m) => `/token/${m[1]}` },
 	{ from: /^\/(0x[a-fA-F0-9]{40})\/?$/, to: (m) => `/address/${m[1]}` },
 	{ from: /^\/(\d+)\/?$/, to: (m) => `/block/${m[1]}` },
-	{ from: /^\/(0x[a-fA-F0-9]{64})\/?$/, to: (m) => `/receipt/${m[1]}` },
+	// The fork links transactions to /tx, as search does.
+	{ from: /^\/(0x[a-fA-F0-9]{64})\/?$/, to: (m) => `/tx/${m[1]}` },
 ]
 
 function normalizeApiPath(pathname: string): string {
