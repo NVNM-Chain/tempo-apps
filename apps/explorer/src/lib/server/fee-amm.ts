@@ -34,19 +34,14 @@ const mintTopics = [
 	toEventSelector('Mint(address,address,address,uint256,uint256,uint256)'),
 ]
 
-/** pathUSD-validator pools first, then by liquidity, then by most recent activity. */
+/** Most active first, as the page says; ties by pair, whose topic addresses are lowercase. */
 export function sortFeeAmmPools(pools: FeeAmmPool[]): FeeAmmPool[] {
-	const pathUsd = Addresses.pathUsd.toLowerCase()
-	return pools.sort((a, b) => {
-		const aPriority = a.validatorToken.toLowerCase() === pathUsd
-		const bPriority = b.validatorToken.toLowerCase() === pathUsd
-		if (aPriority !== bPriority) return aPriority ? -1 : 1
-		if (a.liquidityUsd !== b.liquidityUsd)
-			return (b.liquidityUsd ?? -1) - (a.liquidityUsd ?? -1)
-		const aTimestamp = a.latestMintAt ?? a.createdAt ?? 0
-		const bTimestamp = b.latestMintAt ?? b.createdAt ?? 0
-		return bTimestamp - aTimestamp
-	})
+	return pools.sort(
+		(a, b) =>
+			b.mintCount - a.mintCount ||
+			b.userToken.localeCompare(a.userToken) ||
+			b.validatorToken.localeCompare(a.validatorToken),
+	)
 }
 
 /** One page of the pools `Mint` events name, with reserves and tokens read from the node. */
@@ -124,12 +119,23 @@ export async function getFeeAmmPools(input: FeeAmmSearch): Promise<FeeAmmPage> {
 export const fetchFeeAmmPools = createServerFn({ method: 'POST' })
 	.inputValidator((input) => feeAmmSearchSchema.parse(input))
 	.handler(async ({ data }): Promise<FeeAmmPage> => {
+		let timeout: ReturnType<typeof setTimeout> | undefined
 		try {
-			return await getFeeAmmPools(data)
+			return await Promise.race([
+				getFeeAmmPools(data),
+				new Promise<never>((_, reject) => {
+					timeout = setTimeout(
+						() => reject(new Error('Fee AMM request timed out')),
+						15_000,
+					)
+				}),
+			])
 		} catch (error) {
 			console.error('Failed to fetch Fee AMM pools:', error)
 			throw new Error(
 				'Fee AMM liquidity is temporarily unavailable. Please try again.',
 			)
+		} finally {
+			clearTimeout(timeout)
 		}
 	})
