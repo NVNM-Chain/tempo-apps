@@ -82,10 +82,11 @@ export const fetchHolders = createServerFn({ method: 'POST' })
 
 			const [rows, [counted], supply] = await Promise.all([
 				// `amount`, not `balance`: an alias would shadow the column in ORDER BY.
+				// `holder` gives equal balances one order across pages.
 				indexer(
 					chainId,
 					`SELECT holder, toString(balance) AS amount FROM token_balances_snapshot
-					WHERE token = '${data.address}' AND balance > 0 ORDER BY balance DESC
+					WHERE token = '${data.address}' AND balance > 0 ORDER BY balance DESC, holder
 					LIMIT ${data.limit} OFFSET ${(data.page - 1) * data.limit}`,
 				),
 				indexer(

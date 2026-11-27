@@ -134,7 +134,7 @@ describe('home stats', () => {
 		expect(indexer).toHaveBeenCalledWith(
 			31318,
 			expect.stringMatching(
-				/AS txs FROM txs\s+WHERE block_num >= 40 AND block_num <= 100 /,
+				/AS txs FROM txs FINAL\s+WHERE block_num >= 40 AND block_num <= 100 /,
 			),
 		)
 		expect(indexer).toHaveBeenCalledWith(

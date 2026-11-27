@@ -1,7 +1,5 @@
-import type { Abi } from 'viem'
-import { allAbis } from '#lib/abis'
-import { getAbiItem } from '#lib/domain/contracts'
-import { indexer, list } from '#lib/server/dex-indexer'
+import { knownSignature } from '#lib/domain/contracts'
+import { distinct, indexer, list } from '#lib/server/dex-indexer'
 
 export type ListedTransaction = {
 	hash: `0x${string}`
@@ -17,7 +15,13 @@ export type ListedTransaction = {
 function method(input: string): string | null {
 	const selector = input.slice(0, 10) as `0x${string}`
 	if (selector.length < 10) return null
-	return getAbiItem({ abi: allAbis as Abi, selector })?.name ?? selector
+	return knownSignature(selector)?.split('(')[0] ?? selector
+}
+
+/** How many transactions are indexed. A count stays fast with `FINAL`, so it needs no `distinct`. */
+export async function countTransactions(chainId: number): Promise<number> {
+	const [counted] = await indexer(chainId, 'SELECT count() AS n FROM txs FINAL')
+	return Number(counted?.n ?? 0)
 }
 
 /** Indexed transactions, newest first, with their method and whether they failed. */
@@ -26,15 +30,21 @@ export async function readTransactions(
 	limit: number,
 	offset = 0,
 ): Promise<ListedTransaction[]> {
-	const rows = await indexer(
-		chainId,
-		`SELECT hash, block_num, toUnixTimestamp(block_timestamp) AS at, "from", "to", input FROM txs
-		ORDER BY block_num DESC, idx DESC LIMIT ${limit} OFFSET ${offset}`,
+	const rows = distinct(
+		await indexer(
+			chainId,
+			`SELECT hash, block_num, toUnixTimestamp(block_timestamp) AS at, "from", "to", input FROM txs
+			ORDER BY block_num DESC, idx DESC LIMIT ${limit} OFFSET ${offset}`,
+		),
+		'hash',
 	)
 	const receipts = rows.length
 		? await indexer(
 				chainId,
-				`SELECT tx_hash, status FROM receipts WHERE tx_hash IN (${list(rows.map((row) => String(row.hash)))})`,
+				// `receipts` sorts by block, so the page's blocks spare a scan of every hash.
+				`SELECT tx_hash, status FROM receipts
+				WHERE block_num >= ${Number(rows.at(-1)?.block_num)} AND block_num <= ${Number(rows[0]?.block_num)}
+					AND tx_hash IN (${list(rows.map((row) => String(row.hash)))})`,
 			)
 		: []
 	const failed = new Set(

@@ -16,7 +16,7 @@ import {
 } from '#lib/domain/known-events'
 import { type GetTip20MetadataFn, metadataForTokens } from '#lib/domain/tip20'
 import { selectTransactionDescriptionEvents } from '#lib/domain/transaction-activities'
-import { indexer, sqlTime } from '#lib/server/dex-indexer'
+import { indexer, readDistinct, sqlTime } from '#lib/server/dex-indexer'
 import { getBatchedClient, getTempoChain } from '#wagmi.config'
 
 export const [MAX_LIMIT, DEFAULT_LIMIT] = [10, 10]
@@ -30,6 +30,8 @@ export const SUBMIT_BATCH_SELECTORS = [
 			.map((item) => toFunctionSelector(item as AbiFunction)),
 	),
 ]
+/** The most receipts a total is recounted for with `FINAL`, which takes seconds on a busier address. */
+const EXACT_TOTAL_MAX = 100_000
 
 export type EnrichedTransaction = {
 	hash: `0x${string}`
@@ -226,34 +228,45 @@ export async function fetchAddressHistoryData(params: {
 		searchParams.sort === 'desc' &&
 		cachedTotal === undefined
 	const direction = searchParams.sort === 'asc' ? 'ASC' : 'DESC'
-	const paged = [...filters]
-	if (searchParams.cursor) {
-		const [block, index] = parseHistoryCursor(searchParams.cursor)
-		paged.push(
-			`(block_num, tx_idx) ${direction === 'ASC' ? '>' : '<'} (${block}, ${index})`,
-		)
-	}
-	const rowsPromise = indexer(
-		chainId,
-		`SELECT tx_hash, block_num, tx_idx, toUnixTimestamp(block_timestamp) AS timestamp
-		FROM receipts WHERE ${paged.join(' AND ')}
-		ORDER BY block_num ${direction}, tx_idx ${direction} LIMIT ${limit + 1}`,
-	)
-	const requestedTotal = includeTotal
-		? indexer(
+	const cursor = searchParams.cursor
+		? parseHistoryCursor(searchParams.cursor)
+		: undefined
+	// One row past the page says there is another.
+	const rowsPromise = readDistinct(
+		limit + 1,
+		(after) => {
+			const from = after ? [after.block_num, after.tx_idx] : cursor
+			const bound = from
+				? [
+						`(block_num, tx_idx) ${direction === 'ASC' ? '>' : '<'} (${from.join(', ')})`,
+					]
+				: []
+			return indexer(
 				chainId,
-				`SELECT count() AS n FROM receipts WHERE ${filters.join(' AND ')}`,
-			).then(
-				([row]) => (row ? Number(row.n) : undefined),
-				() => undefined,
+				`SELECT tx_hash, block_num, tx_idx, toUnixTimestamp(block_timestamp) AS timestamp
+				FROM receipts WHERE ${[...filters, ...bound].join(' AND ')}
+				ORDER BY block_num ${direction}, tx_idx ${direction} LIMIT ${limit + 1}`,
 			)
+		},
+		'block_num',
+		'tx_idx',
+	)
+	const count = (table: string) =>
+		indexer(
+			chainId,
+			`SELECT count() AS n FROM ${table} WHERE ${filters.join(' AND ')}`,
+		).then(([row]) => Number(row?.n ?? 0))
+	const requestedTotal = includeTotal
+		? count('receipts')
+				// `FINAL` leaves out the rows tidx holds twice, as the pages do.
+				.then((n) =>
+					n > EXACT_TOTAL_MAX ? n : count('receipts FINAL').catch(() => n),
+				)
+				.catch(() => undefined)
 		: undefined
 	if (requestedTotal) cacheHistoryTotal(totalKey, requestedTotal)
 
-	const [rows, total] = await Promise.all([
-		rowsPromise,
-		cachedTotal ?? requestedTotal,
-	])
+	const rows = await rowsPromise
 	const page = rows.slice(0, limit)
 
 	const client = getBatchedClient()
@@ -286,7 +299,8 @@ export async function fetchAddressHistoryData(params: {
 	const last = page.at(-1)
 	return {
 		transactions,
-		total: total ?? null,
+		// Counted while the node read the page.
+		total: (await (cachedTotal ?? requestedTotal)) ?? null,
 		limit,
 		nextCursor: rows.length > limit && last ? historyCursor(last) : null,
 		reverseCursor: page[0] ? historyCursor(page[0]) : null,

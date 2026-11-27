@@ -36,7 +36,10 @@ vi.mock('#wagmi.config', () => ({
 		request,
 	}),
 }))
-vi.mock('#lib/server/dex-indexer', () => ({ indexer }))
+vi.mock('#lib/server/dex-indexer', async (importOriginal) => ({
+	...(await importOriginal<typeof import('#lib/server/dex-indexer')>()),
+	indexer,
+}))
 
 /** `_recordCount[1]` and `[2]`: `keccak256(abi.encode(id, 5))`, worked out apart from the code. */
 const RECORD_COUNTS: Record<string, bigint> = {
@@ -332,7 +335,7 @@ describe('anchoring', () => {
 			data: { registryId: 1, page: 1 },
 		})
 		expect(
-			found?.events?.map((e) => [e.event, e.recordId, e.blockNumber]),
+			found?.events.map((e) => [e.event, e.recordId, e.blockNumber]),
 		).toEqual([
 			['AddRecord', 2, 9],
 			['AddRecord', 1, 7],
@@ -347,7 +350,48 @@ describe('anchoring', () => {
 		const without = await fetchAnchoringRegistry({
 			data: { registryId: 1, page: 1 },
 		})
-		expect(without?.events).toBeNull()
+		expect(without?.events).toEqual([])
+		expect(without?.unlisted).toHaveLength(5)
 		expect(without?.records).toHaveLength(25)
+	})
+
+	it('reads on past the events tidx holds twice', async () => {
+		// 30 AddRecord events, each stored twice and newest first, over an older AddRegistry.
+		const records = Array.from({ length: 30 }, (_, i) => ({
+			tx_hash: `0x${i}`,
+			block_num: 100 - i,
+			log_idx: 0,
+			caller: '0xc',
+			recordId: 30 - i,
+		})).flatMap((row) => [row, row])
+		indexer.mockImplementation(async (_chainId: number, sql: string) => {
+			if (sql.includes('FROM AddRegistry'))
+				return [{ tx_hash: '0x9', block_num: 5, log_idx: 0, caller: '0xc' }]
+			if (!sql.includes('FROM AddRecord')) return []
+			const bound = /\(block_num, log_idx\) < \((\d+), (\d+)\)/.exec(sql)
+			const after = bound ? Number(bound[1]) : Number.POSITIVE_INFINITY
+			return records.filter((row) => row.block_num < after).slice(0, 26)
+		})
+		const found = await fetchAnchoringRegistry({
+			data: { registryId: 1, page: 1 },
+		})
+		// One past a page of AddRecord alone, so the page says there are more.
+		expect(found?.events).toHaveLength(26)
+		expect(found?.events.every((e) => e.event === 'AddRecord')).toBe(true)
+	})
+
+	it('lists the events the indexer answered for when another times out', async () => {
+		indexer.mockImplementation(async (_chainId: number, sql: string) => {
+			if (sql.includes('FROM AddRecord'))
+				throw new Error('Indexer query failed (422): Timeout exceeded')
+			return sql.includes('FROM AddRegistry')
+				? [{ tx_hash: '0x9', block_num: 5, log_idx: 0, caller: '0xc' }]
+				: []
+		})
+		const found = await fetchAnchoringRegistry({
+			data: { registryId: 1, page: 1 },
+		})
+		expect(found?.events.map((e) => e.event)).toEqual(['AddRegistry'])
+		expect(found?.unlisted).toEqual(['AddRecord'])
 	})
 })

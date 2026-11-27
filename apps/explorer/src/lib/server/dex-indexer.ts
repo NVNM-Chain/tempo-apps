@@ -66,6 +66,38 @@ export function sqlTime(ms: number): string {
 	return new Date(ms).toISOString().replace('T', ' ').slice(0, 19)
 }
 
+/**
+ * `rows` with one row per value of `columns`: a tidx restart can insert a row twice, and
+ * `FINAL`, which would merge them, times out on the busiest addresses and tokens.
+ */
+export function distinct(rows: Row[], ...columns: string[]): Row[] {
+	const seen = new Set<string>()
+	return rows.filter((row) => {
+		const key = columns.map((column) => String(row[column])).join(':')
+		if (seen.has(key)) return false
+		seen.add(key)
+		return true
+	})
+}
+
+/**
+ * The first `size` distinct rows of a query read `size` rows at a time, `read(after)` giving
+ * the batch past row `after`: a repeated row takes room in a batch, so this reads on.
+ */
+export async function readDistinct(
+	size: number,
+	read: (after?: Row) => Promise<Row[]>,
+	...columns: string[]
+): Promise<Row[]> {
+	let batch = await read()
+	let rows = distinct(batch, ...columns)
+	while (rows.length < size && batch.length === size) {
+		batch = await read(batch.at(-1))
+		rows = distinct([...rows, ...batch], ...columns)
+	}
+	return rows.slice(0, size)
+}
+
 /** Indexer values are interpolated into SQL, so only lowercase hex passes. */
 export function addressOf(value: unknown): Address | undefined {
 	const text = String(value).toLowerCase()

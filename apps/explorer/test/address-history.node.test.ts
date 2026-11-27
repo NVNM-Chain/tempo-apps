@@ -145,8 +145,64 @@ describe('fetchAddressHistoryData', () => {
 		).resolves.toMatchObject({ total: 1_750, nextCursor: null })
 
 		const queries = indexer.mock.calls.map(([, sql]) => sql as string)
-		expect(queries.filter((sql) => sql.includes('count()'))).toHaveLength(1)
+		// Counted once, as stored and then without copies.
+		expect(
+			queries
+				.filter((sql) => sql.includes('count()'))
+				.map((sql) => sql.includes('FINAL')),
+		).toEqual([false, true])
 		expect(queries.at(-1)).toContain('(block_num, tx_idx) < (9, 1)')
+	})
+
+	it.each([
+		['ends where the history does', [], null],
+		['pages on past the duplicate', [{ block_num: 7, tx_idx: 0 }], '[8,0]'],
+	])('lists a transaction tidx holds twice once and %s', async (_, after, next) => {
+		const [a, b] = [
+			{ tx_hash: HASH, block_num: 9, tx_idx: 1, timestamp: 1 },
+			{ tx_hash: HASH, block_num: 8, tx_idx: 0, timestamp: 1 },
+		]
+		// The first batch is [A, A, B]; what follows B is `after`.
+		indexer.mockImplementation(async (_chainId: number, sql: string) =>
+			sql.includes('count()')
+				? [{ n: 0 }]
+				: sql.includes('< (8, 0)')
+					? after.map((row) => ({ tx_hash: HASH, timestamp: 1, ...row }))
+					: [a, a, b],
+		)
+
+		const first = await fetchAddressHistoryData({
+			address: ADDRESS,
+			chainId: 4217,
+			includeKnownEvents: false,
+			searchParams: { include: 'all', limit: 2, sort: 'desc' },
+		})
+
+		expect(first.transactions).toHaveLength(2)
+		expect(first.nextCursor).toBe(next && btoa(next))
+	})
+
+	it.each([
+		['leaves tidx’s copies out of a short history’s total', 40, 20, 20],
+		['keeps them when the recount fails', 41, undefined, 41],
+		['keeps them in one too long to recount', 200_000, 199_940, 200_000],
+	])('%s', async (_, stored, exact, total) => {
+		indexer.mockImplementation(async (_chainId: number, sql: string) => {
+			if (!sql.includes('count()')) return []
+			if (!sql.includes('FINAL')) return [{ n: stored }]
+			if (exact === undefined) throw new Error('Indexer query failed (422)')
+			return [{ n: exact }]
+		})
+
+		await expect(
+			fetchAddressHistoryData({
+				// Totals are cached by address.
+				address: `0x${String(stored).padStart(40, '3')}`,
+				chainId: 4217,
+				includeKnownEvents: false,
+				searchParams: { include: 'all', limit: 10, sort: 'desc' },
+			}),
+		).resolves.toMatchObject({ total })
 	})
 
 	it('fetches and reverses the oldest edge without counting', async () => {
