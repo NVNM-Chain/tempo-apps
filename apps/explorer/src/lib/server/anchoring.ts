@@ -1,6 +1,6 @@
 import { createServerFn } from '@tanstack/react-start'
 import { formatAbiItem } from 'abitype'
-import { encodeAbiParameters, keccak256, toHex } from 'viem'
+import { encodeAbiParameters, getAbiItem, keccak256, toHex } from 'viem'
 import * as z from 'zod/mini'
 import { anchoringAbi } from '#lib/abis'
 import {
@@ -224,34 +224,47 @@ async function fetchRegistryEvents(
 	registryId: number,
 	limit: number,
 ) {
+	const read = async (event: (typeof registryEvents)[number], since = 0) => {
+		const withRecord = event.inputs.some((input) => input.name === 'recordId')
+		const rows = await readDistinct(
+			limit,
+			(after) =>
+				indexer(
+					chainId,
+					`SELECT tx_hash, block_num, log_idx, caller${withRecord ? ', recordId' : ''}
+					FROM ${event.name} WHERE address = '${ANCHORING_ADDRESS}' AND registryId = ${registryId}
+					AND block_num >= ${since}
+					${after ? `AND (block_num, log_idx) < (${after.block_num}, ${after.log_idx})` : ''}
+					ORDER BY block_num DESC, log_idx DESC LIMIT ${limit}`,
+					formatAbiItem(event).replace(/^event /, ''),
+				),
+			'tx_hash',
+			'log_idx',
+		)
+		return rows.map(
+			(row): AnchoringEvent => ({
+				event: event.name,
+				recordId: withRecord ? Number(row.recordId) : undefined,
+				caller: String(row.caller),
+				transactionHash: String(row.tx_hash),
+				blockNumber: Number(row.block_num),
+				logIndex: Number(row.log_idx),
+			}),
+		)
+	}
+	// `registryId` is not a topic, so a query scans back from the head until it fills a page;
+	// the registry's AddRegistry block stops it. Registries seeded at genesis have none.
+	const created = read(getAbiItem({ abi: anchoringAbi, name: 'AddRegistry' }))
+	const since = created.then(
+		(events) => events.at(-1)?.blockNumber ?? 0,
+		() => 0,
+	)
 	const found = await Promise.allSettled(
-		registryEvents.map(async (event) => {
-			const withRecord = event.inputs.some((input) => input.name === 'recordId')
-			const rows = await readDistinct(
-				limit,
-				(after) =>
-					indexer(
-						chainId,
-						`SELECT tx_hash, block_num, log_idx, caller${withRecord ? ', recordId' : ''}
-						FROM ${event.name} WHERE address = '${ANCHORING_ADDRESS}' AND registryId = ${registryId}
-						${after ? `AND (block_num, log_idx) < (${after.block_num}, ${after.log_idx})` : ''}
-						ORDER BY block_num DESC, log_idx DESC LIMIT ${limit}`,
-						formatAbiItem(event).replace(/^event /, ''),
-					),
-				'tx_hash',
-				'log_idx',
-			)
-			return rows.map(
-				(row): AnchoringEvent => ({
-					event: event.name,
-					recordId: withRecord ? Number(row.recordId) : undefined,
-					caller: String(row.caller),
-					transactionHash: String(row.tx_hash),
-					blockNumber: Number(row.block_num),
-					logIndex: Number(row.log_idx),
-				}),
-			)
-		}),
+		registryEvents.map((event) =>
+			event.name === 'AddRegistry'
+				? created
+				: since.then((block) => read(event, block)),
+		),
 	)
 	const events: AnchoringEvent[] = []
 	const unlisted: string[] = []
