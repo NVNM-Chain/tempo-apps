@@ -90,10 +90,9 @@ export function getWagmiConfig() {
 	return wagmiConfigSingleton
 }
 
-// The root route's loader runs again on every preload (links preload as they
-// scroll into view), so read the cookie where it already is instead of
-// calling a server function: the request header on the server and
-// document.cookie in the browser.
+// The root route's loader runs again on every preload, so read the cookie
+// where it already is instead of calling a server function: the request
+// header on the server and document.cookie in the browser.
 const getWagmiCookie = createIsomorphicFn()
 	.client(() => document.cookie)
 	.server(() => getRequestHeader('cookie'))
