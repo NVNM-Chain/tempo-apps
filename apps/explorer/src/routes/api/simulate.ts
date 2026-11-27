@@ -5,7 +5,7 @@ import * as OxHex from 'ox/Hex'
 import { numberToHex } from 'viem'
 import * as z from 'zod/mini'
 import { checkRateLimit } from '#lib/server/rate-limit'
-import { zAddress, zHash } from '#lib/zod'
+import { hex, zAddress, zHash } from '#lib/zod'
 import { getTempoChain } from '#wagmi.config'
 
 export const MAX_SIMULATION_CALLDATA_BYTES = 64 * 1024
@@ -15,7 +15,7 @@ const SIMULATION_TIMEOUT_MS = 15_000
 const DecimalSchema = z.string().check(z.regex(/^\d+$/))
 
 const CalldataSchema = z.pipe(
-	z.string().check((ctx) => {
+	z.string().check(hex(), (ctx) => {
 		if (!OxHex.validate(ctx.value)) {
 			ctx.issues.push({
 				code: 'custom',
@@ -108,6 +108,7 @@ async function rpcRequest<T>(args: {
 }): Promise<T> {
 	const response = await fetch(getTempoChain().rpcUrls.default.http[0], {
 		method: 'POST',
+		redirect: 'manual',
 		headers: { 'content-type': 'application/json' },
 		body: JSON.stringify({
 			jsonrpc: '2.0',

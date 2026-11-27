@@ -1,9 +1,20 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Executor } from '@cloudflare/codemode'
 import type { Tool } from '@modelcontextprotocol/sdk/types.js'
-import { handleMcp } from './mcp.js'
-import { captureMcpAnalytics, parseJsonRpcRequest } from './posthog-mcp.js'
+import { handleMcp as handleParsedMcp } from './mcp.js'
+import { flushWorkerMetrics } from './metrics.js'
+import { captureMcpAnalytics } from './posthog-mcp.js'
+import { readMcpRequest } from './request.js'
 import type { Source } from './sources.js'
+
+async function handleMcp(
+	req: Request,
+	context: Parameters<typeof handleParsedMcp>[1],
+) {
+	const parsed = await readMcpRequest(req)
+	if (parsed instanceof Response) return parsed
+	return handleParsedMcp(parsed.request, context, parsed.body)
+}
 
 function instance(
 	search: (params: AiSearchSearchRequest) => Promise<AiSearchSearchResponse>,
@@ -30,11 +41,192 @@ const sources: Source[] = [
 	},
 ]
 
+beforeEach(() => {
+	vi.stubGlobal(
+		'fetch',
+		vi.fn(async () => new Response('not found', { status: 404 })),
+	)
+})
+
 afterEach(() => {
 	vi.unstubAllGlobals()
 })
 
 describe('handleMcp', () => {
+	it.each([
+		'https://tempo.xyz/developers/docs/api/api-keys',
+		'https://docs.tempo.xyz/docs/api/api-keys',
+		'/docs/api/api-keys',
+	])('reads migrated Tempo page %s', async (url) => {
+		const fetcher = vi.fn(
+			async () => new Response('# API Keys\n\nCreate a key.'),
+		)
+		vi.stubGlobal('fetch', fetcher)
+		const res = await handleMcp(
+			new Request('https://mcp.tempo.xyz/', {
+				method: 'POST',
+				body: JSON.stringify({
+					jsonrpc: '2.0',
+					id: 1,
+					method: 'tools/call',
+					params: {
+						name: 'read_page',
+						arguments: { source: 'tempo-canonical', url },
+					},
+				}),
+			}),
+			{
+				instance: instance(async () => ({ search_query: '', chunks: [] })),
+				sources: [
+					{ id: 'tempo-canonical', base: 'https://tempo.xyz/developers' },
+				],
+			},
+		)
+		const body = await textContent(res)
+		expect(body.result.url).toBe(
+			'https://tempo.xyz/developers/docs/api/api-keys',
+		)
+		expect(body.result.text).toBe('# API Keys\n\nCreate a key.')
+	})
+
+	it('finds API keys in the canonical Tempo index', async () => {
+		const fetcher = vi.fn(
+			async () =>
+				new Response(
+					'- [API Keys](https://tempo.xyz/developers/docs/api/api-keys): Credentials',
+				),
+		)
+		vi.stubGlobal('fetch', fetcher)
+		const res = await handleMcp(
+			new Request('https://mcp.tempo.xyz/', {
+				method: 'POST',
+				body: JSON.stringify({
+					jsonrpc: '2.0',
+					id: 1,
+					method: 'tools/call',
+					params: {
+						name: 'find_pages',
+						arguments: { source: 'tempo-canonical-index', query: 'API keys' },
+					},
+				}),
+			}),
+			{
+				instance: instance(async () => ({ search_query: '', chunks: [] })),
+				sources: [
+					{ id: 'tempo-canonical-index', base: 'https://tempo.xyz/developers' },
+				],
+			},
+		)
+		const body = await textContent(res)
+		expect(body.result.pages).toEqual([
+			{
+				title: 'API Keys',
+				url: 'https://tempo.xyz/developers/docs/api/api-keys',
+				score: expect.any(Number),
+			},
+		])
+		expect(fetcher.mock.calls[0][0]).toBe(
+			'https://tempo.xyz/developers/llms.txt',
+		)
+	})
+
+	describe.each([
+		'search',
+		'find_pages',
+		'read_page',
+	])('%s query limits', (name) => {
+		it.each([
+			4095, 4096, 4097,
+		])('handles a %i-character query', async (length) => {
+			const source = {
+				id: `limits-${name}-${length}`,
+				base: `https://limits-${name}-${length}.example`,
+			}
+			const fetcher = vi.fn(
+				async () => new Response('- [Needle](/needle): documentation'),
+			)
+			vi.stubGlobal('fetch', fetcher)
+			const search = vi.fn(async () => ({ search_query: 'needle', chunks: [] }))
+			const res = await handleMcp(
+				new Request('https://mcp.tempo.xyz/', {
+					method: 'POST',
+					body: JSON.stringify({
+						jsonrpc: '2.0',
+						id: 1,
+						method: 'tools/call',
+						params: {
+							name,
+							arguments: {
+								source: source.id,
+								path: '/needle',
+								query: 'needle'.padEnd(length, ' '),
+								response_format: 'structured',
+							},
+						},
+					}),
+				}),
+				{ instance: instance(search), sources: [source] },
+			)
+			const body = await res?.json()
+			if (length > 4096) {
+				expect(body.error).toMatchObject({
+					code: -32602,
+					message: 'query exceeds maximum length of 4096 characters',
+				})
+				expect(search).not.toHaveBeenCalled()
+				expect(fetcher).not.toHaveBeenCalled()
+			} else {
+				expect(body.error).toBeUndefined()
+				expect(body.result.isError).not.toBe(true)
+				if (name === 'search') expect(search).toHaveBeenCalled()
+				else expect(fetcher).toHaveBeenCalledOnce()
+			}
+		})
+	})
+
+	it.each([
+		127, 128, 129,
+	])('scores at most 128 unique query tokens from %i terms', async (count) => {
+		const source = {
+			id: `tokens-${count}`,
+			base: `https://tokens-${count}.example`,
+		}
+		const tokens = Array.from(
+			{ length: count },
+			(_, i) => `term${String(i).padStart(3, '0')}`,
+		)
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async () => new Response(`- [Last term](/last): ${tokens.at(-1)}`)),
+		)
+		const res = await handleMcp(
+			new Request('https://mcp.tempo.xyz/', {
+				method: 'POST',
+				body: JSON.stringify({
+					jsonrpc: '2.0',
+					id: 1,
+					method: 'tools/call',
+					params: {
+						name: 'find_pages',
+						arguments: {
+							source: source.id,
+							query: tokens.join(' '),
+							response_format: 'structured',
+						},
+					},
+				}),
+			}),
+			{
+				instance: instance(async () => ({ search_query: '', chunks: [] })),
+				sources: [source],
+			},
+		)
+		const body = await res?.json()
+		expect(body.result.structuredContent.result.pages).toHaveLength(
+			count <= 128 ? 1 : 0,
+		)
+	})
+
 	it('serves compact search and page read tool schemas', async () => {
 		const res = await handleMcp(
 			new Request('https://mcp.tempo.xyz/', {
@@ -54,6 +246,9 @@ describe('handleMcp', () => {
 		expect(res).toBeDefined()
 		const body = await res?.json()
 		expect(body.result.tools).toHaveLength(3)
+		for (const tool of body.result.tools) {
+			expect(tool.inputSchema.properties.query.maxLength).toBe(4096)
+		}
 		expect(body.result.tools.map((tool: Tool) => tool.annotations)).toEqual(
 			Array.from({ length: 3 }, () => ({
 				destructiveHint: false,
@@ -106,7 +301,19 @@ describe('handleMcp', () => {
 		expect(
 			body.result.tools.map((tool: { name: string }) => tool.name),
 		).toEqual(['search', 'find_pages', 'read_page', 'code'])
-		expect(body.result.tools[3].description).toContain('codemode.search')
+		expect(body.result.tools[3].description).toContain('codemode.find_pages')
+		expect(body.result.tools[3].annotations).toEqual({
+			destructiveHint: false,
+			idempotentHint: true,
+			openWorldHint: true,
+			readOnlyHint: true,
+		})
+		expect(body.result.tools[0].inputSchema.properties).not.toHaveProperty(
+			'include_raw',
+		)
+		expect(body.result.tools[0].inputSchema.properties).not.toHaveProperty(
+			'ai_search_options',
+		)
 	})
 
 	it('normalizes simple source and result controls into retrieval options', async () => {
@@ -217,6 +424,51 @@ describe('handleMcp', () => {
 		})
 	})
 
+	it.each([
+		['machine payments on Tempo', undefined],
+		['Vocs MCP server', 'vocs'],
+		['wagmi connector on Tempo', 'wagmi'],
+	])('routes %s to %s', async (query, expectedSource) => {
+		let seen: AiSearchSearchRequest | undefined
+		await handleMcp(
+			new Request('https://mcp.tempo.xyz/', {
+				method: 'POST',
+				body: JSON.stringify({
+					jsonrpc: '2.0',
+					id: 201,
+					method: 'tools/call',
+					params: { name: 'search', arguments: { query } },
+				}),
+			}),
+			{
+				instance: instance(async (params) => {
+					seen = params
+					return {
+						search_query: query,
+						chunks: [
+							{
+								id: 'routing',
+								type: 'text',
+								score: 1,
+								text: 'docs',
+								item: { key: `${expectedSource ?? 'tempo'}/routing` },
+							},
+						],
+					}
+				}),
+				sources: [
+					...sources,
+					{ id: 'tempo', base: 'https://docs.tempo.xyz' },
+					{ id: 'mpp', base: 'https://mpp.dev' },
+					{ id: 'vocs', base: 'https://vocs.dev' },
+				],
+			},
+		)
+		expect(seen?.ai_search_options?.retrieval?.filters).toEqual(
+			expectedSource ? { source: expectedSource } : undefined,
+		)
+	})
+
 	it('preserves explicit AI Search cache overrides', async () => {
 		let seen: AiSearchSearchRequest | undefined
 		await handleMcp(
@@ -320,6 +572,86 @@ describe('handleMcp', () => {
 		const result = JSON.parse(body.result.content[0].text)
 		expect(result.search.success).toBe(true)
 		expect(result.page.result.text).toBe('# Account keys\n\nKey docs')
+	})
+
+	it.each([
+		'sequential',
+		'parallel',
+	])('bounds %s codemode calls per execution', async (mode) => {
+		const fetchPage = vi.fn(async () => new Response('# Account keys'))
+		vi.stubGlobal('fetch', fetchPage)
+		const search = vi.fn(async () => ({
+			search_query: 'keys',
+			chunks: [
+				{
+					id: '1',
+					type: 'text' as const,
+					score: 1,
+					text: 'key docs',
+					item: { key: 'viem/keys' },
+				},
+			],
+		}))
+		const execute = vi.fn<Executor['execute']>(async (_code, providers) => {
+			const docs = providers[0]?.fns ?? {}
+			const call = (index: number) => {
+				const id = `${mode}-${execute.mock.calls.length}-${index}`
+				const result =
+					index % 2 === 0
+						? docs.search({
+								query: `budget ${id}`,
+								response_format: 'structured',
+							})
+						: docs.read_page({
+								source: 'viem',
+								path: `/budget-${id}`,
+								response_format: 'structured',
+							})
+				return result.catch((error: unknown) => ({
+					success: false,
+					error: String(error),
+				}))
+			}
+			const results = []
+			if (mode === 'parallel')
+				results.push(
+					...(await Promise.all(Array.from({ length: 12 }, (_, i) => call(i)))),
+				)
+			else for (let i = 0; i < 12; i++) results.push(await call(i))
+			return { result: results }
+		})
+		// Each external invocation receives its own budget.
+		for (let invocation = 0; invocation < 2; invocation++) {
+			const res = await handleMcp(
+				new Request('https://mcp.tempo.xyz/', {
+					method: 'POST',
+					body: JSON.stringify({
+						jsonrpc: '2.0',
+						id: invocation,
+						method: 'tools/call',
+						params: { name: 'code', arguments: { code: 'async () => {}' } },
+					}),
+				}),
+				{
+					instance: instance(search),
+					sources,
+					executor: { execute } as unknown as Executor,
+				},
+			)
+			const body = await res?.json()
+			const results = JSON.parse(body.result.content[0].text)
+			expect(
+				results
+					.slice(0, 10)
+					.every((result: { success: boolean }) => result.success),
+			).toBe(true)
+			for (const result of results.slice(10)) {
+				expect(result.success).toBe(false)
+				expect(JSON.stringify(result)).toContain('10-call docs tool budget')
+			}
+		}
+		expect(fetchPage).toHaveBeenCalledTimes(10)
+		expect(search).toHaveBeenCalledTimes(10)
 	})
 
 	it('returns codemode executor errors as MCP tool errors', async () => {
@@ -673,6 +1005,7 @@ describe('handleMcp', () => {
 
 		expect(seen?.ai_search_options?.retrieval?.max_num_results).toBe(2)
 		const text = await textContent(res)
+		expect(text.result.retrieval).toBe('ai_search')
 		expect(text.result.chunks).toEqual([
 			{
 				score: 1,
@@ -940,10 +1273,13 @@ describe('handleMcp', () => {
 		expect(calls[0]?.ai_search_options?.retrieval?.max_num_results).toBe(20)
 	})
 
-	it('falls back to source llms.txt when filtered search returns no chunks', async () => {
+	it.each([
+		'empty',
+		'unavailable',
+	])('falls back to source llms.txt when search is %s', async (mode) => {
 		const tempoSource: Source = {
 			id: 'tempo',
-			base: 'https://docs.tempo.xyz',
+			base: `https://${mode}.tempo.example`,
 			description: 'Tempo docs',
 		}
 		const fetches: string[] = []
@@ -951,13 +1287,14 @@ describe('handleMcp', () => {
 			'fetch',
 			vi.fn(async (url: string) => {
 				fetches.push(url)
-				if (url === 'https://docs.tempo.xyz/llms.txt') {
+				if (url === `https://${mode}.tempo.example/llms.txt`) {
 					return new Response(
 						'- [Use virtual addresses for deposits](/guide/payments/virtual-addresses): Register a virtual-address master and derive deposit addresses.',
 					)
 				}
 				if (
-					url === 'https://docs.tempo.xyz/guide/payments/virtual-addresses.md'
+					url ===
+					`https://${mode}.tempo.example/guide/payments/virtual-addresses.md`
 				) {
 					return new Response(
 						'# Use virtual addresses for deposits\n\nRegister a virtual-address master and watch deposits.',
@@ -985,24 +1322,25 @@ describe('handleMcp', () => {
 				}),
 			}),
 			{
-				instance: instance(async () => ({
-					search_query: 'virtual',
-					chunks: [],
-				})),
+				instance: instance(async () => {
+					if (mode === 'unavailable') throw new Error('backend unavailable')
+					return { search_query: 'virtual', chunks: [] }
+				}),
 				sources: [tempoSource],
 			},
 		)
 
 		expect(fetches).toEqual([
-			'https://docs.tempo.xyz/llms.txt',
-			'https://docs.tempo.xyz/guide/payments/virtual-addresses.md',
+			`https://${mode}.tempo.example/llms.txt`,
+			`https://${mode}.tempo.example/guide/payments/virtual-addresses.md`,
 		])
 		const text = await textContent(res)
+		expect(text.result.retrieval).toBe('source_index')
 		expect(text.result.chunks).toEqual([
 			{
-				score: 0.85,
+				score: 0.6471,
 				source: 'tempo',
-				url: 'https://docs.tempo.xyz/guide/payments/virtual-addresses',
+				url: `https://${mode}.tempo.example/guide/payments/virtual-addresses`,
 				text: '# Use virtual addresses for deposits\n\nRegister a virtual-address master and watch deposits.',
 			},
 		])
@@ -1211,9 +1549,58 @@ describe('handleMcp', () => {
 			{
 				title: 'Virtual addresses',
 				url: 'https://page-finder.tempo.xyz/virtual-addresses',
-				score: 0.35,
+				score: 0.4118,
 			},
 		])
+	})
+
+	it('ranks short API and camelCase page names without substring matches', async () => {
+		const source: Source = {
+			id: 'ranked-pages',
+			base: 'https://ranked-pages.example',
+		}
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(
+				async () =>
+					new Response(
+						[
+							'- [Learning](./learning.md)',
+							'- [Earn](./earn.md)',
+							'- [API reference](./api.md)',
+							'- [useConnect](./use-connect.md)',
+						].join('\n'),
+					),
+			),
+		)
+		const find = async (query: string) => {
+			const res = await handleMcp(
+				new Request('https://mcp.tempo.xyz/', {
+					method: 'POST',
+					body: JSON.stringify({
+						jsonrpc: '2.0',
+						id: query,
+						method: 'tools/call',
+						params: {
+							name: 'find_pages',
+							arguments: { source: source.id, query },
+						},
+					}),
+				}),
+				{
+					instance: instance(async () => ({ search_query: '', chunks: [] })),
+					sources: [source],
+				},
+			)
+			return (await textContent(res)).result.pages as { title: string }[]
+		}
+		expect((await find('earn')).map((page) => page.title)).toEqual(['Earn'])
+		expect((await find('API')).map((page) => page.title)).toContain(
+			'API reference',
+		)
+		expect((await find('useConnect')).map((page) => page.title)).toContain(
+			'useConnect',
+		)
 	})
 
 	it('can return tool data as MCP structuredContent', async () => {
@@ -1302,6 +1689,216 @@ describe('handleMcp', () => {
 		const readBody = await read?.json()
 		expect(readBody.result.contents[0].text).toContain('`viem`')
 		expect(readBody.result.contents[0].text).toContain('source')
+	})
+
+	it('exposes index sections and reports resource truncation', async () => {
+		const source: Source = {
+			id: 'sectioned-pages',
+			base: 'https://sectioned.example/docs',
+		}
+		const entries = Array.from(
+			{ length: 501 },
+			(_, i) => `- [Page ${i}](/page-${i}): Description`,
+		)
+		const fetcher = vi.fn(async (url: string) => {
+			if (url.endsWith('/llms.txt'))
+				return new Response(
+					['## Contents', '## Payments', '### Deposits', ...entries].join('\n'),
+				)
+			return new Response('# Docs root')
+		})
+		vi.stubGlobal('fetch', fetcher)
+		const call = async (method: string, params: Record<string, unknown>) => {
+			const res = await handleMcp(
+				new Request('https://mcp.tempo.xyz/', {
+					method: 'POST',
+					body: JSON.stringify({ jsonrpc: '2.0', id: method, method, params }),
+				}),
+				{
+					instance: instance(async () => ({ search_query: '', chunks: [] })),
+					sources: [source],
+				},
+			)
+			return res?.json()
+		}
+		const index = await call('resources/read', {
+			uri: 'tempo-docs://source/sectioned-pages/index',
+		})
+		const text = index.result.contents[0].text as string
+		expect(text).toContain('## Payments / Deposits')
+		expect(text).toContain('Showing 500 of 501 pages')
+		const found = await call('tools/call', {
+			name: 'find_pages',
+			arguments: { source: source.id, query: 'page 500' },
+		})
+		expect(
+			JSON.parse(found.result.content[0].text).result.pages[0].section,
+		).toBe('Payments / Deposits')
+		const bySection = await call('tools/call', {
+			name: 'find_pages',
+			arguments: { source: source.id, query: 'Payments' },
+		})
+		expect(
+			JSON.parse(bySection.result.content[0].text).result.pages,
+		).not.toHaveLength(0)
+		const root = await call('tools/call', {
+			name: 'read_page',
+			arguments: { source: source.id, path: '/' },
+		})
+		expect(JSON.parse(root.result.content[0].text).result.text).toBe(
+			'# Docs root',
+		)
+		expect(fetcher).toHaveBeenCalledWith(
+			'https://sectioned.example/docs/index.md',
+			expect.anything(),
+		)
+		const search = await handleMcp(
+			new Request('https://mcp.tempo.xyz/', {
+				method: 'POST',
+				body: JSON.stringify({
+					jsonrpc: '2.0',
+					id: 77,
+					method: 'tools/call',
+					params: {
+						name: 'search',
+						arguments: { source: source.id, query: 'page 0' },
+					},
+				}),
+			}),
+			{
+				instance: instance(async () => ({
+					search_query: 'page 0',
+					chunks: [
+						{
+							id: 'page-0',
+							type: 'text',
+							score: 1,
+							text: 'Page 0',
+							item: { key: 'https://sectioned.example/docs/page-0' },
+						},
+					],
+				})),
+				sources: [source],
+			},
+		)
+		expect((await textContent(search)).result.chunks[0]).toMatchObject({
+			source: source.id,
+			section: 'Payments / Deposits',
+		})
+	})
+
+	it('keeps search available when section enrichment stalls', async () => {
+		const source: Source = { id: 'slow-sections', base: 'https://slow.example' }
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(() => new Promise<Response>(() => {})),
+		)
+		const startedAt = performance.now()
+		const response = await handleMcp(
+			new Request('https://mcp.tempo.xyz/', {
+				method: 'POST',
+				body: JSON.stringify({
+					jsonrpc: '2.0',
+					id: 78,
+					method: 'tools/call',
+					params: {
+						name: 'search',
+						arguments: { source: source.id, query: 'page' },
+					},
+				}),
+			}),
+			{
+				instance: instance(async () => ({
+					search_query: 'page',
+					chunks: [
+						{
+							id: 'page',
+							type: 'text',
+							score: 1,
+							text: '# Page',
+							item: { key: 'https://slow.example/page' },
+						},
+					],
+				})),
+				sources: [source],
+			},
+		)
+		expect((await textContent(response)).result.chunks[0].text).toBe('# Page')
+		expect(performance.now() - startedAt).toBeLessThan(1500)
+	})
+
+	it('reads a mounted root from its index during local fallback', async () => {
+		const source: Source = {
+			id: 'root-fallback',
+			base: 'https://root.example/docs',
+		}
+		const fetcher = vi.fn(async (url: string) =>
+			url.endsWith('/llms.txt')
+				? new Response('- [Overview](/): Main docs')
+				: new Response('# Overview'),
+		)
+		vi.stubGlobal('fetch', fetcher)
+		const response = await handleMcp(
+			new Request('https://mcp.tempo.xyz/', {
+				method: 'POST',
+				body: JSON.stringify({
+					jsonrpc: '2.0',
+					id: 79,
+					method: 'tools/call',
+					params: {
+						name: 'search',
+						arguments: { source: source.id, query: 'Overview' },
+					},
+				}),
+			}),
+			{
+				instance: instance(async () => ({
+					search_query: 'Overview',
+					chunks: [],
+				})),
+				sources: [source],
+			},
+		)
+		expect((await textContent(response)).result.chunks[0].text).toBe(
+			'# Overview',
+		)
+		expect(fetcher).toHaveBeenCalledWith(
+			'https://root.example/docs/index.md',
+			expect.anything(),
+		)
+	})
+
+	it('separates unsectioned pages after a section', async () => {
+		const source: Source = {
+			id: 'mixed-sections',
+			base: 'https://mixed.example',
+		}
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(
+				async () =>
+					new Response('## Payments\n- [A](/a)\n## Contents\n- [B](/b)'),
+			),
+		)
+		const response = await handleMcp(
+			new Request('https://mcp.tempo.xyz/', {
+				method: 'POST',
+				body: JSON.stringify({
+					jsonrpc: '2.0',
+					id: 80,
+					method: 'resources/read',
+					params: { uri: `tempo-docs://source/${source.id}/index` },
+				}),
+			}),
+			{
+				instance: instance(async () => ({ search_query: '', chunks: [] })),
+				sources: [source],
+			},
+		)
+		const body = await response?.json()
+		expect(body?.result?.contents?.[0]?.text).toContain(
+			'## Payments\n- [A](https://mixed.example/a)\n\n## Other pages\n- [B](https://mixed.example/b)',
+		)
 	})
 
 	it('exposes source indexes and exact pages as MCP resources', async () => {
@@ -1415,6 +2012,10 @@ Sitemap:
 [Skip to content](#vocs-content)
 Search...
 
+> **Can't find what you're looking for?** Use the docs MCP server.
+>
+> **Have feedback?** Send it to the docs team.
+
 # Cached Page
 
 ${'important '.repeat(80)}
@@ -1480,6 +2081,7 @@ Was this helpful?`,
 		expect(firstText.result.text).toContain('# Cached Page')
 		expect(firstText.result.text).not.toContain('Sitemap:')
 		expect(firstText.result.text).not.toContain('Search...')
+		expect(firstText.result.text).not.toContain('docs MCP server')
 		expect(secondText.result.text).toBe(firstText.result.text)
 	})
 
@@ -1647,7 +2249,9 @@ describe('captureMcpAnalytics', () => {
 				method: 'tools/list',
 			}),
 		})
-		const body = await parseJsonRpcRequest(req)
+		const parsed = await readMcpRequest(req)
+		if (parsed instanceof Response) throw new Error('unexpected response')
+		const { body } = parsed
 
 		captureMcpAnalytics(
 			req,
@@ -1682,7 +2286,9 @@ describe('captureMcpAnalytics', () => {
 				},
 			}),
 		})
-		const body = await parseJsonRpcRequest(req)
+		const parsed = await readMcpRequest(req)
+		if (parsed instanceof Response) throw new Error('unexpected response')
+		const { body } = parsed
 
 		captureMcpAnalytics(
 			req,
@@ -1732,3 +2338,224 @@ async function textContent(res: Response | undefined) {
 	const payload = JSON.parse(data ?? '{}')
 	return JSON.parse(payload.result.content[0].text)
 }
+
+describe('dependency metrics', () => {
+	it.each([
+		'success',
+		'error',
+	] as const)('records AI Search %s attempts', async (outcome) => {
+		flushWorkerMetrics()
+		const logs: string[] = []
+		const spy = vi.spyOn(console, 'log').mockImplementation((message) => {
+			logs.push(String(message))
+		})
+		const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+		try {
+			await handleMcp(
+				new Request('https://mcp.tempo.xyz/', {
+					method: 'POST',
+					body: JSON.stringify({
+						jsonrpc: '2.0',
+						id: 1,
+						method: 'tools/call',
+						params: {
+							name: 'search',
+							arguments: {
+								query: `metrics-${outcome}`,
+								response_format: 'structured',
+							},
+						},
+					}),
+				}),
+				{
+					instance: instance(async () => {
+						if (outcome === 'error') throw new Error('upstream unavailable')
+						return {
+							search_query: 'metrics',
+							chunks: [{ id: '1', text: 'a', score: 1, metadata: {} }],
+						} as AiSearchSearchResponse
+					}),
+					sources: [],
+				},
+			)
+			flushWorkerMetrics()
+			const metrics = logs
+				.filter((x) => x.startsWith('cwm-'))
+				.flatMap((x) => JSON.parse(x.slice(4)))
+			expect(metrics).toContainEqual(
+				expect.objectContaining({
+					n: 'tempo_docs_mcp_ai_search_request_count',
+					v: 1,
+					tags: expect.objectContaining({ outcome }),
+				}),
+			)
+			expect(metrics).toContainEqual(
+				expect.objectContaining({
+					n: 'tempo_docs_mcp_ai_search_duration_ms',
+					tags: expect.objectContaining({ outcome }),
+				}),
+			)
+			if (outcome === 'error') {
+				expect(metrics).toContainEqual(
+					expect.objectContaining({
+						n: 'tempo_docs_mcp_ai_search_error_count',
+						v: 1,
+					}),
+				)
+				expect(
+					metrics.some(
+						(x) => x.n === 'tempo_docs_mcp_ai_search_empty_result_count',
+					),
+				).toBe(false)
+			}
+		} finally {
+			spy.mockRestore()
+			errorSpy.mockRestore()
+		}
+	})
+})
+
+describe('bounded search dependencies', () => {
+	it('records a stuck AI Search call as an error at its deadline and permits retry', async () => {
+		vi.useFakeTimers()
+		flushWorkerMetrics()
+		const logs: string[] = []
+		vi.spyOn(console, 'log').mockImplementation((message) => {
+			logs.push(String(message))
+		})
+		vi.spyOn(console, 'error').mockImplementation(() => {})
+		try {
+			const search = vi
+				.fn()
+				.mockImplementationOnce(() => new Promise<never>(() => {}))
+				.mockResolvedValue({ search_query: 'bounded-dependency', chunks: [] })
+			const context = { instance: instance(search), sources: [] }
+			const request = () =>
+				new Request('https://mcp.tempo.xyz/', {
+					method: 'POST',
+					body: JSON.stringify({
+						jsonrpc: '2.0',
+						id: 1,
+						method: 'tools/call',
+						params: {
+							name: 'search',
+							arguments: {
+								query: 'bounded-dependency',
+								response_format: 'structured',
+							},
+						},
+					}),
+				})
+			const pending = handleMcp(request(), context)
+			await vi.waitFor(() => expect(search).toHaveBeenCalledOnce())
+			await vi.advanceTimersByTimeAsync(9001)
+			const response = await pending
+			expect(await response?.json()).toMatchObject({
+				result: { isError: true },
+			})
+			flushWorkerMetrics()
+			const metrics = logs
+				.filter((line) => line.startsWith('cwm-'))
+				.flatMap((line) => JSON.parse(line.slice(4)))
+			expect(metrics).toContainEqual(
+				expect.objectContaining({
+					n: 'tempo_docs_mcp_ai_search_error_count',
+					v: 1,
+				}),
+			)
+			expect(metrics).toContainEqual(
+				expect.objectContaining({
+					n: 'tempo_docs_mcp_tool_call_count',
+					tags: expect.objectContaining({ outcome: 'error' }),
+				}),
+			)
+			await handleMcp(request(), context)
+			expect(search).toHaveBeenCalledTimes(2)
+			expect(vi.getTimerCount()).toBe(0)
+		} finally {
+			vi.useRealTimers()
+			vi.restoreAllMocks()
+		}
+	})
+})
+
+describe('source boundary cache regressions', () => {
+	it('does not reuse broad-source pages through a narrower redirect policy', async () => {
+		const broad: Source = {
+			id: 'cache-broad',
+			base: 'https://cache-boundary.example/developers',
+		}
+		const narrow: Source = { id: 'cache-narrow', base: `${broad.base}/sdk` }
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async (url: string) =>
+				url.endsWith('/sdk/page.md')
+					? new Response(null, {
+							status: 302,
+							headers: { location: `${broad.base}/outside.md` },
+						})
+					: new Response('# Outside\n\nBroad-only content'),
+			),
+		)
+		const read = (source: Source) =>
+			handleMcp(
+				new Request('https://mcp.tempo.xyz/', {
+					method: 'POST',
+					body: JSON.stringify({
+						jsonrpc: '2.0',
+						id: source.id,
+						method: 'tools/call',
+						params: {
+							name: 'read_page',
+							arguments: { source: source.id, url: `${narrow.base}/page` },
+						},
+					}),
+				}),
+				{
+					instance: instance(async () => ({ search_query: '', chunks: [] })),
+					sources: [source],
+				},
+			)
+		expect((await textContent(await read(broad))).result.text).toContain(
+			'Broad-only',
+		)
+		expect(await (await read(narrow))?.text()).toContain(
+			'outside source boundary',
+		)
+	})
+
+	it('publishes the checked index URL once and handles embedded line terminators', async () => {
+		const source: Source = {
+			id: 'single-url-format',
+			base: 'https://single-format.example/developers',
+		}
+		const hostileHeading = `## ${' '.repeat(8000)}x\rX`
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(
+				async () => new Response(`${hostileHeading}\n- [Test page](...md.md)`),
+			),
+		)
+		const response = await handleMcp(
+			new Request('https://mcp.tempo.xyz/', {
+				method: 'POST',
+				body: JSON.stringify({
+					jsonrpc: '2.0',
+					id: 1,
+					method: 'tools/call',
+					params: {
+						name: 'find_pages',
+						arguments: { source: source.id, query: 'Test page' },
+					},
+				}),
+			}),
+			{
+				instance: instance(async () => ({ search_query: '', chunks: [] })),
+				sources: [source],
+			},
+		)
+		const result = await textContent(response)
+		expect(result.result.pages).toHaveLength(1)
+		expect(result.result.pages[0].url).toBe(`${source.base}/...md`)
+	})
+})

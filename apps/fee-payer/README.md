@@ -23,13 +23,17 @@ Tests use Cloudflare's [vitest-pool-workers](https://developers.cloudflare.com/w
 Environment variables:
 - `TEMPO_ENV` - `localnet` (default), `moderato`, or `devnet` (`testnet` is accepted as a backwards-compatible alias of `moderato`)
 - `TEMPO_TAG` - Docker image tag for localnet (default: `latest`)
+- `TEMPO_RPC_AUTH` - optional Tempo RPC Basic Auth credentials in `client_id:api_key` format; configure production values as a Cloudflare secret
+
+Production secrets such as `TEMPO_RPC_AUTH` are managed in the Cloudflare Deploy Broker dashboard (https://cf.tehq.net/, Workers tab), and every deploy keeps them. Pushes to `main` deploy `fee-payer-moderato` and `fee-payer-mainnet` through the broker, which accepts only builds that match their entries in [`cloudflare-deploy-policies`](https://github.com/tempoxyz/cloudflare-deploy-policies/blob/main/policies/tempoxyz/tempo-apps.yaml).
 
 ## API
 
 | Method | Route | Params |
 |--------|-------|--------|
 | GET | `/usage` | - optional: `blockTimestampFrom` (epoch seconds)<br>- optional: `blockTimestampTo` (epoch seconds) |
-| POST | `*` | JSON-RPC request body for fee sponsorship<br>Supported sponsorship methods: `eth_signRawTransaction`, `eth_sendRawTransactionSync` (other JSON-RPC methods may be proxied, e.g. `eth_chainId`) |
+| GET | `/llms.txt`, `/llms-full.txt` | None. Overview and full reference for LLMs, rendered from the routes and `src/lib/llms` |
+| POST | `*` | JSON-RPC request body for fee sponsorship. Mainnet requests require an API key in the path (`/tp_...`); testnet requests may use `/` anonymously.<br>Supported sponsorship methods: `eth_signRawTransaction`, `eth_sendRawTransactionSync` (other JSON-RPC methods may be proxied, e.g. `eth_chainId`) |
 
 ## Metrics
 

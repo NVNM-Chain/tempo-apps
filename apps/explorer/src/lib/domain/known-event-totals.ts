@@ -27,7 +27,34 @@ function normalizeAmount(amountValue: Amount): bigint {
 
 export function calculateKnownEventsTotal(
 	events: readonly KnownEvent[],
-): bigint {
+): bigint | undefined {
+	// A payment total is meaningful only for fully priced, one-way transfers.
+	// Never turn raw token quantities, swaps, or mint/burn activity into money.
+	if (hasNonAdditiveVaultActivity(events)) return undefined
+	const directions = new Set<string>()
+	for (const event of events) {
+		if (event.type === 'approval') continue
+		const amounts = event.parts.flatMap((part) =>
+			part.type === 'amount' ? [part.value] : [],
+		)
+		if (event.totalAmount) amounts.push(event.totalAmount)
+		if (amounts.length === 0) continue
+		if (!['send', 'transfer', 'fee', 'streamed payment'].includes(event.type))
+			return undefined
+		if (
+			amounts.some(
+				(amount) => amount.currency !== 'USD' || amount.decimals === undefined,
+			)
+		)
+			return undefined
+		if (Array.isArray(event.note)) {
+			for (const [label, part] of event.note) {
+				if (label.toLowerCase() === 'direction' && part.type === 'text')
+					directions.add(part.value.toLowerCase())
+			}
+		}
+	}
+	if (directions.has('in') && directions.has('out')) return undefined
 	let fallbackTotal = 0n
 	const flowsByToken = new Map<string, Map<string, Flow>>()
 
@@ -74,6 +101,26 @@ export function calculateKnownEventsTotal(
 		}
 	}
 
+	// Exchanging one token for another is not a payment, even if the decoder
+	// only recognized the underlying transfers rather than the swap.
+	const sentTokens = new Map<string, Set<string>>()
+	const receivedTokens = new Map<string, Set<string>>()
+	for (const [token, flows] of flowsByToken) {
+		for (const [address, flow] of flows) {
+			const target = flow.outflow > flow.inflow ? sentTokens : receivedTokens
+			if (flow.outflow === flow.inflow) continue
+			const tokens = target.get(address) ?? new Set<string>()
+			tokens.add(token)
+			target.set(address, tokens)
+		}
+	}
+	for (const [address, sent] of sentTokens) {
+		if (
+			[...(receivedTokens.get(address) ?? [])].some((token) => !sent.has(token))
+		)
+			return undefined
+	}
+
 	let netOutflowTotal = 0n
 	for (const flows of flowsByToken.values()) {
 		let maxNetOutflow = 0n
@@ -85,4 +132,19 @@ export function calculateKnownEventsTotal(
 	}
 
 	return netOutflowTotal + fallbackTotal
+}
+
+export function hasNonAdditiveVaultActivity(
+	events: readonly KnownEvent[],
+): boolean {
+	return events.some(
+		(event) =>
+			event.type.startsWith('earn ') ||
+			event.parts.some(
+				(part) =>
+					part.type === 'action' &&
+					(part.value === 'Deposit to Earn' ||
+						part.value === 'Withdraw from Earn'),
+			),
+	)
 }

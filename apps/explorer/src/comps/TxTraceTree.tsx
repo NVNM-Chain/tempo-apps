@@ -1,11 +1,13 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { useEffect, useMemo, useState } from 'react'
-import { decodeAbiParameters, erc20Abi, slice } from 'viem'
+import { decodeAbiParameters, slice } from 'viem'
 import type { Abi, Hex } from 'viem'
+import { blockHashHistoryAbi } from '#lib/abis'
 import { cx } from '#lib/css'
 import { PanelToolbar, SegmentedControl } from './PanelToolbar'
 import {
+	blockHashHistoryAddress,
 	formatAbiValue,
 	getAbiItem,
 	getContractInfo,
@@ -20,6 +22,7 @@ import {
 	getRevertData,
 	type DecodedTraceError,
 } from '#lib/domain/trace-errors'
+import { getKnownTraceAbiItem } from '#lib/domain/trace-abi'
 import { HexFormatter } from '#lib/formatting'
 import { useCopy, usePermalinkHighlight } from '#lib/hooks'
 import type { CallTrace } from '#lib/queries'
@@ -84,14 +87,14 @@ export function TxTraceTree(props: TxTraceTree.Props) {
 							onChange={(event) => setQuery(event.target.value)}
 							placeholder="Filter frames…"
 							spellCheck={false}
-							className="h-[24px] w-full max-w-[240px] min-w-0 mr-auto rounded-[6px] border border-card-border bg-base-plane px-[8px] font-mono text-[11px] text-primary outline-none placeholder:text-field-content-secondary focus:border-accent"
+							className="h-[24px] w-full max-w-[240px] min-w-0 mr-auto rounded-body border border-card-border bg-base-plane px-[8px] font-mono label-12 text-primary outline-none placeholder:text-field-content-secondary focus:border-focus"
 						/>
 					}
 					{failedNode && (
 						<button
 							type="button"
 							onClick={() => props.onSelect?.(failedNode.id)}
-							className="flex h-[24px] shrink-0 items-center gap-[5px] rounded-[6px] border border-negative/40 px-[8px] text-[11px] text-negative cursor-pointer press-down hover:bg-negative/8"
+							className="flex h-[24px] shrink-0 items-center gap-[5px] rounded-body border border-negative/40 px-[8px] label-12 text-negative cursor-pointer press-down hover:bg-negative/8"
 							title="Jump to the frame that reverted"
 						>
 							<CircleAlertIcon className="size-[11px]" />
@@ -149,14 +152,14 @@ export function TxTraceTree(props: TxTraceTree.Props) {
 					/>
 				</PanelToolbar>
 			) : label ? (
-				<div className="flex items-center justify-between pl-[16px] pr-[12px] h-[40px] border-b border-dashed border-distinct">
-					<span className="text-[13px]">
+				<div className="flex items-center justify-between pl-[16px] pr-[12px] h-[40px] border-b border-solid border-distinct">
+					<span className="copy-13">
 						<span className="text-tertiary">{label} </span>
 						<RawToggle raw={raw} onToggle={() => setRaw(!raw)} />
 					</span>
 					<div className="flex items-center gap-[8px] text-tertiary">
 						{copy.notifying && (
-							<span className="text-[11px] select-none">copied</span>
+							<span className="label-12 select-none">copied</span>
 						)}
 						<button
 							type="button"
@@ -179,7 +182,7 @@ export function TxTraceTree(props: TxTraceTree.Props) {
 			) : null}
 			<div
 				tabIndex={wrap ? undefined : 0}
-				className="px-[14px] py-[10px] font-mono text-[12px] overflow-x-auto grid grid-cols-[auto_auto_1fr] gap-x-[10px] items-start rounded-b-[10px] focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2!"
+				className="px-[14px] py-[10px] font-mono label-12 overflow-x-auto grid grid-cols-[auto_auto_1fr] gap-x-[10px] items-start rounded-b-body focus-visible:outline-2 focus-visible:outline-focus focus-visible:-outline-offset-2!"
 			>
 				<TxTraceTree.NodeView
 					node={tree}
@@ -228,18 +231,14 @@ function RawToggle(props: {
 		<button
 			type="button"
 			onClick={props.onToggle}
-			className="text-[13px] text-accent hover:underline cursor-pointer press-down"
+			className="copy-13 text-accent hover:underline cursor-pointer press-down"
 		>
 			{props.raw ? '(raw)' : '(decoded)'}
 		</button>
 	)
 }
 
-/**
- * Decoded view is for reading, not for exactness — a 78-digit uint256 or a
- * 200-character bytes blob wraps the whole tree and hides the arguments beside
- * it. The raw toggle still shows every byte.
- */
+/** Keep byte arguments and return values compact; the raw view preserves them. */
 function abbreviateTraceValue(value: string, max = 24): string {
 	if (value.length <= max) return value
 	return `${value.slice(0, max - 8)}…${value.slice(-6)}`
@@ -374,6 +373,7 @@ export function useTraceTrees(
 			function buildNode(
 				trace: CallTrace,
 				path: number[] = [],
+				parentTrace?: CallTrace,
 			): TxTraceTree.Node {
 				const currentFrameIndex = frameIndex++
 				const hasSelector = trace.input && trace.input.length >= 10
@@ -382,6 +382,8 @@ export function useTraceTrees(
 				const precompileInfo = trace.to
 					? precompileRegistry.get(trace.to.toLowerCase() as `0x${string}`)
 					: undefined
+				const isBlockHashHistory =
+					trace.to?.toLowerCase() === blockHashHistoryAddress
 
 				let functionName: string | undefined
 				let params: string | undefined
@@ -400,7 +402,7 @@ export function useTraceTrees(
 						})
 					: undefined
 
-				if (precompileInfo && trace.to) {
+				if (precompileInfo && precompileInfo.abi.length === 0 && trace.to) {
 					const decoded = decodePrecompile(
 						trace.to,
 						trace.input || '0x',
@@ -411,6 +413,25 @@ export function useTraceTrees(
 						params = decoded.params
 						decodedOutput = decoded.decodedOutput
 					}
+				} else if (isBlockHashHistory) {
+					const [getBlockHash] = blockHashHistoryAbi
+					try {
+						const [blockNumber] = decodeAbiParameters(
+							getBlockHash.inputs,
+							trace.input,
+						)
+						functionName = getBlockHash.name
+						params = `blockNumber: ${blockNumber}`
+						if (trace.output && trace.output !== '0x') {
+							const [blockHash] = decodeAbiParameters(
+								getBlockHash.outputs,
+								trace.output,
+							)
+							decodedOutput = blockHash
+						}
+					} catch {
+						// EIP-2935 rejects malformed raw calldata.
+					}
 				} else if (selector) {
 					const autoloadAbi = abiMap.get(trace.to?.toLowerCase() ?? '')
 					const autoloadAbiItem =
@@ -419,9 +440,9 @@ export function useTraceTrees(
 					const contractAbiItem =
 						contractInfo?.abi && getAbiItem({ abi: contractInfo.abi, selector })
 
-					const erc20AbiItem = getAbiItem({ abi: erc20Abi, selector })
+					const knownAbiItem = getKnownTraceAbiItem(selector)
 
-					const item = autoloadAbiItem || contractAbiItem || erc20AbiItem
+					const item = autoloadAbiItem || contractAbiItem || knownAbiItem
 					if (item?.name && item.inputs) {
 						functionName = item.name
 						const rawArgs =
@@ -432,7 +453,11 @@ export function useTraceTrees(
 								params = decoded
 									.map((v, i) => {
 										const name = item.inputs[i]?.name
-										const value = abbreviateTraceValue(formatAbiValue(v))
+										const formatted = formatAbiValue(v)
+										const value =
+											item.inputs[i]?.type === 'bytes'
+												? abbreviateTraceValue(formatted)
+												: formatted
 										return name ? `${name}: ${value}` : value
 									})
 									.join(', ')
@@ -468,10 +493,12 @@ export function useTraceTrees(
 						}
 					}
 				}
+				if (trace.type === 'DELEGATECALL' && parentTrace?.input === trace.input)
+					params = 'same args as parent'
 
 				const children =
 					trace.calls?.map((child, index) =>
-						buildNode(child, [...path, index]),
+						buildNode(child, [...path, index], trace),
 					) ?? []
 				return {
 					trace,
@@ -642,7 +669,7 @@ export namespace TxTraceTree {
 			<>
 				<span
 					className={cx(
-						'text-[10px] font-medium px-[4px] py-px rounded text-center whitespace-nowrap select-none',
+						'label-12 font-medium px-[4px] py-px rounded text-center whitespace-nowrap select-none',
 						// Neutral by default: the opcode is a label, not a link and not a
 						// status. Accent stays reserved for things you can click.
 						node.hasError
@@ -707,7 +734,7 @@ export namespace TxTraceTree {
 					>
 						{overflowDepth > 0 && (
 							<span
-								className="mr-[5px] mt-[1px] shrink-0 rounded bg-distinct px-[3px] text-[10px] text-tertiary select-none"
+								className="mr-[5px] mt-[1px] shrink-0 rounded bg-distinct px-[3px] label-12 text-tertiary select-none"
 								title={`Depth ${overflowDepth}`}
 							>
 								{overflowDepth}

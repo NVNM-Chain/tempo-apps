@@ -10,7 +10,6 @@ import { InfoCard } from '#comps/InfoCard'
 import { NotFound } from '#comps/NotFound'
 import { useAnimatedBlockNumber } from '#lib/block-number'
 import { cx } from '#lib/css'
-import { withLoaderTiming } from '#lib/profiling'
 import { blocksQueryOptions } from '#lib/queries'
 import CalendarIcon from '~icons/lucide/calendar'
 
@@ -47,10 +46,7 @@ export const Route = createFileRoute('/_layout/block/countdown/$targetBlock')({
 			})
 		}
 
-		const data = await withLoaderTiming(
-			'/_layout/block/countdown/$targetBlock',
-			() => context.queryClient.ensureQueryData(blocksQueryOptions()),
-		)
+		const data = await context.queryClient.ensureQueryData(blocksQueryOptions())
 
 		const targetBlockNumber = BigInt(parsedNumber)
 		if (data.latestBlockNumber >= targetBlockNumber) {
@@ -134,10 +130,8 @@ function CountdownCard(props: {
 	return (
 		<div className="flex flex-col items-center gap-6 w-full max-w-[600px]">
 			<div className="text-center">
-				<h1 className="text-2xl font-semibold text-primary mb-2">
-					Block Countdown
-				</h1>
-				<p className="text-secondary text-sm">
+				<h1 className="heading-24 text-primary mb-2">Block Countdown</h1>
+				<p className="text-secondary copy-14">
 					Estimated time for block{' '}
 					<span className="text-accent font-mono">
 						#{targetBlockNumber.toLocaleString()}
@@ -212,13 +206,11 @@ function CountdownCard(props: {
 function CountdownUnit(props: { value: number; label: string }) {
 	const { value, label } = props
 	return (
-		<div className="flex flex-col items-center gap-1 p-3 rounded-lg bg-card border border-card-border">
-			<span className="text-3xl font-mono font-semibold text-primary tabular-nums">
+		<div className="flex flex-col items-center gap-1 p-3 rounded-body bg-card border border-card-border">
+			<span className="heading-32 font-sans text-primary tabular-nums">
 				{String(value).padStart(2, '0')}
 			</span>
-			<span className="text-xs text-tertiary uppercase tracking-wide">
-				{label}
-			</span>
+			<span className="label-12 text-tertiary ">{label}</span>
 		</div>
 	)
 }

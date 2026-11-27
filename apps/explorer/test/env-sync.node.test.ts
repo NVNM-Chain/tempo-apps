@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { buildEnvSchema } from '../src/lib/build-env'
+import { buildEnvSchema, devnetUrlsSchema } from '../src/lib/build-env'
 import { serverEnvSchema } from '../src/lib/server/env'
 import wrangler from '../wrangler.json' with { type: 'json' }
 
@@ -15,12 +15,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
  */
 const CLIENT_AND_BINDING_VARS = [
 	'BLOCKED_ASNS',
-	'DATADOG_APPLICATION_ID',
-	'DATADOG_CLIENT_TOKEN',
-	'DATADOG_SITE',
 	'SENTRY_DSN',
 	'SENTRY_TRACES_SAMPLE_RATE',
 	'VITE_CONTRACT_VERIFICATION_API_BASE_URL',
+	'VITE_EXPLORER_POSTHOG_KEY',
+	'VITE_POSTHOG_HOST',
 	'VITE_SENTRY_DSN',
 	'VITE_SENTRY_TRACES_SAMPLE_RATE',
 	'VITE_TEMPO_ENV',
@@ -32,6 +31,7 @@ function schemaKeys(schema: { shape: Record<string, unknown> }): string[] {
 
 const ALL_VARS = new Set([
 	...schemaKeys(buildEnvSchema),
+	...schemaKeys(devnetUrlsSchema),
 	...schemaKeys(serverEnvSchema),
 	...CLIENT_AND_BINDING_VARS,
 ])

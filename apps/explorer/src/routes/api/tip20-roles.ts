@@ -5,6 +5,7 @@ import * as Hex from 'ox/Hex'
 import { formatUnits } from 'viem'
 import { Abis } from '#lib/abis'
 import { getChainId, readContracts } from 'wagmi/actions'
+import * as z from 'zod/mini'
 import { tempoQueryBuilder } from '#lib/server/tempo-queries-provider'
 import { zAddress } from '#lib/zod'
 import { getWagmiConfig } from '#wagmi.config'
@@ -25,6 +26,7 @@ const KNOWN_ROLES: Record<string, Hex.Hex> = {
 	UNPAUSE_ROLE: Hash.keccak256(Hex.fromString('UNPAUSE_ROLE')),
 	ISSUER_ROLE: Hash.keccak256(Hex.fromString('ISSUER_ROLE')),
 	BURN_BLOCKED_ROLE: Hash.keccak256(Hex.fromString('BURN_BLOCKED_ROLE')),
+	BURN_AT_ROLE: Hash.keccak256(Hex.fromString('BURN_AT_ROLE')),
 }
 
 const ROLE_HASH_TO_NAME = new Map<string, string>(
@@ -66,16 +68,19 @@ export type Tip20RolesResponse = {
 	config: Tip20Config
 }
 
+export const Tip20RolesQuerySchema = z.object({
+	address: zAddress({ lowercase: true }),
+	chainId: z.optional(z.string()),
+})
+
 export const Route = createFileRoute('/api/tip20-roles')({
 	server: {
 		handlers: {
 			GET: async ({ request }) => {
 				try {
 					const url = new URL(request.url)
-					const address = zAddress({ lowercase: true }).parse(
-						url.searchParams.get('address'),
-					)
-					const chainIdParam = url.searchParams.get('chainId')
+					const { address, chainId: chainIdParam } =
+						Tip20RolesQuerySchema.parse(Object.fromEntries(url.searchParams))
 					const config = getWagmiConfig()
 					const chainId = chainIdParam
 						? Number(chainIdParam)
@@ -118,11 +123,7 @@ export const Route = createFileRoute('/api/tip20-roles')({
 								: null,
 						currency: currency ?? null,
 						transferPolicyId:
-							transferPolicyId !== undefined
-								? transferPolicyId === 0n
-									? '0 (none)'
-									: String(transferPolicyId)
-								: null,
+							transferPolicyId !== undefined ? String(transferPolicyId) : null,
 						paused: paused ?? null,
 						decimals: decimals ?? null,
 						symbol: symbol ?? null,
@@ -152,6 +153,11 @@ export const Route = createFileRoute('/api/tip20-roles')({
 							.orderBy('log_idx', 'asc')
 							.limit(ROLE_LOG_SCAN_LIMIT)
 							.execute()
+
+						// A bounded history cannot establish current holders once it fills up.
+						if (roleLogs.length === ROLE_LOG_SCAN_LIMIT) {
+							throw new Error('Role history exceeds the scan limit')
+						}
 
 						const holders = new Map<string, boolean>()
 						const grantMeta = new Map<

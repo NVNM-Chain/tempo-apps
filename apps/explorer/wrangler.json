@@ -58,13 +58,6 @@
 			],
 			"vars": {
 				"VITE_TEMPO_ENV": "nvnm",
-				"VITE_DATADOG_ENABLED": "false",
-				"VITE_DATADOG_ALLOWED_TRACING_URLS": "",
-				"VITE_DATADOG_ENV": "nvnm",
-				"VITE_DATADOG_SERVICE": "explorer",
-				"VITE_DATADOG_SESSION_REPLAY_SAMPLE_RATE": "0",
-				"VITE_DATADOG_SESSION_SAMPLE_RATE": "100",
-				"VITE_DATADOG_TRACE_SAMPLE_RATE": "20",
 				"SENTRY_TRACES_SAMPLE_RATE": "0",
 				"VITE_SENTRY_TRACES_SAMPLE_RATE": "0",
 				"VITE_CONTRACT_VERIFICATION_API_BASE_URL": "https://contracts.tempo.xyz"
@@ -126,13 +119,6 @@
 			"vars": {
 				"VITE_TEMPO_ENV": "nvnm-testnet",
 				"TIDX_URL": "https://indexer.nvnm.testnet.nvnmchain.io",
-				"VITE_DATADOG_ENABLED": "false",
-				"VITE_DATADOG_ALLOWED_TRACING_URLS": "",
-				"VITE_DATADOG_ENV": "nvnm-testnet",
-				"VITE_DATADOG_SERVICE": "explorer",
-				"VITE_DATADOG_SESSION_REPLAY_SAMPLE_RATE": "0",
-				"VITE_DATADOG_SESSION_SAMPLE_RATE": "100",
-				"VITE_DATADOG_TRACE_SAMPLE_RATE": "20",
 				"SENTRY_TRACES_SAMPLE_RATE": "0",
 				"VITE_SENTRY_TRACES_SAMPLE_RATE": "0",
 				"VITE_CONTRACT_VERIFICATION_API_BASE_URL": "https://contracts.tempo.xyz"
@@ -194,13 +180,6 @@
 			"vars": {
 				"VITE_TEMPO_ENV": "nvnm-mainnet",
 				"TIDX_URL": "https://indexer.nvnm.mainnet.nvnmchain.io",
-				"VITE_DATADOG_ENABLED": "false",
-				"VITE_DATADOG_ALLOWED_TRACING_URLS": "",
-				"VITE_DATADOG_ENV": "nvnm-mainnet",
-				"VITE_DATADOG_SERVICE": "explorer",
-				"VITE_DATADOG_SESSION_REPLAY_SAMPLE_RATE": "0",
-				"VITE_DATADOG_SESSION_SAMPLE_RATE": "100",
-				"VITE_DATADOG_TRACE_SAMPLE_RATE": "20",
 				"SENTRY_TRACES_SAMPLE_RATE": "0",
 				"VITE_SENTRY_TRACES_SAMPLE_RATE": "0",
 				"VITE_CONTRACT_VERIFICATION_API_BASE_URL": "https://contracts.tempo.xyz"

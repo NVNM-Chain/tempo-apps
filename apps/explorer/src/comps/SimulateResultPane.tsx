@@ -79,7 +79,7 @@ export function SimulateResultHeader(
 			{execution ? (
 				<span
 					className={cx(
-						'flex shrink-0 items-center gap-[6px] text-[14px] font-medium',
+						'flex shrink-0 items-center gap-[6px] label-14',
 						succeeded ? 'text-primary' : 'text-negative',
 					)}
 				>
@@ -100,7 +100,7 @@ export function SimulateResultHeader(
 					{verdictHeadline(execution)}
 				</span>
 			) : (
-				<span className="flex shrink-0 items-center gap-[6px] text-[14px] font-medium text-tertiary">
+				<span className="flex shrink-0 items-center gap-[6px] label-14 text-tertiary">
 					<LoaderIcon className="size-[13px] animate-spin" />
 					Simulating…
 				</span>
@@ -120,12 +120,12 @@ export function SimulateResultHeader(
 						className="shrink-0"
 						title={`Gas used by the simulated call, out of a ${limit.toLocaleString()} limit. Estimated — no fee is charged or synthesized.`}
 					>
-						<span className="font-mono text-[12px] text-tertiary">gas </span>
+						<span className="type-card-data text-tertiary">gas </span>
 						<GasRatio used={execution.gasUsed} limit={limit} />
 					</span>
 
 					<span
-						className="shrink-0 font-mono text-[12px]"
+						className="shrink-0 type-card-data"
 						title={
 							input.block === 'latest'
 								? 'Executed at the end of the latest block.'
@@ -142,7 +142,7 @@ export function SimulateResultHeader(
 						</span>
 					</span>
 
-					<span className="shrink-0 text-[11px] text-content-dimmed">
+					<span className="shrink-0 type-card text-content-dimmed">
 						{networkName(input.chainId)}
 					</span>
 				</>
@@ -200,7 +200,7 @@ export function SimulateTabs(props: SimulateTabs.Props): React.JSX.Element {
 						disabled={empty}
 						onClick={() => props.onChange(tab.id)}
 						className={cx(
-							'relative flex h-[34px] shrink-0 items-center gap-[6px] px-[8px] text-[13px] transition-colors',
+							'relative flex h-[34px] shrink-0 items-center gap-[6px] px-[8px] copy-13 transition-colors',
 							empty
 								? 'cursor-default text-content-dimmed'
 								: 'cursor-pointer press-down',
@@ -213,7 +213,7 @@ export function SimulateTabs(props: SimulateTabs.Props): React.JSX.Element {
 						{tab.count !== undefined && (
 							<span
 								className={cx(
-									'font-mono text-[11px]',
+									'type-card-data',
 									active ? 'text-tertiary' : 'text-content-dimmed',
 								)}
 							>
@@ -270,7 +270,7 @@ export function SimulateAnswer(props: SimulateAnswer.Props): React.JSX.Element {
 	if (execution.calls.length > 1)
 		return (
 			<AnswerShell>
-				<p className="text-[13px] text-secondary">
+				<p className="copy-13 text-secondary">
 					{execution.calls.length} calls ran in order · {execution.logs.length}{' '}
 					event
 					{execution.logs.length === 1 ? '' : 's'}
@@ -289,9 +289,11 @@ export function SimulateAnswer(props: SimulateAnswer.Props): React.JSX.Element {
 	if (returned)
 		return (
 			<AnswerShell>
-				<p className="font-mono text-[13px]">
-					<span className="text-tertiary">{call} returned </span>
-					<span className="font-medium text-primary">{returned}</span>
+				<p className="font-sans copy-13">
+					<span className="text-tertiary">
+						<span className="font-mono">{call}</span> returned{' '}
+					</span>
+					<span className="font-mono text-primary">{returned}</span>
 				</p>
 			</AnswerShell>
 		)
@@ -299,7 +301,7 @@ export function SimulateAnswer(props: SimulateAnswer.Props): React.JSX.Element {
 	if (event)
 		return (
 			<AnswerShell>
-				<div className="text-[13px] text-secondary">
+				<div className="copy-13 text-secondary">
 					<TxEventDescription event={event} />
 				</div>
 			</AnswerShell>
@@ -307,8 +309,12 @@ export function SimulateAnswer(props: SimulateAnswer.Props): React.JSX.Element {
 
 	return (
 		<AnswerShell>
-			<p className="text-[13px] text-tertiary">
-				{call ? `${call} completed. ` : ''}
+			<p className="copy-13 text-tertiary">
+				{call && (
+					<>
+						<span className="font-mono">{call}</span> completed.{' '}
+					</>
+				)}
 				{execution.logs.length === 0
 					? 'No events emitted.'
 					: `${execution.logs.length} event${execution.logs.length === 1 ? '' : 's'} emitted.`}
@@ -349,18 +355,16 @@ function FailureAnswer(props: {
 
 	return (
 		<div className="flex flex-col gap-[8px] border-b border-card-border bg-negative/[0.03] px-[16px] py-[12px]">
-			<p className="font-mono text-[13px] text-secondary">
-				{call ? `${call} ` : ''}
+			<p className="font-sans copy-13 text-secondary">
+				{call && <span className="font-mono">{call} </span>}
 				<span className="text-tertiary">reverted</span>
 			</p>
 
 			{errorName ? (
-				<div className="flex flex-col gap-[6px] rounded-[7px] border border-negative/25 bg-negative/6 px-[11px] py-[9px]">
-					<span className="font-mono text-[13px] font-medium text-negative">
-						{errorName}
-					</span>
+				<div className="flex flex-col gap-[6px] rounded-body border border-negative/25 bg-negative/6 px-[11px] py-[9px]">
+					<span className="font-sans label-13 text-negative">{errorName}</span>
 					{errorArgs.length > 0 && (
-						<dl className="grid gap-x-[14px] gap-y-[3px] font-mono text-[12px] min-[520px]:grid-cols-[max-content_minmax(0,1fr)]">
+						<dl className="grid gap-x-[14px] gap-y-[3px] type-card-data min-[520px]:grid-cols-[max-content_minmax(0,1fr)]">
 							{errorArgs.map((arg) => (
 								<React.Fragment key={arg.label}>
 									<dt className="text-tertiary">{arg.label}</dt>
@@ -368,7 +372,7 @@ function FailureAnswer(props: {
 										className="min-w-0 break-all text-primary"
 										title={arg.title}
 									>
-										{arg.value}
+										<span className="font-mono">{arg.value}</span>
 										{arg.note && (
 											<span className="ml-[8px] text-content-dimmed">
 												{arg.note}
@@ -381,7 +385,7 @@ function FailureAnswer(props: {
 					)}
 				</div>
 			) : (
-				<div className="rounded-[7px] border border-negative/25 bg-negative/6 px-[11px] py-[9px] font-mono text-[12px] break-all text-secondary">
+				<div className="rounded-body border border-negative/25 bg-negative/6 px-[11px] py-[9px] type-card-data break-all text-secondary font-mono">
 					{decoded?.raw ?? props.returnData ?? 'No revert data returned.'}
 				</div>
 			)}
@@ -390,7 +394,7 @@ function FailureAnswer(props: {
 				<button
 					type="button"
 					onClick={() => props.onJump(failedNode.id)}
-					className="inline-flex w-fit items-center gap-[4px] text-[11px] text-accent cursor-pointer press-down hover:underline"
+					className="inline-flex w-fit items-center gap-[4px] type-card text-accent cursor-pointer press-down hover:underline"
 				>
 					<ArrowRightIcon className="size-[11px]" />
 					Show {call ?? 'the failing frame'} in the trace
@@ -417,14 +421,14 @@ export function SimulateDiff(props: {
 	const statusChanged = props.execution.status !== props.original.status
 	if (!statusChanged && gasDiff === 0n && eventDiff === 0 && balanceDiff === 0)
 		return (
-			<div className="flex items-center gap-[6px] border-b border-dashed border-card-border px-[16px] py-[7px] text-[11px]">
+			<div className="flex items-center gap-[6px] border-b border-solid border-card-border px-[16px] py-[7px] type-card">
 				<span className="text-tertiary">{props.label}</span>
 				<Chip tone="neutral">no change</Chip>
 			</div>
 		)
 
 	return (
-		<div className="flex flex-wrap items-center gap-[6px] border-b border-dashed border-card-border px-[16px] py-[7px] text-[11px]">
+		<div className="flex flex-wrap items-center gap-[6px] border-b border-solid border-card-border px-[16px] py-[7px] type-card">
 			<span className="mr-[2px] text-tertiary">{props.label}</span>
 			{statusChanged && (
 				<Chip tone="negative">
@@ -506,11 +510,9 @@ export function SimulateOverview(props: {
 			{/* A section title, not another column label. The two used to be the same
 			    13px tertiary and stacked directly on top of each other, so the table
 			    read as four grey label rows with data somewhere in it. */}
-			<div className="flex items-center gap-[8px] border-y border-dashed border-card-border px-[16px] py-[8px]">
-				<span className="text-[13px] font-medium text-primary">
-					Balance changes
-				</span>
-				<span className="font-mono text-[12px] text-tertiary">
+			<div className="flex items-center gap-[8px] border-y border-solid border-card-border px-[16px] py-[8px]">
+				<span className="label-13 text-primary">Balance changes</span>
+				<span className="type-card-data text-tertiary">
 					{props.assetChanges.length}
 				</span>
 			</div>
@@ -541,9 +543,7 @@ export function SimulateStepBar(props: {
 	const failed = props.calls.filter((call) => call.status === 'reverted').length
 	return (
 		<div className="flex flex-wrap items-center gap-[6px] border-b border-card-border px-[16px] py-[8px]">
-			<span className="mr-[2px] shrink-0 text-[11px] text-tertiary">
-				Showing
-			</span>
+			<span className="mr-[2px] shrink-0 type-card text-tertiary">Showing</span>
 			{/* A batch is one transaction, so seeing all of it is the default; the
 			    per-call chips narrow the evidence rather than switching between
 			    unrelated views. */}
@@ -552,7 +552,7 @@ export function SimulateStepBar(props: {
 				onClick={() => props.onSelect(undefined)}
 				title="Every call of the batch, in order"
 				className={cx(
-					'flex h-[24px] shrink-0 items-center gap-[6px] rounded-[6px] border px-[8px] text-[11px] cursor-pointer press-down transition-colors',
+					'flex h-[28px] shrink-0 items-center gap-[6px] rounded-body border px-[8px] type-card cursor-pointer press-down transition-colors',
 					props.step === undefined
 						? 'border-accent bg-accent/10 font-medium text-primary'
 						: 'border-card-border text-tertiary hover:border-tertiary/40 hover:text-secondary',
@@ -560,7 +560,7 @@ export function SimulateStepBar(props: {
 			>
 				All {props.calls.length}
 				{failed > 0 && (
-					<span className="font-mono text-negative">{failed} failed</span>
+					<span className="font-sans text-negative">{failed} failed</span>
 				)}
 			</button>
 			<span className="shrink-0 text-content-dimmed">·</span>
@@ -596,10 +596,10 @@ export function SimulateCallHeading(props: {
 	const failed = call.status === 'reverted'
 
 	return (
-		<div className="flex flex-wrap items-center gap-[8px] border-b border-dashed border-card-border bg-base-alt px-[16px] py-[7px]">
+		<div className="flex flex-wrap items-center gap-[8px] border-b border-solid border-card-border bg-base-alt px-[16px] py-[7px]">
 			<span
 				className={cx(
-					'flex size-[16px] shrink-0 items-center justify-center rounded-[4px] font-mono text-[10px]',
+					'flex size-[16px] shrink-0 items-center justify-center rounded-[4px] font-mono label-12',
 					failed
 						? 'bg-negative/15 text-negative'
 						: 'bg-base-content-positive/15 text-base-content-positive',
@@ -608,25 +608,25 @@ export function SimulateCallHeading(props: {
 			>
 				{failed ? '✗' : '✓'}
 			</span>
-			<span className="shrink-0 text-[11px] text-tertiary">
+			<span className="shrink-0 type-card text-tertiary">
 				Call {call.index + 1} of {props.total}
 			</span>
 			<span
 				className={cx(
-					'min-w-0 truncate font-mono text-[12px]',
+					'min-w-0 truncate type-card-data',
 					failed ? 'text-negative' : 'text-primary',
 				)}
 			>
 				{label}
 			</span>
-			<span className="ml-auto shrink-0 font-mono text-[11px] text-tertiary">
+			<span className="ml-auto shrink-0 type-card-data text-tertiary">
 				{call.gasUsed.toLocaleString()} gas
 			</span>
 			<button
 				type="button"
 				onClick={props.onIsolate}
 				title="Show only this call"
-				className="shrink-0 text-[11px] text-accent cursor-pointer press-down hover:underline"
+				className="shrink-0 type-card text-accent cursor-pointer press-down hover:underline"
 			>
 				Isolate
 			</button>
@@ -650,7 +650,7 @@ function StepChip(props: {
 			onClick={props.onSelect}
 			title={`Call ${call.index + 1} of ${props.total} — ${call.to}${failed ? ' · reverted' : ' · succeeded'}`}
 			className={cx(
-				'flex h-[24px] shrink-0 items-center gap-[6px] rounded-[6px] border pr-[8px] pl-[5px] text-[11px] cursor-pointer press-down transition-colors',
+				'flex h-[28px] shrink-0 items-center gap-[6px] rounded-body border pr-[8px] pl-[5px] type-card cursor-pointer press-down transition-colors',
 				selected
 					? 'border-accent bg-accent/10 text-primary'
 					: 'border-card-border text-tertiary hover:border-tertiary/40 hover:text-secondary',
@@ -658,7 +658,7 @@ function StepChip(props: {
 		>
 			<span
 				className={cx(
-					'flex size-[15px] shrink-0 items-center justify-center rounded-[4px] font-mono text-[10px]',
+					'flex size-[15px] shrink-0 items-center justify-center rounded-[4px] font-mono label-12',
 					failed
 						? 'bg-negative/15 text-negative'
 						: 'bg-base-content-positive/15 text-base-content-positive',
@@ -666,7 +666,7 @@ function StepChip(props: {
 			>
 				{failed ? '✗' : '✓'}
 			</span>
-			<span className="font-mono text-content-dimmed">{call.index + 1}</span>
+			<span className="font-sans text-content-dimmed">{call.index + 1}</span>
 			<span className={cx('font-mono', selected && 'font-medium')}>
 				{label}
 			</span>
@@ -698,11 +698,11 @@ export function SimulateBalances(props: {
 	}
 
 	return (
-		<table className="w-full text-[12px]">
+		<table className="w-full type-card">
 			<thead>
-				{/* Tinted, 11px, its own bottom rule: a column header has to look
+				{/* Tinted card text with its own bottom rule: a column header has to look
 				    like chrome, not like the first row of data. */}
-				<tr className="border-b border-card-border bg-base-alt text-[11px] text-tertiary">
+				<tr className="border-b border-card-border bg-base-alt type-card text-tertiary">
 					<th className="px-[16px] py-[6px] text-left font-normal">Account</th>
 					<th className="px-[10px] py-[6px] text-left font-normal">Token</th>
 					<th className="px-[16px] py-[6px] text-right font-normal">Change</th>
@@ -751,12 +751,16 @@ export function SimulateBalances(props: {
 											name={metadata?.symbol}
 											className="size-[14px]!"
 										/>
-										{metadata?.symbol ?? HexFormatter.truncate(change.token)}
+										{metadata?.symbol ?? (
+											<span className="font-mono">
+												{HexFormatter.truncate(change.token)}
+											</span>
+										)}
 									</Link>
 								</td>
 								<td
 									className={cx(
-										'px-[16px] py-[7px] text-right align-top font-mono tabular-nums',
+										'px-[16px] py-[7px] text-right align-top font-sans tabular-nums',
 										rule && 'border-t border-card-border',
 										positive ? 'text-base-content-positive' : 'text-primary',
 									)}
@@ -792,9 +796,9 @@ export function SimulateEvents(props: {
 			{props.knownEvents.map((event, index) => (
 				<div
 					key={`${event.type}-${index}`}
-					className="flex items-start gap-[10px] px-[16px] py-[9px] text-[13px]"
+					className="flex items-start gap-[10px] px-[16px] py-[9px] copy-13"
 				>
-					<span className="mt-[3px] shrink-0 font-mono text-[11px] text-content-dimmed tabular-nums">
+					<span className="mt-[3px] shrink-0 type-card-data text-content-dimmed tabular-nums">
 						{index + 1}
 					</span>
 					<TxEventDescription event={event} />

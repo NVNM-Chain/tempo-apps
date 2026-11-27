@@ -1,4 +1,4 @@
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
 	createFileRoute,
 	Link,
@@ -13,7 +13,8 @@ import * as OxAddressUtil from 'ox/Address'
 import * as Json from 'ox/Json'
 import * as Value from 'ox/Value'
 import * as React from 'react'
-import type { Log, TransactionReceipt } from 'viem'
+import { getAbiItem, type Abi, type Log, type TransactionReceipt } from 'viem'
+import { Addresses } from 'viem/tempo'
 import * as z from 'zod/mini'
 import { Address } from '#comps/Address'
 import { BreadcrumbsSlot } from '#comps/Breadcrumbs'
@@ -33,9 +34,12 @@ import { TxStateDiff } from '#comps/TxStateDiff'
 import { TxTraceFlamegraph } from '#comps/TxTraceFlamegraph'
 import { TxTraceTree, useTraceTree } from '#comps/TxTraceTree'
 import { TxTransactionCard } from '#comps/TxTransactionCard'
+import { TxKeyAuthorization } from '#comps/TxKeyAuthorization'
 import { cx } from '#lib/css'
+import { getAccountTag } from '#lib/account'
 import { apostrophe } from '#lib/chars'
 import type { KnownEvent } from '#lib/domain/known-events'
+import { withKeyAuthorizationDescription } from '#lib/domain/access-key'
 import { buildTxSummary } from '#lib/domain/tx-summary'
 import {
 	type EventGroup,
@@ -43,32 +47,47 @@ import {
 } from '#lib/domain/tx-event-groups'
 import type { FeeBreakdownItem } from '#lib/domain/receipt'
 import { isTip20Address } from '#lib/domain/tip20'
+import { selectTransactionDescriptionEvents } from '#lib/domain/transaction-activities'
 import { PriceFormatter } from '#lib/formatting'
 import { useKeyboardShortcut, useMediaQuery } from '#lib/hooks'
 import { buildOgImageUrl, buildTxDescription, OG_BASE_URL } from '#lib/og'
+import { describeDexFill } from '#lib/dex-swaps'
+import { dexTransactionFillsQueryOptions } from '#lib/queries/dex-pools'
 import {
 	autoloadAbiQueryOptions,
-	LIMIT,
 	lookupSignatureQueryOptions,
 	type TxData,
 	txQueryOptions,
+	useAutoloadAbi,
+	useLookupSignature,
 } from '#lib/queries'
 import type { BalanceChangesData } from '#lib/queries/balance-changes'
+import {
+	balanceChangesQueryOptions,
+	LIMIT as BALANCE_CHANGES_LIMIT,
+} from '#lib/queries/balance-changes'
 import {
 	type CallTrace,
 	type PrestateDiff,
 	traceQueryOptions,
 } from '#lib/queries/trace'
-import { withLoaderTiming } from '#lib/profiling'
+import { expiringNonceKey, getNonceKey } from '#lib/domain/nonce'
 import { signatureTypeLabel } from '#lib/domain/signature-type'
 import { zHash } from '#lib/zod'
-import { fetchBalanceChanges } from '#routes/api/tx/balance-changes/$hash'
 import ChevronDownIcon from '~icons/lucide/chevron-down'
 
 const defaultSearchValues = {
 	tab: 'overview',
 	page: 1,
 } as const
+
+const EMPTY_BALANCE_CHANGES: BalanceChangesData = {
+	changes: [],
+	tokenMetadata: {},
+	total: 0,
+}
+
+const EMPTY_TRACE_DATA = { trace: null, prestate: null } as const
 
 const RECEIVE_POLICY_GUARD = OxAddressUtil.from(
 	'0xB10C000000000000000000000000000000000000',
@@ -101,48 +120,43 @@ export const Route = createFileRoute('/_layout/tx/$hash')({
 	search: {
 		middlewares: [stripSearchParams(defaultSearchValues)],
 	},
-	loaderDeps: ({ search: { page } }) => ({ page }),
-	loader: ({ params, context, deps: { page } }) =>
-		withLoaderTiming('/_layout/tx/$hash', async () => {
-			const { hash } = params
+	loader: async ({ params, context }) => {
+		const { hash } = params
 
-			try {
-				const offset = (page - 1) * LIMIT
-
-				const [txData, balanceChangesData, traceData] = await Promise.all([
-					context.queryClient.ensureQueryData(txQueryOptions({ hash })),
-					fetchBalanceChanges({ hash, limit: LIMIT, offset }).catch(() => ({
-						changes: [],
-						tokenMetadata: {},
-						total: 0,
-					})),
-					context.queryClient
-						.ensureQueryData(traceQueryOptions({ hash }))
-						.catch(() => ({ trace: null, prestate: null })),
-				])
-
-				return { ...txData, balanceChangesData, traceData }
-			} catch (error) {
-				console.error(error)
-				throw notFound({
-					routeId: rootRouteId,
-					data: { type: 'hash', value: hash },
-				})
-			}
-		}),
+		try {
+			const txData = await context.queryClient.ensureQueryData(
+				txQueryOptions({ hash }),
+			)
+			// NVNM has no Tempo API activities: the receipt's own events describe it.
+			return { ...txData, activityEvents: [] as KnownEvent[] }
+		} catch (error) {
+			console.error(error)
+			throw notFound({
+				routeId: rootRouteId,
+				data: { type: 'hash', value: hash },
+			})
+		}
+	},
 	params: z.object({
 		hash: zHash(),
 	}),
 	head: ({ params, loaderData }) => {
 		const title = `Transaction ${params.hash.slice(0, 10)}…${params.hash.slice(-6)} ⋅ Tempo Explorer`
+		const descriptionEvents = loaderData
+			? selectTransactionDescriptionEvents({
+					activityEvents: loaderData.activityEvents,
+					fallbackEvents: loaderData.knownEvents ?? [],
+					knownCalls: loaderData.knownCalls,
+				})
+			: []
 		const ogImageUrl = loaderData
-			? buildOgImageUrl(loaderData, params.hash)
+			? buildOgImageUrl(loaderData, params.hash, descriptionEvents)
 			: `${OG_BASE_URL}/tx/${params.hash}`
 		const description = loaderData
 			? buildTxDescription({
 					timestamp: Number(loaderData.block.timestamp) * 1000,
 					from: loaderData.receipt.from,
-					events: loaderData.knownEvents ?? [],
+					events: descriptionEvents,
 				})
 			: 'View transaction details on Tempo Explorer.'
 
@@ -168,15 +182,32 @@ function RouteComponent() {
 	const navigate = useNavigate()
 	const { tab, page } = Route.useSearch()
 	const {
-		balanceChangesData,
-		traceData,
+		activityEvents,
 		block,
 		feeBreakdown,
+		keyAuthorization,
+		keyTokenMetadata,
+		knownCalls,
 		knownEvents,
 		knownEventsByLog = [],
 		receipt,
 		transaction,
 	} = Route.useLoaderData()
+	const hash = receipt.transactionHash
+	const balanceChangesQuery = useQuery({
+		...balanceChangesQueryOptions({
+			hash,
+			limit: BALANCE_CHANGES_LIMIT,
+			offset: (page - 1) * BALANCE_CHANGES_LIMIT,
+		}),
+		enabled: typeof window !== 'undefined',
+	})
+	const traceQuery = useQuery({
+		...traceQueryOptions({ hash }),
+		enabled: typeof window !== 'undefined',
+	})
+	const balanceChangesData = balanceChangesQuery.data ?? EMPTY_BALANCE_CHANGES
+	const traceData = traceQuery.data ?? EMPTY_TRACE_DATA
 
 	const isMobile = useMediaQuery('(max-width: 799px)')
 	const mode = isMobile ? 'stacked' : 'tabs'
@@ -190,6 +221,11 @@ function RouteComponent() {
 			!event.meta?.to ||
 			!OxAddressUtil.isEqual(event.meta.to, RECEIVE_POLICY_GUARD),
 	)
+	const descriptionEvents = selectTransactionDescriptionEvents({
+		activityEvents,
+		fallbackEvents: displayKnownEvents,
+		knownCalls,
+	})
 
 	useKeyboardShortcut({
 		t: () =>
@@ -213,11 +249,17 @@ function RouteComponent() {
 			buildTxSummary({
 				receipt,
 				transaction,
-				knownEvents,
+				knownEvents: descriptionEvents,
 				trace: traceData.trace,
 				balanceChangesData,
 			}),
-		[receipt, knownEvents, traceData.trace, balanceChangesData, transaction],
+		[
+			receipt,
+			descriptionEvents,
+			traceData.trace,
+			balanceChangesData,
+			transaction,
+		],
 	)
 
 	const setActiveSection = (newIndex: number) => {
@@ -241,7 +283,9 @@ function RouteComponent() {
 				receipt={receipt}
 				transaction={transaction}
 				block={block}
-				knownEvents={displayKnownEvents}
+				knownEvents={descriptionEvents}
+				keyAuthorization={keyAuthorization}
+				keyTokenMetadata={keyTokenMetadata}
 				feeBreakdown={feeBreakdown}
 				balanceChangesData={balanceChangesData}
 			/>
@@ -253,7 +297,13 @@ function RouteComponent() {
 		title: 'Balances',
 		totalItems: balanceChangesData.total,
 		itemsLabel: 'balances',
-		content: <TxBalanceChanges data={balanceChangesData} page={page} />,
+		content: (
+			<TxBalanceChanges
+				data={balanceChangesData}
+				loading={balanceChangesQuery.isPending}
+				page={page}
+			/>
+		),
 	})
 
 	if (hasCalls && calls) {
@@ -272,7 +322,11 @@ function RouteComponent() {
 		totalItems: receipt.logs.length,
 		itemsLabel: 'events',
 		content: (
-			<EventsSection logs={receipt.logs} knownEvents={knownEventsByLog} />
+			<EventsSection
+				hash={hash}
+				logs={receipt.logs}
+				knownEvents={knownEventsByLog}
+			/>
 		),
 	})
 
@@ -322,14 +376,12 @@ function RouteComponent() {
 				to={receipt.to}
 				className="self-start"
 			/>
-			<div className="flex min-w-0 flex-col gap-[14px]">
-				<Sections
-					mode={mode}
-					sections={sections}
-					activeSection={activeSection}
-					onSectionChange={setActiveSection}
-				/>
-			</div>
+			<Sections
+				mode={mode}
+				sections={sections}
+				activeSection={activeSection}
+				onSectionChange={setActiveSection}
+			/>
 		</div>
 	)
 }
@@ -339,6 +391,8 @@ function OverviewSection(props: {
 	transaction: TxData['transaction']
 	block: TxData['block']
 	knownEvents: KnownEvent[]
+	keyAuthorization: TxData['keyAuthorization']
+	keyTokenMetadata: TxData['keyTokenMetadata']
 	feeBreakdown: FeeBreakdownItem[]
 	balanceChangesData: BalanceChangesData
 }) {
@@ -347,6 +401,8 @@ function OverviewSection(props: {
 		transaction,
 		block,
 		knownEvents,
+		keyAuthorization,
+		keyTokenMetadata,
 		feeBreakdown,
 		balanceChangesData,
 	} = props
@@ -359,12 +415,9 @@ function OverviewSection(props: {
 	const baseFee = block.baseFeePerGas
 	const maxFee = transaction.maxFeePerGas
 	const maxPriorityFee = transaction.maxPriorityFeePerGas
-	const nonce = transaction.nonce
-	const nonceKey =
-		'nonceKey' in transaction
-			? (transaction.nonceKey as bigint | undefined)
-			: undefined
-	const isExpiringNonce = nonceKey === 2n ** 256n - 1n
+	const nonce = transaction.nonce.toString()
+	const nonceKey = getNonceKey(transaction)
+	const isExpiringNonce = nonceKey === expiringNonceKey
 	const signatureType = signatureTypeLabel(
 		'signature' in transaction
 			? (transaction.signature as SignatureEnvelope.SignatureEnvelope)
@@ -383,14 +436,29 @@ function OverviewSection(props: {
 		.map((event) => event.note)
 		.filter((note): note is string => typeof note === 'string' && !!note.trim())
 
-	// knownEvents already has decoded calls prepended (from the loader)
+	const description = withKeyAuthorizationDescription(
+		knownEvents,
+		transaction.from,
+		keyAuthorization,
+	)
 
 	return (
 		<div className="flex flex-col">
-			{knownEvents.length > 0 && (
-				<InfoRow label="Description">
+			{description.events.length > 0 && (
+				<InfoRow label="Description" stackOnMobile={Boolean(keyAuthorization)}>
 					<div className="flex flex-col gap-[6px]">
-						<TxEventDescription.ExpandGroup events={knownEvents} />
+						<TxEventDescription.ExpandGroup
+							events={description.events}
+							renderDetails={(event) =>
+								keyAuthorization && event === description.authorizationEvent ? (
+									<TxKeyAuthorization.Disclosure
+										key={keyAuthorization.address}
+										authorization={keyAuthorization}
+										tokenMetadata={keyTokenMetadata}
+									/>
+								) : null
+							}
+						/>
 						{memos.length > 0 && (
 							<div className="flex flex-col gap-[4px] min-w-0">
 								{memos.map((memo, index) => (
@@ -530,9 +598,9 @@ function InputDataRow(props: {
 	const { input, to } = props
 
 	return (
-		<div className="flex flex-col px-[18px] py-[12px] border-b border-dashed border-card-border last:border-b-0">
+		<div className="flex flex-col px-[18px] py-[12px] border-b border-solid border-card-border last:border-b-0">
 			<div className="flex items-start gap-[16px]">
-				<span className="text-[13px] text-tertiary min-w-[140px] shrink-0">
+				<span className="copy-13 text-tertiary min-w-[140px] shrink-0">
 					Input Data
 				</span>
 				<div className="flex-1">
@@ -560,20 +628,20 @@ function BalanceChangesOverview(props: { data: BalanceChangesData }) {
 	}, [data.changes])
 
 	return (
-		<div className="flex flex-col px-[18px] py-[12px] border-b border-dashed border-card-border">
+		<div className="flex flex-col px-[18px] py-[12px] border-b border-solid border-card-border">
 			<div className="flex items-start gap-[16px]">
-				<span className="text-[13px] text-tertiary min-w-[140px] shrink-0">
+				<span className="copy-13 text-tertiary min-w-[140px] shrink-0">
 					Balance Updates
 				</span>
 				<div className="flex flex-col gap-[4px] flex-1 min-w-0">
-					<div className="flex flex-col gap-[12px] max-h-[360px] overflow-y-auto pb-[8px] font-mono">
+					<div className="flex flex-col gap-[12px] max-h-[360px] overflow-y-auto pb-[8px] font-sans">
 						{Array.from(groupedByAccount.entries()).map(
 							([address, changes]) => (
-								<div
-									key={address}
-									className="flex flex-col gap-[4px] text-[13px]"
-								>
-									<Address address={address} />
+								<div key={address} className="flex flex-col gap-[4px] copy-13">
+									<Address
+										address={address}
+										label={getAccountTag(address)?.label}
+									/>
 									<div className="flex flex-col gap-[2px] pl-[12px] border-l border-base-border">
 										{changes.map((change) => {
 											const metadata = data.tokenMetadata[change.token]
@@ -635,7 +703,7 @@ function BalanceChangesOverview(props: { data: BalanceChangesData }) {
 					<Link
 						to="."
 						search={{ tab: 'balances' }}
-						className="inline-flex items-center gap-[4px] text-[11px] text-accent bg-accent/10 hover:bg-accent/15 rounded-full px-[10px] py-[4px] press-down w-fit"
+						className="inline-flex items-center gap-[4px] label-12 text-accent bg-accent/10 hover:bg-accent/15 rounded-button px-[10px] py-[4px] press-down w-fit"
 					>
 						See all ({data.total})
 						<ChevronDownIcon className="size-[12px]" />
@@ -700,7 +768,7 @@ function CallItem(props: {
 	const data = call.data
 	return (
 		<div className="flex flex-col gap-[12px] px-[18px] py-[16px]">
-			<div className="flex items-center gap-[8px] text-[13px]">
+			<div className="flex items-center gap-[8px] copy-13">
 				<span className="text-primary">#{index}</span>
 				{call.to ? (
 					<Link
@@ -725,11 +793,32 @@ function CallItem(props: {
 }
 
 function EventsSection(props: {
+	hash: Hex.Hex
 	logs: Log[]
 	knownEvents: (KnownEvent | null)[]
 }) {
-	const { logs, knownEvents } = props
+	const { hash, logs } = props
 	const queryClient = useQueryClient()
+	const { data: dexFillLookup } = useQuery({
+		...dexTransactionFillsQueryOptions(hash),
+		// Only fills the DEX emitted are indexed, and polled for until they are.
+		enabled: logs.some(
+			(log, index) =>
+				props.knownEvents[index]?.type === 'order filled' &&
+				OxAddressUtil.isEqual(log.address, Addresses.stablecoinDex),
+		),
+	})
+	// An OrderFilled log names only its order; the indexer supplies its book.
+	const dexFills = dexFillLookup?.fills
+	const knownEvents = React.useMemo(() => {
+		if (!dexFills?.length) return props.knownEvents
+		return props.knownEvents.map((event, index) => {
+			const fill = dexFills.find((fill) => fill.log === logs[index]?.logIndex)
+			return event?.type === 'order filled' && fill
+				? describeDexFill(event, fill)
+				: event
+		})
+	}, [props.knownEvents, dexFills, logs])
 	const [expandedGroups, setExpandedGroups] = React.useState<Set<number>>(
 		new Set(),
 	)
@@ -766,7 +855,7 @@ function EventsSection(props: {
 
 	if (logs.length === 0)
 		return (
-			<div className="px-[18px] py-[24px] text-[13px] text-tertiary text-center">
+			<div className="px-[18px] py-[24px] copy-13 text-tertiary text-center">
 				No events emitted in this transaction
 			</div>
 		)
@@ -842,7 +931,7 @@ function EventGroupCell(props: {
 				<>
 					<TxEventDescription
 						event={knownEvent}
-						className="flex flex-row items-center gap-[6px] leading-[18px]"
+						className="flex flex-row items-center gap-[6px] "
 					/>
 					{Array.isArray(knownEvent.note) && (
 						<div className="flex flex-wrap gap-x-[12px] text-[12px]">
@@ -856,19 +945,14 @@ function EventGroupCell(props: {
 					)}
 				</>
 			) : (
-				<span className="text-primary">
-					{logs[0].topics[0] ? (
-						<Midcut value={logs[0].topics[0]} prefix="0x" />
-					) : (
-						'Unknown'
-					)}
-				</span>
+				<EventFallbackName log={logs[0]} />
 			)}
 			<div>
 				<button
 					type="button"
 					onClick={onToggle}
-					className="inline-flex items-center gap-[4px] text-[11px] text-accent bg-accent/10 hover:bg-accent/15 rounded-full px-[10px] py-[4px] press-down cursor-pointer"
+					aria-expanded={expanded}
+					className="inline-flex items-center gap-[4px] label-12 text-accent bg-accent/10 hover:bg-accent/15 rounded-button px-[10px] py-[4px] press-down cursor-pointer"
 				>
 					{expanded
 						? eventCount > 1
@@ -883,6 +967,39 @@ function EventGroupCell(props: {
 	)
 }
 
+function EventFallbackName(props: { log: Log }) {
+	const { log } = props
+	const selector = log.topics[0]
+	const { data: autoloadAbi } = useAutoloadAbi({
+		address: log.address,
+		enabled: Boolean(selector),
+	})
+	const { data: signature } = useLookupSignature({ selector })
+
+	const abiEventName = React.useMemo(() => {
+		if (!autoloadAbi || !selector) return undefined
+		const item = getAbiItem({
+			abi: autoloadAbi as Abi,
+			name: selector,
+		})
+		return item && 'name' in item ? item.name : undefined
+	}, [autoloadAbi, selector])
+	const signatureEventName = signature?.match(/^([^(]+)/)?.[1]
+	const eventName = abiEventName ?? signatureEventName
+
+	return (
+		<span className="text-primary">
+			{eventName ? (
+				eventName.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+			) : selector ? (
+				<Midcut value={selector} prefix="0x" />
+			) : (
+				'Unknown'
+			)}
+		</span>
+	)
+}
+
 function RawSection(props: {
 	transaction: TxData['transaction']
 	receipt: TransactionReceipt
@@ -892,7 +1009,7 @@ function RawSection(props: {
 	const rawData = Json.stringify({ tx: transaction, receipt }, null, 2)
 
 	return (
-		<div className="px-[18px] py-[12px] text-[13px] break-all">
+		<div className="px-[18px] py-[12px] copy-13 break-all">
 			<TxRawTransaction data={rawData} />
 		</div>
 	)

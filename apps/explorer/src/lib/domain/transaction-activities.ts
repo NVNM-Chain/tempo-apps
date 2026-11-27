@@ -1,0 +1,530 @@
+import * as Address from 'ox/Address'
+import * as Hex from 'ox/Hex'
+import { getAbiItem, toEventSelector } from 'viem'
+import { Addresses } from 'viem/tempo'
+import { Abis } from '#lib/abis'
+import {
+	isTip20Token,
+	type KnownEvent,
+	type KnownEventPart,
+} from './known-events'
+import { decodeMemoForDisplay, isMppAttributionMemo } from './memo'
+import {
+	composeCallAndLogEvents,
+	isZoneBatchEvent,
+} from './transaction-actions'
+
+export type TransactionActivity = {
+	id: string
+	/** The log the activity was indexed from. */
+	logIndex?: number | undefined
+	title: string
+	type: string
+	data: Record<string, ActivityDataValue>
+}
+
+type ReceiptLog = {
+	address: Address.Address
+	logIndex: number | null
+	topics: readonly Hex.Hex[]
+}
+
+export type ActivityDataValue =
+	| string
+	| number
+	| boolean
+	| null
+	| ActivityDataValue[]
+	| { [key: string]: ActivityDataValue }
+
+const transferTopics = new Set(
+	[
+		'Transfer(address indexed, address indexed, uint256)',
+		'TransferWithMemo(address indexed, address indexed, uint256, bytes32 indexed)',
+	].map((signature) => toEventSelector(signature).toLowerCase()),
+)
+
+const transferWithMemoTopic = toEventSelector(
+	'TransferWithMemo(address indexed, address indexed, uint256, bytes32 indexed)',
+).toLowerCase()
+
+const dex = Addresses.stablecoinDex.toLowerCase()
+const orderFilledTopic = toEventSelector(
+	getAbiItem({ abi: Abis.stablecoinDex, name: 'OrderFilled' }),
+).toLowerCase()
+
+const HIDDEN_FIELDS = new Set(['signer', 'status'])
+const GENERIC_ACTIVITY_TYPES = new Set(['approval', 'burn', 'mint', 'transfer'])
+const ZONE_EVENT_TYPES = new Set([
+	'zone deposit',
+	'zone encrypted deposit',
+	'zone withdrawal',
+	'zone bounce back',
+])
+const PRIVATE_ZONE_ACTIONS: Record<string, [string, string, string]> = {
+	'private-assets-deposited': ['Private Zone Deposit', 'shares', 'shareToken'],
+	'private-shares-redeemed': [
+		'Private Zone Withdrawal',
+		'outputAmount',
+		'outputToken',
+	],
+}
+
+type ZoneDirection = 'deposit' | 'withdrawal'
+
+export function activitiesToKnownEvents(
+	activities: readonly TransactionActivity[],
+	options: {
+		portal?: Address.Address | null
+		/** The receipt's logs, to tell which swaps used the Stablecoin DEX. */
+		logs?: readonly ReceiptLog[] | undefined
+	} = {},
+): KnownEvent[] {
+	return activities.flatMap((activity) => {
+		if (
+			activity.title.trim().toLowerCase() === 'unknown' ||
+			activity.type.trim().toLowerCase() === 'unknown'
+		)
+			return []
+
+		const privateZone = PRIVATE_ZONE_ACTIONS[activity.type]
+		if (privateZone) {
+			const [action, amountKey, tokenKey] = privateZone
+			const amount = amountPart(activity.data, amountKey, tokenKey)
+			const portal = activityAddress(options.portal ?? undefined)
+			const zoneEvent: KnownEvent = {
+				type: activity.type,
+				parts: [
+					{ type: 'action', value: action },
+					...(amount ? [amount] : []),
+					...(portal && activity.type === 'private-assets-deposited'
+						? [
+								{ type: 'text' as const, value: 'to' },
+								{ type: 'account' as const, value: portal },
+							]
+						: []),
+				],
+			}
+			const vaultEvent = vaultActivityEvent(activity)
+			return vaultEvent ? [vaultEvent, zoneEvent] : [zoneEvent]
+		}
+
+		const vaultEvent = vaultActivityEvent(activity)
+		if (vaultEvent) return [vaultEvent]
+
+		const parts = activityParts(activity)
+		const route = options.logs && dexRoute(activity, parts, options.logs)
+		if (route) parts.push({ type: 'text', value: 'on' }, route)
+		const representedFields = new Set([
+			'sourceAmount',
+			'sourceToken',
+			'destinationAmount',
+			'destinationToken',
+			'recipient',
+			'sender',
+			'spender',
+		])
+		return [
+			{
+				type: activity.type,
+				parts,
+				...(activity.type === 'transfer'
+					? {
+							meta: {
+								from: activityAddress(activity.data.sender),
+								to: activityAddress(activity.data.recipient),
+							},
+						}
+					: {}),
+				note: Object.entries(activity.data).flatMap(([key, value]) => {
+					if (HIDDEN_FIELDS.has(key) || value == null) return []
+					if (representedFields.has(key)) return []
+					if (key === 'memo') {
+						const memo = memoPart(activity, value, options.logs)
+						return memo ? [['Memo', memo] as [string, KnownEventPart]] : []
+					}
+					const part = activityValueToPart(value)
+					return part
+						? [[formatLabel(key), part] as [string, KnownEventPart]]
+						: []
+				}),
+			},
+		]
+	})
+}
+
+function vaultActivityEvent(activity: TransactionActivity): KnownEvent | null {
+	const isDeposit = ['assets-deposited', 'private-assets-deposited'].includes(
+		activity.type,
+	)
+	const isWithdrawal = [
+		'assets-withdrawn',
+		'private-shares-redeemed',
+		'shares-redeemed',
+		'shares-redemption-finalized',
+	].includes(activity.type)
+	if (!isDeposit && !isWithdrawal) return null
+	const [sourceAmount, sourceToken, destinationAmount, destinationToken] =
+		isDeposit
+			? ['assets', 'assetToken', 'shares', 'shareToken']
+			: [
+					activity.type === 'assets-withdrawn' ? 'sharesBurned' : 'shares',
+					'shareToken',
+					'assets',
+					'assetToken',
+				]
+	const source = amountPart(activity.data, sourceAmount, sourceToken)
+	const destination = amountPart(
+		activity.data,
+		destinationAmount,
+		destinationToken,
+	)
+	if (!source || !destination) return null
+	return {
+		type: activity.type,
+		parts: [
+			{
+				type: 'action',
+				value: isDeposit ? 'Deposit to Earn' : 'Withdraw from Earn',
+			},
+			source,
+			{ type: 'text', value: 'for' },
+			destination,
+		],
+	}
+}
+
+export function selectTransactionDescriptionEvents(params: {
+	activityEvents: readonly KnownEvent[]
+	fallbackEvents: readonly KnownEvent[]
+	knownCall?: KnownEvent | null
+	knownCalls?: readonly KnownEvent[]
+}): KnownEvent[] {
+	const calls =
+		params.knownCalls ?? (params.knownCall ? [params.knownCall] : [])
+	const composed = composeCallAndLogEvents(
+		params.fallbackEvents.filter(
+			(event) => calls.length === 0 || event.type !== 'fee',
+		),
+		calls,
+	)
+	const hasPrivateZoneFallback = composed.events.some(
+		(event) =>
+			!composed.unmatchedCalls.includes(event) && isPrivateZoneEvent(event),
+	)
+	const hasBatch = composed.events.some(isZoneBatchEvent)
+	const fallbackEvents = composed.events.filter(
+		(event) =>
+			(!hasPrivateZoneFallback ||
+				!composed.unmatchedCalls.includes(event) ||
+				isZoneBatchEvent(event)) &&
+			(!hasBatch || !isNonceIncrementedEvent(event)),
+	)
+	const batchEvents = fallbackEvents.filter(isZoneBatchEvent)
+	const unmatchedCalls = hasPrivateZoneFallback
+		? []
+		: composed.unmatchedCalls.filter((event) => !isZoneBatchEvent(event))
+	// The local batch projection covers the complete receipt and transaction.
+	// Indexed batch descriptions are an alternative projection, not extra actions.
+	const indexedEvents = batchEvents.length
+		? params.activityEvents.filter((event) => !isZoneBatchEvent(event))
+		: params.activityEvents
+	const hasEarnReceiptSummary = fallbackEvents.some(isEarnReceiptSummary)
+	if (hasEarnReceiptSummary) {
+		const zoneWithdrawals = fallbackEvents.filter(
+			(event) => zoneEventDirection(event) === 'withdrawal',
+		)
+		const earnEvents = fallbackEvents.filter(isEarnReceiptSummary)
+		const propAmmSwaps = fallbackEvents.filter(isPropAmmSwap)
+		const zoneDeposits = fallbackEvents.filter(
+			(event) => zoneEventDirection(event) === 'deposit',
+		)
+		return [
+			...batchEvents,
+			...zoneWithdrawals,
+			...earnEvents,
+			...propAmmSwaps,
+			...zoneDeposits,
+		]
+	}
+	const propAmmSwaps = fallbackEvents.filter(isPropAmmSwap)
+	if (propAmmSwaps.length > 0) return [...batchEvents, ...propAmmSwaps]
+	if (indexedEvents.length === 0) return [...fallbackEvents]
+
+	const hasDecodedZoneEvent = fallbackEvents.some((event) =>
+		ZONE_EVENT_TYPES.has(event.type),
+	)
+	const activitiesAreGeneric = indexedEvents.every(
+		(event) =>
+			GENERIC_ACTIVITY_TYPES.has(event.type) || isNonceIncrementedEvent(event),
+	)
+	if (
+		fallbackEvents.some((event) => event.type === 'burn at') &&
+		activitiesAreGeneric
+	)
+		return [...fallbackEvents]
+	if (hasDecodedZoneEvent && activitiesAreGeneric) {
+		return fallbackEvents.filter(
+			(event) => !GENERIC_ACTIVITY_TYPES.has(event.type),
+		)
+	}
+
+	const hasMeaningfulActivity = indexedEvents.some(
+		(event) => !isNonceIncrementedEvent(event),
+	)
+	const activityEvents =
+		calls.length > 0 || batchEvents.length > 0 || hasMeaningfulActivity
+			? indexedEvents.filter((event) => !isNonceIncrementedEvent(event))
+			: indexedEvents
+	const representedPrivateZoneDirections = new Set(
+		activityEvents.flatMap((event) => {
+			const direction = privateZoneEventDirection(event)
+			return direction ? [direction] : []
+		}),
+	)
+	const hasPrivateZoneActivity = representedPrivateZoneDirections.size > 0
+	const supplementalZoneEvents = fallbackEvents.filter((event) => {
+		const direction = zoneEventDirection(event)
+		return (
+			!composed.unmatchedCalls.includes(event) &&
+			direction !== null &&
+			!representedPrivateZoneDirections.has(direction)
+		)
+	})
+	const events = [...batchEvents, ...supplementalZoneEvents, ...activityEvents]
+	return !hasPrivateZoneActivity ? [...unmatchedCalls, ...events] : events
+}
+
+function isEarnReceiptSummary(event: KnownEvent): boolean {
+	return event.type.startsWith('earn ') || event.type.startsWith('card ')
+}
+
+function isPropAmmSwap(event: KnownEvent): boolean {
+	return event.type === 'propamm swap'
+}
+
+function isPrivateZoneEvent(event: KnownEvent): boolean {
+	return privateZoneEventDirection(event) !== null
+}
+
+function privateZoneEventDirection(event: KnownEvent): ZoneDirection | null {
+	if (event.type === 'private-assets-deposited') return 'deposit'
+	if (event.type === 'private-shares-redeemed') return 'withdrawal'
+	const action = event.parts.find((part) => part.type === 'action')?.value
+	if (action === 'Private Zone Deposit') return 'deposit'
+	if (action === 'Private Zone Withdrawal') return 'withdrawal'
+	return null
+}
+
+function zoneEventDirection(event: KnownEvent): ZoneDirection | null {
+	if (event.type === 'zone deposit' || event.type === 'zone encrypted deposit')
+		return 'deposit'
+	if (event.type === 'zone withdrawal' || event.type === 'zone bounce back')
+		return 'withdrawal'
+	return null
+}
+
+export function isNonceIncrementedEvent(event: KnownEvent): boolean {
+	return (
+		event.type.trim().toLowerCase() === 'nonce incremented' ||
+		event.parts.some(
+			(part) =>
+				part.type === 'action' &&
+				part.value.trim().toLowerCase() === 'nonce incremented',
+		)
+	)
+}
+
+function activityAddress(
+	value: ActivityDataValue | undefined,
+): Address.Address | undefined {
+	return typeof value === 'string' && Address.validate(value)
+		? value
+		: undefined
+}
+
+function activityParts(activity: TransactionActivity): KnownEventPart[] {
+	const parts: KnownEventPart[] = [{ type: 'action', value: activity.title }]
+	const source = amountPart(activity.data, 'sourceAmount', 'sourceToken')
+	const destination = amountPart(
+		activity.data,
+		'destinationAmount',
+		'destinationToken',
+	)
+	if (source) parts.push(source)
+
+	if (activity.type === 'swap' && destination) {
+		parts.push({ type: 'text', value: 'for' }, destination)
+	} else if (activity.type === 'approval') {
+		pushAccount(parts, 'for spender', activity.data.spender)
+	} else if (activity.type === 'mint') {
+		pushAccount(parts, 'to', activity.data.recipient)
+	} else if (activity.type === 'burn') {
+		pushAccount(parts, 'from', activity.data.sender)
+	} else if (activity.type === 'transfer') {
+		const direction = activity.data.direction
+		pushAccount(
+			parts,
+			direction === 'in' ? 'from' : 'to',
+			direction === 'in' ? activity.data.sender : activity.data.recipient,
+		)
+	}
+	return parts
+}
+
+/**
+ * A swap indexed from a TIP-20 transfer into or out of the Stablecoin DEX
+ * filled on its books when the DEX itself emitted a fill for the same
+ * taker: after taking its tokens in, or before paying it out. A transaction
+ * can route through other venues too, so only those swaps are labelled,
+ * and any contract can emit a Transfer naming the DEX.
+ */
+function dexRoute(
+	activity: TransactionActivity,
+	parts: readonly KnownEventPart[],
+	logs: readonly ReceiptLog[],
+): KnownEventPart | null {
+	if (activity.type !== 'swap') return null
+	const log = logs.find((log) => log.logIndex === activity.logIndex)
+	if (!log || log.logIndex === null || !isTip20Token(log.address)) return null
+	const [topic, from, to] = log.topics
+	if (!topic || !from || !to || !transferTopics.has(topic.toLowerCase()))
+		return null
+	const into = topicAddress(to) === dex
+	if (!into && topicAddress(from) !== dex) return null
+	const taker = topicAddress(into ? from : to)
+	const transfer = log.logIndex
+	const filled = logs.some(
+		(fill) =>
+			fill.logIndex !== null &&
+			(into ? fill.logIndex > transfer : fill.logIndex < transfer) &&
+			fill.topics[0]?.toLowerCase() === orderFilledTopic &&
+			Address.isEqual(fill.address, Addresses.stablecoinDex) &&
+			fill.topics[3] !== undefined &&
+			topicAddress(fill.topics[3]) === taker,
+	)
+	const [source, destination] = parts.flatMap((part) =>
+		part.type === 'amount' ? [part.value.token] : [],
+	)
+	if (!filled || !source || !destination) return null
+	return { type: 'dexRoute', value: { from: source, to: destination } }
+}
+
+/** An indexed address topic as a lowercase address. */
+function topicAddress(topic: Hex.Hex): string {
+	return `0x${topic.slice(-40)}`.toLowerCase()
+}
+
+function amountPart(
+	data: TransactionActivity['data'],
+	amountKey: string,
+	tokenKey: string,
+): KnownEventPart | null {
+	const rawAmount = data[amountKey]
+	const rawToken = data[tokenKey]
+	if (
+		typeof rawAmount === 'string' &&
+		/^\d+$/.test(rawAmount) &&
+		typeof rawToken === 'string' &&
+		Address.validate(rawToken)
+	)
+		return {
+			type: 'amount',
+			value: { value: BigInt(rawAmount), token: rawToken },
+		}
+
+	const amount = asRecord(rawAmount)
+	const token = asRecord(rawToken)
+	if (!amount || !token) return null
+	const baseUnits = amount.baseUnits
+	const decimals = amount.decimals
+	const address = token.address
+	if (
+		typeof baseUnits !== 'string' ||
+		!/^\d+$/.test(baseUnits) ||
+		typeof decimals !== 'number' ||
+		typeof address !== 'string' ||
+		!Address.validate(address)
+	)
+		return null
+	return {
+		type: 'amount',
+		value: {
+			value: BigInt(baseUnits),
+			decimals,
+			token: address,
+			...(typeof token.symbol === 'string' ? { symbol: token.symbol } : {}),
+			...(typeof amount.currency === 'string'
+				? { currency: amount.currency }
+				: {}),
+		},
+	}
+}
+
+function pushAccount(
+	parts: KnownEventPart[],
+	label: string,
+	value: ActivityDataValue | undefined,
+): void {
+	if (typeof value !== 'string' || !Address.validate(value)) return
+	parts.push({ type: 'text', value: label }, { type: 'account', value })
+}
+
+function asRecord(
+	value: ActivityDataValue | undefined,
+): Record<string, ActivityDataValue> | null {
+	return value !== null && typeof value === 'object' && !Array.isArray(value)
+		? value
+		: null
+}
+
+/**
+ * Shows a memo as text only when its bytes are clean UTF-8, else as hex.
+ * Prefers the raw bytes from the receipt log over the indexed string.
+ */
+function memoPart(
+	activity: TransactionActivity,
+	value: ActivityDataValue,
+	logs: readonly ReceiptLog[] | undefined,
+): KnownEventPart | null {
+	const log = logs?.find(
+		(log) =>
+			log.logIndex === activity.logIndex &&
+			log.topics[0]?.toLowerCase() === transferWithMemoTopic,
+	)
+	const raw =
+		log?.topics[3] ??
+		(typeof value === 'string' && Hex.validate(value, { strict: true })
+			? value
+			: undefined)
+	if (raw) {
+		if (isMppAttributionMemo(raw)) return null
+		const text = decodeMemoForDisplay(raw)
+		return text ? { type: 'text', value: text } : { type: 'hex', value: raw }
+	}
+	if (typeof value !== 'string') return null
+	// Text decoded without validation carries replacement or control characters for binary bytes.
+	const text = value.replace(/\s+/g, ' ').trim()
+	const garbled = Array.from(text).some((character) => {
+		const code = character.charCodeAt(0)
+		return code === 0xfffd || code <= 0x1f || (code >= 0x7f && code <= 0x9f)
+	})
+	return text && !garbled ? { type: 'text', value: text } : null
+}
+
+function activityValueToPart(value: ActivityDataValue): KnownEventPart | null {
+	if (typeof value === 'number' && Number.isFinite(value)) {
+		return { type: 'number', value }
+	}
+	if (typeof value !== 'string') return null
+	if (Address.validate(value)) return { type: 'account', value }
+	if (Hex.validate(value)) return { type: 'hex', value }
+	if (/^\d+$/.test(value)) return { type: 'number', value: BigInt(value) }
+	return { type: 'text', value }
+}
+
+function formatLabel(value: string): string {
+	return value
+		.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+		.replace(/^./, (character) => character.toUpperCase())
+}

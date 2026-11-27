@@ -1,15 +1,63 @@
+import { withLogContext } from './log.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
 	flushWorkerMetrics,
+	isFailedSyncReport,
 	recordHealthMetrics,
 	recordHttpRequestMetrics,
+	recordIngestSummary,
+	recordSourceIngestMetrics,
+	recordSourceIndexStatus,
 	recordToolCall,
+	recordRetrieval,
+	recordScheduledFailure,
 } from './metrics.js'
+
+function recordIngestMetrics(
+	args: Parameters<typeof recordIngestSummary>[0] & {
+		forced: ReadonlySet<string>
+	},
+): void {
+	for (const report of args.reports)
+		recordSourceIngestMetrics(report, args.forced.has(report.source))
+	recordIngestSummary(args)
+}
 
 describe('worker metrics', () => {
 	afterEach(() => {
 		flushWorkerMetrics()
 		vi.restoreAllMocks()
+	})
+
+	it('separates synthetic traffic, bounds retrieval labels, and records cron failures', () => {
+		const logs: string[] = []
+		vi.spyOn(console, 'log').mockImplementation((message) => {
+			logs.push(String(message))
+		})
+		withLogContext({ traffic: 'synthetic' }, () =>
+			recordToolCall('search', 'success', 1),
+		)
+		recordRetrieval('untrusted value')
+		recordScheduledFailure('health')
+		recordScheduledFailure('ingest')
+		flushWorkerMetrics()
+		const metrics = logs
+			.filter((line) => line.startsWith('cwm-'))
+			.flatMap((line) => JSON.parse(line.slice(4)))
+		expect(metrics).toContainEqual(
+			expect.objectContaining({
+				n: 'tempo_docs_mcp_tool_call_count',
+				tags: expect.objectContaining({ traffic: 'synthetic' }),
+			}),
+		)
+		expect(metrics).toContainEqual(
+			expect.objectContaining({
+				n: 'tempo_docs_mcp_retrieval_count',
+				tags: expect.objectContaining({ mode: 'other', traffic: 'user' }),
+			}),
+		)
+		for (const n of ['tempo_docs_mcp_health_ok', 'tempo_docs_mcp_ingest_ok'])
+			expect(metrics).toContainEqual(expect.objectContaining({ n, v: 0 }))
 	})
 
 	it('flushes cwm lines with docs MCP global tags', () => {
@@ -60,6 +108,180 @@ describe('worker metrics', () => {
 			expect.objectContaining({
 				n: 'tempo_docs_mcp_health_ok',
 				v: 1,
+			}),
+		)
+	})
+
+	it('emits source indexing state counts', () => {
+		const logs: string[] = []
+		vi.spyOn(console, 'log').mockImplementation((message) =>
+			logs.push(String(message)),
+		)
+		recordSourceIndexStatus({
+			source: 'tempo',
+			counts: { completed: 5, error: 2 },
+		})
+		flushWorkerMetrics()
+		const metrics = logs
+			.filter((message) => message.startsWith('cwm-'))
+			.flatMap((message) => JSON.parse(message.slice('cwm-'.length)))
+		expect(metrics).toContainEqual(
+			expect.objectContaining({
+				n: 'tempo_docs_mcp_source_items',
+				tags: expect.objectContaining({ source: 'tempo', status: 'error' }),
+				v: 2,
+			}),
+		)
+	})
+
+	it('tags only the scheduled source as forced', () => {
+		const logs: string[] = []
+		vi.spyOn(console, 'log').mockImplementation((message) => {
+			logs.push(String(message))
+		})
+		recordIngestMetrics({
+			durationMs: 1,
+			forced: new Set(['other']),
+			reports: [
+				{ source: 'fixture', status: 'unchanged', duration_ms: 1 },
+				{ source: 'other', status: 'unchanged', duration_ms: 1 },
+			],
+		})
+		flushWorkerMetrics()
+		const metrics = logs
+			.filter((message) => message.startsWith('cwm-'))
+			.flatMap((message) => JSON.parse(message.slice('cwm-'.length)))
+		expect(metrics).toContainEqual(
+			expect.objectContaining({
+				n: 'tempo_docs_mcp_source_sync_count',
+				tags: expect.objectContaining({ source: 'fixture', force: 'false' }),
+			}),
+		)
+		expect(metrics).toContainEqual(
+			expect.objectContaining({
+				n: 'tempo_docs_mcp_source_sync_count',
+				tags: expect.objectContaining({ source: 'other', force: 'true' }),
+			}),
+		)
+	})
+
+	it('keeps ingestion healthy while removals await confirmation', () => {
+		const logs: string[] = []
+		vi.spyOn(console, 'log').mockImplementation((message) => {
+			logs.push(String(message))
+		})
+		recordIngestMetrics({
+			durationMs: 1,
+			forced: new Set(),
+			reports: [
+				{
+					source: 'docs',
+					status: 'pending_deletion',
+					removed: 1,
+					duration_ms: 1,
+				},
+			],
+		})
+		flushWorkerMetrics()
+		const metrics = logs
+			.filter((message) => message.startsWith('cwm-'))
+			.flatMap((message) => JSON.parse(message.slice('cwm-'.length)))
+		expect(metrics).toContainEqual(
+			expect.objectContaining({ n: 'tempo_docs_mcp_ingest_ok', v: 1 }),
+		)
+		expect(metrics).not.toContainEqual(
+			expect.objectContaining({ n: 'tempo_docs_mcp_source_pages_failed' }),
+		)
+	})
+
+	it.each([
+		{ status: 'unchanged' as const, failed: 0, expected: 1 },
+		{ status: 'synced' as const, failed: 0, expected: 1 },
+		{ status: 'synced' as const, failed: 1, expected: 0 },
+		{ status: 'pending_index' as const, failed: 1, expected: 0 },
+		{ status: 'error' as const, failed: 0, expected: 0 },
+	])('marks $status with $failed failed pages as $expected', ({
+		status,
+		failed,
+		expected,
+	}) => {
+		const logs: string[] = []
+		vi.spyOn(console, 'log').mockImplementation((message) => {
+			logs.push(String(message))
+		})
+		const report =
+			status === 'synced' || status === 'pending_index'
+				? {
+						source: 'docs',
+						status,
+						pages: 1,
+						unchanged: 0,
+						failed,
+						deleted: 0,
+						pending: status === 'pending_index' ? 1 : 0,
+						duration_ms: 1,
+					}
+				: status === 'error'
+					? { source: 'docs', status, error: 'failed', duration_ms: 1 }
+					: { source: 'docs', status, duration_ms: 1 }
+		expect(isFailedSyncReport(report)).toBe(expected === 0)
+		recordIngestMetrics({ durationMs: 1, forced: new Set(), reports: [report] })
+		flushWorkerMetrics()
+		const metrics = logs
+			.filter((message) => message.startsWith('cwm-'))
+			.flatMap((message) => JSON.parse(message.slice('cwm-'.length)))
+		expect(metrics).toContainEqual(
+			expect.objectContaining({ n: 'tempo_docs_mcp_ingest_ok', v: expected }),
+		)
+		expect(metrics).toContainEqual(
+			expect.objectContaining({
+				n: 'tempo_docs_mcp_source_sync_ok',
+				v: expected,
+				tags: expect.objectContaining({ source: 'docs' }),
+			}),
+		)
+		expect(metrics).toContainEqual(
+			expect.objectContaining({
+				n: 'tempo_docs_mcp_source_ready',
+				v: expected && status !== 'pending_index' ? 1 : 0,
+				tags: expect.objectContaining({ source: 'docs' }),
+			}),
+		)
+	})
+
+	it('reports pending AI Search items without treating queueing as a sync error', () => {
+		const logs: string[] = []
+		vi.spyOn(console, 'log').mockImplementation((message) => {
+			logs.push(String(message))
+		})
+		recordIngestMetrics({
+			durationMs: 1,
+			forced: new Set(),
+			reports: [
+				{
+					source: 'docs',
+					status: 'pending_index',
+					pages: 1,
+					unchanged: 0,
+					failed: 0,
+					deleted: 0,
+					pending: 1,
+					duration_ms: 1,
+				},
+			],
+		})
+		flushWorkerMetrics()
+		const metrics = logs
+			.filter((message) => message.startsWith('cwm-'))
+			.flatMap((message) => JSON.parse(message.slice('cwm-'.length)))
+		expect(metrics).toContainEqual(
+			expect.objectContaining({ n: 'tempo_docs_mcp_ingest_ok', v: 1 }),
+		)
+		expect(metrics).toContainEqual(
+			expect.objectContaining({
+				n: 'tempo_docs_mcp_source_items_pending',
+				v: 1,
+				tags: expect.objectContaining({ source: 'docs' }),
 			}),
 		)
 	})

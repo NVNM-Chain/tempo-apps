@@ -1,13 +1,16 @@
 import { createFileRoute, redirect } from '@tanstack/react-router'
 import * as Address from 'ox/Address'
 import * as z from 'zod/mini'
+import { accountFilterSearchSchema } from '#lib/domain/account-filter'
+import { resolveLegacyTokenTab } from '#lib/domain/address-tabs'
+import { isTip20Address } from '#lib/domain/tip20'
 
 export const Route = createFileRoute('/_layout/token/$address')({
 	validateSearch: z.object({
 		page: z.optional(z.number()),
 		limit: z.optional(z.number()),
 		tab: z.optional(z.string()),
-		a: z.optional(z.string()),
+		a: accountFilterSearchSchema,
 	}),
 	beforeLoad: ({ params, search }) => {
 		const { address } = params
@@ -18,11 +21,11 @@ export const Route = createFileRoute('/_layout/token/$address')({
 			})
 		}
 
-		// Map old tab names to new ones
-		let tab: string = 'transfers'
-		if (search.tab === 'holders') tab = 'holders'
-		else if (search.tab === 'contract') tab = 'contract'
-		else if (search.tab === 'interact') tab = 'contract'
+		const tab = resolveLegacyTokenTab(
+			search.tab,
+			isTip20Address(address),
+			search.a,
+		)
 
 		throw redirect({
 			to: '/address/$address',

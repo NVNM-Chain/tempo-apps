@@ -1,8 +1,37 @@
 import { parseAbi } from 'viem'
 import { Abis as ViemTempoAbis, Channel as ViemTempoChannel } from 'viem/tempo'
 
-export const tip20ChannelReserveAbi = ViemTempoAbis.tip20ChannelReserve
+/**
+ * TIP-1166 (T15) additions to the TIP-20 channel reserve precompile that the
+ * Viem ABI doesn't carry yet. Drop each one once Viem ships it.
+ */
+const tip20ChannelReserveT15Abi = parseAbi([
+	'struct ChannelDescriptor { address payer; address payee; address operator; address token; bytes32 salt; address authorizedSigner; bytes32 expiringNonceHash; }',
+	'function verifyVoucher(ChannelDescriptor descriptor, uint96 cumulativeAmount, bytes signature) view returns (bool valid)',
+	'event OpeningCommitmentRecorded(bytes32 indexed channelId, address indexed signer, bytes32 commitment)',
+	'error SignerConfigChanged(address signer)',
+	'error SaltNotSignerCommitment(address signer, bytes32 commitment)',
+])
+
+export const tip20ChannelReserveAbi = [
+	...ViemTempoAbis.tip20ChannelReserve,
+	...tip20ChannelReserveT15Abi,
+] as const
 export const tip20ChannelReserveAddress = ViemTempoChannel.address
+
+export const tip20Abi = [
+	...ViemTempoAbis.tip20,
+	...parseAbi([
+		'event BurnAt(address indexed burner, address indexed from, uint256 indexed amount)',
+		'function burnAt(address from, uint256 amount)',
+		'function BURN_AT_ROLE() view returns (bytes32)',
+	]),
+] as const
+
+/** Semantic ABI for EIP-2935's selectorless raw-calldata read. */
+export const blockHashHistoryAbi = parseAbi([
+	'function getBlockHash(uint256 blockNumber) view returns (bytes32 blockHash)',
+])
 
 export const streamChannelAbi = [
 	{
@@ -102,7 +131,9 @@ export const streamChannelAbi = [
 	},
 ] as const
 
-const zonePortalAbi = [
+// Retain superseded event signatures so historical Zone Portal activity remains
+// decodable; current functions and events come from viem.
+const legacyZonePortalEventsAbi = [
 	{
 		type: 'event',
 		name: 'DepositMade',
@@ -206,31 +237,175 @@ const zonePortalAbi = [
 	},
 ] as const
 
-const zoneFactoryAbi = [
-	{
-		type: 'event',
-		name: 'ZoneCreated',
-		inputs: [
-			{ indexed: true, name: 'zoneId', type: 'uint32' },
-			{ indexed: true, name: 'portal', type: 'address' },
-			{ indexed: true, name: 'messenger', type: 'address' },
-			{ indexed: false, name: 'initialToken', type: 'address' },
-			{ indexed: false, name: 'sequencer', type: 'address' },
-			{ indexed: false, name: 'verifier', type: 'address' },
-			{ indexed: false, name: 'genesisBlockHash', type: 'bytes32' },
-			{ indexed: false, name: 'genesisTempoBlockHash', type: 'bytes32' },
-			{ indexed: false, name: 'genesisTempoBlockNumber', type: 'uint64' },
-		],
-		anonymous: false,
-	},
+export const zonePortalActivityAbi = parseAbi([
+	'event DepositMade(bytes32 indexed newCurrentDepositQueueHash, address indexed sender, address token, uint128 netAmount, uint128 fee, uint256 keyIndex, bytes32 ephemeralPubkeyX, uint8 ephemeralPubkeyYParity, bytes ciphertext, bytes12 nonce, bytes16 tag, address tempoRefundRecipient, uint64 depositNumber)',
+	'event BatchSubmitted(uint64 indexed withdrawalBatchIndex, uint256 indexed withdrawalQueueIndex, bytes32 nextProcessedDepositQueueHash, bytes32 nextBlockHash, bytes32 withdrawalQueueHash, uint64 lastProcessedDepositNumber)',
+	'event WithdrawalProcessed(address indexed to, bytes32 indexed senderTag, address token, uint128 amount, bool callbackSuccess)',
+])
+
+// T13 adds the processed token count to BatchSubmitted, changing its topic.
+// A chain switches signature at T13 activation, so a portal's batches are the
+// pre-T13 events followed by the T13 ones; query both.
+const zonePortalT13BatchAbi = parseAbi([
+	'event BatchSubmitted(uint64 indexed withdrawalBatchIndex, uint256 indexed withdrawalQueueIndex, bytes32 nextProcessedDepositQueueHash, bytes32 nextBlockHash, bytes32 withdrawalQueueHash, uint64 lastProcessedDepositNumber, uint64 lastProcessedEnabledTokenCount)',
+])
+/** BatchSubmitted signatures, oldest first. */
+export const zonePortalBatchSubmittedEvents = [
+	zonePortalActivityAbi[1],
+	zonePortalT13BatchAbi[0],
+] as const
+
+export const zonePortalReadAbi = parseAbi([
+	'function enabledTokenCount() view returns (uint256)',
+	'function enabledTokenAt(uint256 index) view returns (address)',
+])
+
+export const zoneFactoryRegistryAbi = parseAbi([
+	'function isZonePortal(address portal) view returns (bool)',
+])
+
+export const zoneMessengerAbi = ViemTempoAbis.zoneMessenger
+
+// T13 adds TokenEnablementTransition to both batch calls. Keep the earlier
+// viem signatures for historical traces and networks that have not activated T13.
+// Source: tempoxyz/zones@a403d8cd, runtime/interfaces/IZone.sol.
+const zoneT13Transitions = [
+	'struct BlockTransition { bytes32 prevBlockHash; bytes32 nextBlockHash; }',
+	'struct DepositQueueTransition { bytes32 prevProcessedHash; bytes32 nextProcessedHash; uint64 prevDepositNumber; uint64 nextDepositNumber; }',
+	'struct TokenEnablementTransition { uint64 prevProcessedTokenCount; uint64 nextProcessedTokenCount; }',
+] as const
+
+// viem only ships the latest verify signature, so the pre-T13 one is kept here
+// too (viem 2.57 dropped it).
+const zoneVerifierLegacyAbi = parseAbi([
+	...zoneT13Transitions,
+	'function verify(uint32 zoneId, uint64 tempoBlockNumber, uint64 anchorBlockNumber, bytes32 anchorBlockHash, uint64 expectedWithdrawalBatchIndex, BlockTransition blockTransition, DepositQueueTransition depositQueueTransition, bytes32 withdrawalQueueHash, bytes verifierConfig, bytes proof) view returns (bool)',
+	'function verify(uint32 zoneId, uint64 tempoBlockNumber, uint64 anchorBlockNumber, bytes32 anchorBlockHash, uint64 expectedWithdrawalBatchIndex, BlockTransition blockTransition, DepositQueueTransition depositQueueTransition, TokenEnablementTransition tokenEnablementTransition, bytes32 withdrawalQueueHash, bytes verifierConfig, bytes proof) view returns (bool)',
+])
+
+const zonePortalT13FunctionsAbi = parseAbi([
+	...zoneT13Transitions,
+	'function submitBatch(uint64 tempoBlockNumber, uint64 recentTempoBlockNumber, BlockTransition blockTransition, DepositQueueTransition depositQueueTransition, TokenEnablementTransition tokenEnablementTransition, bytes32 withdrawalQueueHash, bytes verifierConfig, bytes proof, uint256 zoneHeight, bytes[] signatures)',
+])
+
+export const zoneVerifierAbi = [
+	...ViemTempoAbis.zoneVerifier,
+	...zoneVerifierLegacyAbi,
 ] as const
 
 export const stablecoinDexAbi = ViemTempoAbis.stablecoinDex
+export const zoneFactoryAbi = ViemTempoAbis.zoneFactory
+export const zoneOutboxAbi = ViemTempoAbis.zoneOutbox
+export const zonePortalAbi = [
+	...legacyZonePortalEventsAbi,
+	...ViemTempoAbis.zonePortal,
+	...zonePortalT13BatchAbi,
+	...zonePortalT13FunctionsAbi,
+] as const
 
 export const receivePolicyGuardAbi = parseAbi([
 	'event TransferBlocked(address indexed token, address indexed receiver, uint64 indexed blockedNonce, uint256 amount, uint8 receiptVersion, bytes receipt)',
 	'event ReceiptClaimed(address indexed token, address indexed receiver, uint8 receiptVersion, uint64 indexed blockedNonce, uint64 blockedAt, address originator, address recipient, address recoveryAuthority, address caller, address to, uint256 amount)',
 	'event ReceiptBurned(address indexed token, address indexed receiver, uint8 receiptVersion, uint64 indexed blockedNonce, uint64 blockedAt, address originator, address recipient, address recoveryAuthority, address caller, uint256 amount)',
+])
+
+// Customer-agnostic propAMM trade events: v1 DirectPropAMM's TradeExecuted and
+// v2 Venue's Fill (tempoxyz/propAMM contracts/src/v2/interfaces/IVenue.sol).
+// Bundling them lets the explorer identify swaps without relying on a
+// deployment allowlist or verified ABI.
+export const propAmmEventsAbi = parseAbi([
+	'event TradeExecuted(address indexed taker, address indexed recipient, bytes32 indexed customerId, bytes32 tradeId, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut, uint256 oraclePrice, uint256 oracleUpdatedAt)',
+	'event Fill(uint16 indexed pairIndex, address indexed taker, bytes32 indexed ref, uint64 sponsorId, bool baseIn, uint128 amountIn, uint128 amountOut, uint96 makerMid, uint32 seq)',
+	'event Posted(uint16 indexed pairIndex, bytes32 hotWord)',
+	'event Refilled(uint16 indexed pairIndex, bool bids, bool asks)',
+])
+
+// Customer-agnostic Tempo Earn events. These are bundled separately from viem's
+// protocol ABIs so transaction logs remain readable before or without contract
+// verification. Standard Ownable events are intentionally omitted because their
+// selectors do not identify an Earn contract.
+export const earnEventsAbi = parseAbi([
+	'event ActiveSet(bool active)',
+	'event AssetsFunded(address indexed funder, uint256 assets, uint256 earnShares)',
+	'event AuthorizedForwarderChanged(address indexed account, bool authorized)',
+	'event AuthorizedSolverChanged(address indexed account, bool authorized)',
+	'event BatchPushed(uint64 indexed version, bytes32 indexed batchHash, uint256 attemptedCount, uint256 paidCount, uint256 paidEarnShares, uint256 skippedCount)',
+	'event Contributed(address indexed caller, uint256 assets, uint256 engineShares, uint256 anchorEngineShares, uint256 anchorEarnShares)',
+	'event ContributionControllerInstalled(address indexed earnVault, address indexed owner, address contributionController)',
+	'event DeficitFundingSettled(address indexed solver, address indexed asset, uint256 funded, uint256 used, uint256 refunded)',
+	'event DepositPauseChanged(address indexed caller, bool paused)',
+	'event Deposited(address indexed caller, address indexed receiver, uint256 assets, uint256 earnShares)',
+	'event Deposited(address indexed earnVault, uint256 assets, uint256 engineShares)',
+	'event DistributorFeeUpdateCancelled(address indexed distributor)',
+	'event DistributorFeeUpdateScheduled(address indexed distributor, address indexed recipient, uint16 rateBps, uint40 executableAt)',
+	'event DistributorFeeUpdated(address indexed recipient, uint16 rateBps, uint64 indexed feeConfigId)',
+	'event DistributorTransferCancelled(address indexed distributor, address indexed pendingDistributor)',
+	'event DistributorTransferStarted(address indexed distributor, address indexed pendingDistributor)',
+	'event DistributorTransferred(address indexed previousDistributor, address indexed newDistributor)',
+	'event DustSwept(address indexed token, address indexed to, uint256 amount)',
+	'event ERC4626EngineDeployed(address indexed engine, address indexed vault, address indexed owner, address asset, bytes32 deploymentId, bytes32 engineSalt)',
+	'event EarnDeposit(bytes32 indexed actionId, address indexed earnVault, address indexed inputToken, uint256 inputAmount, uint256 vaultAssets, uint256 earnShares, bytes32 zoneDepositHash)',
+	'event EarnRedeem(bytes32 indexed actionId, address indexed earnVault, address indexed outputToken, uint256 earnShares, uint256 vaultAssets, uint256 outputAmount, bytes32 zoneDepositHash)',
+	'event EarnStackDeployed(address indexed earnVault, address indexed earnShare, address indexed earnFees, address engine, address asset, address owner, bytes32 deploymentId, address emergencyGuardian, address asyncJanitor, uint256 maxManagedAssets, uint8 migrationMode, uint64 transferPolicyId, bytes32 earnShareSalt, bytes32 controlConfigHash, bytes32 feeConfigHash, bytes32 earnFeesSalt)',
+	'event EarnVaultInitialized(address indexed earnVault)',
+	'event EarnVaultInitialized(address indexed engine, address indexed earnShare, address indexed earnFees, address operator, address emergencyGuardian, address asyncJanitor, uint256 maxManagedAssets, uint8 migrationMode, address distributor, uint40 distributorUpdateDelay, address distributorFeeRecipient, uint16 distributorFeeRateBps)',
+	'event EmergencyRolesChanged(address indexed emergencyGuardian, address indexed asyncJanitor)',
+	'event EngineMigrated(address indexed oldEngine, address indexed newEngine, uint256 oldEngineShares, uint256 assetsMoved, uint256 newEngineShares, uint256 totalEarnShares, uint256 anchorEngineShares, uint256 anchorEarnShares)',
+	'event EngineShareShortfallReconciled(address indexed engine, uint256 previousManagedEngineShares, uint256 observedRawEngineShares, uint256 shortfallEngineShares, uint256 totalEarnShares)',
+	'event EngineShareSurplusAbsorbed(address indexed caller, uint256 engineShares, uint256 anchorEngineShares, uint256 anchorEarnShares)',
+	'event ExternalSettlementRecovered(uint256 requestCount, uint256 recoveredAssets, uint256 claimed)',
+	'event FeeBaselinesInitialized(uint256 highWaterMark, uint256 targetBase, uint40 targetStartedAt)',
+	'event FeeConfigurationSet(uint64 indexed configId, bytes32 indexed configHash, bool reactivated)',
+	'event FeeDustWaived(uint64 indexed configId, uint8 indexed slot, uint256 remainder)',
+	'event FeeEarnSharesAllocated(uint64 indexed configId, address indexed recipient, uint256 feeAssets, uint256 feeEarnShares)',
+	'event FeeEarnSharesClaimed(address indexed recipient, address indexed to, uint256 earnShares)',
+	'event FeesAccrued(uint64 indexed configId, uint256 activeAssets, uint256 positiveAccrualAssets, uint256 feeAssets, uint256 feeEarnShares, uint256 highWaterMark, uint256 targetValuePerEarnShare)',
+	'event FeesDisabled(address indexed operator)',
+	'event FinalizeFailed(bytes32 indexed requestId, address indexed asset, uint256 amount)',
+	'event Finalized(bytes32 indexed requestId, address indexed asset, uint256 amount)',
+	'event Funded(address indexed funder, uint256 requestedAssets, uint256 fundedAssets)',
+	'event MaxManagedAssetsChanged(uint256 previousMaxManagedAssets, uint256 newMaxManagedAssets)',
+	'event MaxRateAgeUpdated(uint64 oldMaxRateAge, uint64 newMaxRateAge)',
+	'event MerkleDistributorInstalled(address indexed earnVault, address indexed owner, address indexed treasury, address merkleDistributor, bytes32 campaignId, uint40 claimDeadline)',
+	'event OperatorTransferCancelled(address indexed operator, address indexed pendingOperator)',
+	'event OperatorTransferStarted(address indexed operator, address indexed pendingOperator)',
+	'event OperatorTransferred(address indexed previousOperator, address indexed newOperator)',
+	'event PausedSet(bool paused)',
+	'event PayoutSkipped(address indexed recipient, uint256 cumulativeAmount, uint8 reason)',
+	'event RedeemCancelled(bytes32 indexed requestId, address indexed receiver, uint256 earnShares)',
+	'event RedeemCancelledOnQueue(bytes32 indexed requestId, uint128 engineShares)',
+	'event RedeemClaimed(bytes32 indexed requestId, address indexed asset, uint256 amount)',
+	'event RedeemFinalized(bytes32 indexed requestId, address indexed receiver, uint256 earnShares, address asset, uint256 assets)',
+	'event RedeemRequested(bytes32 indexed requestId, address indexed assetOut, uint128 engineShares)',
+	'event RedeemRequested(bytes32 indexed requestId, address indexed requester, address indexed receiver, uint256 earnShares)',
+	'event Redeemed(address indexed caller, address indexed receiver, uint256 earnShares, uint256 assets)',
+	'event Redeemed(address indexed receiver, uint256 engineShares, uint256 assets)',
+	'event Rescued(address indexed token, address indexed to, uint256 amount)',
+	'event RewardClaimed(address indexed recipient, uint256 amount, uint256 cumulativeAmount)',
+	'event RootPublished(uint64 indexed version, bytes32 indexed root, bytes32 indexed statementHash, uint256 totalEntitlement)',
+	'event Settled(address indexed asset, uint256 amount, uint256 newTotal)',
+	'event SolvedAndForwarded(uint256 requestCount, uint256 forwardedCount, address indexed caller)',
+	'event TreasuryChanged(address indexed oldTreasury, address indexed newTreasury)',
+	'event Unearmarked(address indexed asset, uint256 amount, uint256 newTotal)',
+	'event UnspentReturned(address indexed treasury, uint256 earnShares)',
+	'event VedaEngineBound(address indexed engine)',
+	'event VedaEngineInitialized(address indexed teller, address indexed queue, address indexed accountant, uint64 peripheryVersion, uint64 maxRateAge)',
+	'event VedaPeripheryPublished(uint64 indexed version, address indexed teller, address indexed queue, address accountant)',
+	'event VedaPeripheryUpdated(uint64 indexed registryVersion, address indexed oldTeller, address indexed oldQueue, address oldAccountant, address newTeller, address newQueue, address newAccountant, uint256 validatedRate)',
+	'event VenueSharesDeposited(address indexed caller, address indexed receiver, uint256 requestedVenueShares, uint256 receivedEngineShares, uint256 earnShares)',
+	'event VenueSharesDeposited(address indexed from, uint256 requestedVenueShares, uint256 receivedEngineShares)',
+	'event WithdrewExact(address indexed caller, address indexed receiver, uint256 assets, uint256 earnSharesBurned)',
+	'event WithdrewExact(address indexed receiver, uint256 assets, uint256 engineSharesBurned)',
+])
+
+// Customer-agnostic Tempo card spend events (tempoxyz/contracts cards/ and
+// zone-router/). A private card spend is a Zone withdrawal whose callback hands
+// the input to a card program (CardSpender), which pays the provider and
+// returns the change to the Zone.
+export const cardEventsAbi = parseAbi([
+	'event CardSpent(bytes32 indexed ref, address indexed payer, address indexed destination, address token, uint256 amount, uint256 fromVault, uint256 sharesUsed, bool isPrivate)',
+	'event InputSpent(bytes32 indexed ref, address inputToken, uint256 inputConsumed, uint256 inputReturned)',
+	'event Spent(address indexed spender, address indexed token, uint256 used, uint256 change, bytes32 zoneDepositHash)',
 ])
 
 // Safe v1.3.0 (L2 build) and its proxy factory; v1.3.0 indexes fewer arguments than v1.4.1.
@@ -288,14 +463,29 @@ export const anchoringAbi = parseAbi([
 ])
 
 export const Abis = {
-	...ViemTempoAbis,
+	accountKeychain: ViemTempoAbis.accountKeychain,
 	anchoring: anchoringAbi,
+	card: cardEventsAbi,
+	earn: earnEventsAbi,
+	feeAmm: ViemTempoAbis.feeAmm,
+	feeManager: ViemTempoAbis.feeManager,
+	nonce: ViemTempoAbis.nonce,
+	propAmm: propAmmEventsAbi,
 	receivePolicyGuard: receivePolicyGuardAbi,
 	safe: safeEventsAbi,
+	signatureVerifier: ViemTempoAbis.signatureVerifier,
 	stablecoinDex: stablecoinDexAbi,
+	storageCredits: ViemTempoAbis.storageCredits,
 	streamChannel: streamChannelAbi,
-	zonePortal: zonePortalAbi,
-	zoneFactory: zoneFactoryAbi,
+	tip20: tip20Abi,
+	tip20ChannelReserve: tip20ChannelReserveAbi,
+	tip20Factory: ViemTempoAbis.tip20Factory,
+	tip403Registry: ViemTempoAbis.tip403Registry,
+	validatorConfig: ViemTempoAbis.validatorConfig,
+	validatorConfigV2: ViemTempoAbis.validatorConfigV2,
+	zoneFactory: zoneFactoryAbi.filter((item) => item.type === 'event'),
+	zoneOutbox: zoneOutboxAbi.filter((item) => item.type === 'event'),
+	zonePortal: zonePortalAbi.filter((item) => item.type === 'event'),
 } as const
 
 export const allAbis = Object.values(Abis).flat()

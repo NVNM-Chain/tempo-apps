@@ -1,21 +1,6 @@
-/**
- * Shared primitives for the simulator.
- *
- * The simulator is the densest screen in the explorer, so it commits to one
- * type and colour ramp and never improvises:
- *
- *   11px  labels, units, meta, chips        text-tertiary / text-content-dimmed
- *   12px  mono data — trace, hex, numbers   text-primary / text-secondary
- *   13px  titles and readable prose         text-primary (medium) / text-secondary
- *   14px  exactly one headline per pane     text-primary (medium)
- *
- * Weight carries hierarchy, not size: `font-medium` marks a title or the one
- * value that is the answer, everything else is `font-normal`. There is no bold.
- *
- * Colour means one thing each:
- *   accent    you can click it
- *   positive  it succeeded          negative  it failed
- *   viz/code  it is code or data    tertiary  it is a label
+import { Button as RegenButton, Tag } from 'regen-ui'
+/** Shared simulator controls use Regen copy/label scales and semantic colors.
+ * Pilat is the UI face; explicit code and hash values use JetBrains Mono Light.
  */
 
 import * as OxAddress from 'ox/Address'
@@ -42,19 +27,19 @@ import RotateCcwIcon from '~icons/lucide/rotate-ccw'
 /* Controls                                                                   */
 /* -------------------------------------------------------------------------- */
 
-/** Label above a control. 11px tertiary, always. */
+/** Label above a control. */
 export function Field(props: Field.Props): React.JSX.Element {
 	return (
 		<div className="flex min-w-0 flex-col gap-[5px]">
 			<div className="flex items-center justify-between gap-[8px]">
-				<span className="text-[11px] text-tertiary">{props.label}</span>
+				<span className="font-sans label-12 text-tertiary">{props.label}</span>
 				{props.action}
 			</div>
 			{props.children}
 			{props.hint && (
 				<span
 					className={cx(
-						'text-[11px]',
+						'type-card',
 						props.invalid ? 'text-negative' : 'text-content-dimmed',
 					)}
 				>
@@ -77,7 +62,7 @@ export declare namespace Field {
 }
 
 const inputClassName =
-	'w-full min-w-0 rounded-[6px] border border-card-border bg-base-plane px-[9px] py-[6px] font-mono text-[12px] text-primary outline-none transition-colors placeholder:text-field-content-secondary focus:border-accent'
+	'w-full min-w-0 rounded-body border border-card-border bg-pane px-[12px] py-[9px] type-card-data text-primary outline-none transition-colors placeholder:text-field-content-secondary focus:border-focus'
 
 /** Invalid state is applied on blur, never on mount — see `draftFieldErrors`. */
 export function inputClass(invalid?: boolean): string {
@@ -88,21 +73,12 @@ export function inputClass(invalid?: boolean): string {
 export function Button(props: Button.Props): React.JSX.Element {
 	const { tone = 'default', ...rest } = props
 	return (
-		<button
+		<RegenButton
 			type="button"
 			{...rest}
-			className={cx(
-				'flex h-[28px] shrink-0 items-center gap-[6px] rounded-[7px] px-[10px] text-[12px] cursor-pointer press-down transition-colors disabled:cursor-not-allowed disabled:opacity-50',
-				// `text-white-black` is white on the light-mode accent and black on the
-				// lighter dark-mode accent, which is the readable pairing in both.
-				tone === 'primary'
-					? 'bg-accent font-medium text-white-black hover:bg-accent-hover'
-					: 'border border-card-border text-secondary hover:text-primary',
-				props.className,
-			)}
-		>
-			{props.children}
-		</button>
+			size="small"
+			variant={tone === 'primary' ? 'primary' : 'secondary'}
+		/>
 	)
 }
 
@@ -120,21 +96,9 @@ export declare namespace Button {
 export function Chip(props: Chip.Props): React.JSX.Element {
 	const { tone = 'neutral' } = props
 	return (
-		<span
-			title={props.title}
-			className={cx(
-				'inline-flex shrink-0 items-center gap-[4px] rounded-[5px] px-[5px] py-[1px] text-[11px] whitespace-nowrap',
-				tone === 'positive' &&
-					'bg-base-content-positive/12 text-base-content-positive',
-				tone === 'negative' && 'bg-negative/12 text-negative',
-				tone === 'warning' && 'bg-warning/15 text-warning',
-				tone === 'accent' && 'bg-accent/12 text-accent',
-				tone === 'neutral' && 'bg-distinct text-tertiary',
-				props.className,
-			)}
-		>
+		<Tag intent={tone} title={props.title} className={props.className}>
 			{props.children}
-		</span>
+		</Tag>
 	)
 }
 
@@ -148,19 +112,18 @@ export declare namespace Chip {
 }
 
 /**
- * A label/value pair in the result header. The label is 11px tertiary and the
- * value is 12px mono, so a column of them aligns on both axes without a table.
+ * A label/value pair in the result header using the shared card roles.
  */
 export function Fact(props: Fact.Props): React.JSX.Element {
 	return (
 		<div className="flex min-w-0 items-baseline gap-[8px]">
 			<span
-				className="w-[72px] shrink-0 text-[11px] text-tertiary"
+				className="w-[72px] shrink-0 type-card text-tertiary"
 				title={props.hint}
 			>
 				{props.label}
 			</span>
-			<span className="min-w-0 truncate font-mono text-[12px] text-primary">
+			<span className="min-w-0 truncate type-card-data text-primary">
 				{props.children}
 			</span>
 		</div>
@@ -188,7 +151,7 @@ export function GasMeter(props: GasMeter.Props): React.JSX.Element {
 	return (
 		<div className="flex flex-col gap-[6px]">
 			<div className="flex items-baseline justify-between gap-[8px]">
-				<span className="text-[11px] text-tertiary">Gas used</span>
+				<span className="type-card text-tertiary">Gas used</span>
 				<GasRatio used={props.used} limit={props.limit} />
 			</div>
 			<div className="h-[4px] w-full overflow-hidden rounded-full bg-distinct">
@@ -237,7 +200,7 @@ export function GasRatio(props: {
 }): React.JSX.Element {
 	const pct = gasPercent(props.used, props.limit)
 	return (
-		<span className={cx('font-mono text-[12px]', props.className)}>
+		<span className={cx('type-card-data', props.className)}>
 			<span className="text-primary">{props.used.toLocaleString()}</span>
 			<span className="text-content-dimmed">
 				{' / '}
@@ -289,7 +252,7 @@ export function PanelEmpty(props: {
 	children: React.ReactNode
 }): React.JSX.Element {
 	return (
-		<div className="px-[16px] py-[18px] text-[12px] text-tertiary">
+		<div className="px-[16px] py-[18px] type-card text-tertiary">
 			{props.children}
 		</div>
 	)
@@ -302,11 +265,11 @@ export function PanelError(props: {
 	const rateLimited =
 		props.error instanceof SimulationApiError && props.error.status === 429
 	return (
-		<div className="flex flex-col gap-[4px] px-[16px] py-[14px] text-[12px]">
+		<div className="flex flex-col gap-[4px] px-[16px] py-[14px] type-card">
 			<span className="text-negative">
 				{rateLimited ? 'Rate limited' : props.title}
 			</span>
-			<span className="font-mono text-[11px] break-all text-tertiary">
+			<span className="type-card-data break-all text-tertiary">
 				{props.error.message}
 			</span>
 		</div>
@@ -330,16 +293,16 @@ export function SimulationFailure(props: {
 	const messages = [...new Set(props.errors.map((error) => error.message))]
 
 	return (
-		<div className="flex items-start gap-[10px] rounded-[10px] border border-negative/40 bg-card px-[16px] py-[14px]">
+		<div className="flex items-start gap-[10px] rounded-body border border-negative/40 bg-card px-[16px] py-[14px]">
 			<CircleAlertIcon className="mt-[2px] size-[14px] shrink-0 text-negative" />
 			<div className="flex min-w-0 flex-1 flex-col gap-[6px]">
-				<h2 className="text-[13px] font-medium text-negative">{title}</h2>
-				<p className="text-[12px] text-secondary">{hint}</p>
+				<h2 className="label-13 text-negative">{title}</h2>
+				<p className="type-card text-secondary">{hint}</p>
 				<div className="flex flex-col gap-[4px]">
 					{messages.map((message) => (
 						<code
 							key={message}
-							className="block rounded-[6px] bg-distinct px-[9px] py-[6px] font-mono text-[11px] break-all text-tertiary"
+							className="block rounded-body bg-distinct px-[9px] py-[6px] type-card-data break-all text-tertiary"
 						>
 							{message}
 						</code>
