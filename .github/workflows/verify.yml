@@ -42,7 +42,7 @@ jobs:
         run: bash scripts/build.sh && bash scripts/smoke.sh
         working-directory: apps/explorer
         env:
-          CLOUDFLARE_ENV: mainnet
+          CLOUDFLARE_ENV: nvnm-mainnet
           WRANGLER_SEND_METRICS: false
 
       - name: Test llms package
