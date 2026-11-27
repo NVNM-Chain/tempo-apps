@@ -3,7 +3,6 @@ import type { Address } from 'ox'
 import { erc20Abi } from 'viem'
 import { getChainId } from 'wagmi/actions'
 import * as z from 'zod/mini'
-import { indexer, list } from '#lib/server/dex-indexer'
 import { getVerifiedTokens } from '#lib/server/verified-tokens'
 import { getBatchedClient, getWagmiConfig } from '#wagmi.config.ts'
 
@@ -40,38 +39,22 @@ export const fetchTokens = createServerFn({ method: 'POST' })
 		const pageTokens = tokens.slice(offset, offset + limit)
 
 		const client = getBatchedClient()
-		const [firstTransfers, supplies] = await Promise.all([
-			pageTokens.length === 0
-				? []
-				: indexer(
-						chainId,
-						`SELECT token, toUnixTimestamp(min(block_timestamp)) AS at FROM token_transfers
-						WHERE token IN (${list(pageTokens.map((token) => token.address))}) GROUP BY token`,
-					).catch((error) => {
-						console.error('Failed to read first transfers:', error)
-						return []
-					}),
-			Promise.all(
-				pageTokens.map((token) =>
-					client
-						.readContract({
-							address: token.address,
-							abi: erc20Abi,
-							functionName: 'totalSupply',
-						})
-						.catch(() => undefined),
-				),
+		const supplies = await Promise.all(
+			pageTokens.map((token) =>
+				client
+					.readContract({
+						address: token.address,
+						abi: erc20Abi,
+						functionName: 'totalSupply',
+					})
+					.catch(() => undefined),
 			),
-		])
-		const firstTransferAt = new Map(
-			firstTransfers.map((row) => [String(row.token), Number(row.at)]),
 		)
 
 		return {
 			total: tokens.length,
 			tokens: pageTokens.map((token, index) => ({
 				...token,
-				createdAt: firstTransferAt.get(token.address),
 				totalSupply: supplies[index]?.toString(),
 			})),
 		}

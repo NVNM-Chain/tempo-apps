@@ -8,12 +8,17 @@ import { tanstackStart as tanstack } from '@tanstack/react-start/plugin/vite'
 import react from '@vitejs/plugin-react'
 import Icons from 'unplugin-icons/vite'
 import { defineConfig, loadEnv } from 'vite'
+import { zyzz } from 'zyzz/vite'
 import vitePluginChromiumDevTools from 'vite-plugin-devtools-json'
 import { visualizer } from 'rollup-plugin-visualizer'
 import Sonda from 'sonda/vite'
 
 import { getVendorChunk } from './scripts/chunk-config.ts'
-import { buildEnvSchema, tempoEnvSchema } from './src/lib/build-env.ts'
+import {
+	buildEnvSchema,
+	devnetUrlsSchema,
+	tempoEnvSchema,
+} from './src/lib/build-env.ts'
 
 import wranglerJSON from '#wrangler.json' with { type: 'json' }
 
@@ -38,29 +43,27 @@ export default defineConfig((config) => {
 	}
 
 	const wranglerVars = wranglerJSON.env[envConfig.VITE_TEMPO_ENV].vars
-	const datadogEnv = {
-		VITE_DATADOG_ALLOWED_TRACING_URLS:
-			wranglerVars.VITE_DATADOG_ALLOWED_TRACING_URLS ??
-			envConfig.VITE_DATADOG_ALLOWED_TRACING_URLS,
-		VITE_DATADOG_ENABLED:
-			wranglerVars.VITE_DATADOG_ENABLED ??
-			String(envConfig.VITE_DATADOG_ENABLED),
-		VITE_DATADOG_ENV:
-			wranglerVars.VITE_DATADOG_ENV ??
-			envConfig.VITE_DATADOG_ENV ??
-			envConfig.VITE_TEMPO_ENV,
-		VITE_DATADOG_SERVICE:
-			wranglerVars.VITE_DATADOG_SERVICE ?? envConfig.VITE_DATADOG_SERVICE,
-		VITE_DATADOG_SESSION_REPLAY_SAMPLE_RATE:
-			wranglerVars.VITE_DATADOG_SESSION_REPLAY_SAMPLE_RATE ??
-			envConfig.VITE_DATADOG_SESSION_REPLAY_SAMPLE_RATE,
-		VITE_DATADOG_SESSION_SAMPLE_RATE:
-			wranglerVars.VITE_DATADOG_SESSION_SAMPLE_RATE ??
-			envConfig.VITE_DATADOG_SESSION_SAMPLE_RATE,
-		VITE_DATADOG_TRACE_SAMPLE_RATE:
-			wranglerVars.VITE_DATADOG_TRACE_SAMPLE_RATE ??
-			envConfig.VITE_DATADOG_TRACE_SAMPLE_RATE,
-	}
+	// A devnet build can point at another devnet (`devnetUrls` in
+	// src/lib/server/env.ts). The URLs are compiled in from this build's
+	// wrangler.json vars or build environment, because `keep_vars` carries
+	// runtime vars from one uploaded version into the next. Such a build must
+	// not follow the default devnet's public WebSocket in the browser either.
+	const devnetUrls = devnetUrlsSchema.parse(
+		Object.fromEntries(
+			(['DEVNET_API_URL', 'DEVNET_RPC_URL', 'DEVNET_TIDX_URL'] as const).map(
+				(key) => [
+					key,
+					// No NVNM build is `devnet`, so none takes upstream's overrides.
+					(envConfig.VITE_TEMPO_ENV as string) === 'devnet'
+						? (wranglerVars as Record<string, string | undefined>)[key] ||
+							env[key] ||
+							undefined
+						: undefined,
+				],
+			),
+		),
+	)
+	const devnetRpcOverridden = Boolean(devnetUrls.DEVNET_RPC_URL)
 	const tempoEnv = tempoEnvSchema.safeParse(wranglerVars.VITE_TEMPO_ENV)
 	if (!tempoEnv.success) throw new Error(z.prettifyError(tempoEnv.error))
 
@@ -102,6 +105,8 @@ export default defineConfig((config) => {
 				vitePluginChromiumDevTools(),
 			cloudflare({ viteEnvironment: { name: 'ssr' } }),
 			tailwind(),
+			// Tempo Design System (@tempoxyz/ds) styles compile ahead of time.
+			zyzz(),
 			Icons({ compiler: 'jsx', jsx: 'react' }),
 			tanstack({
 				srcDirectory: './src',
@@ -129,6 +134,8 @@ export default defineConfig((config) => {
 					},
 				}),
 		].filter(Boolean),
+		// The plugin reads the design system's contracts, so SSR bundles them.
+		ssr: { noExternal: ['@tempoxyz/ds', 'zyzz'] },
 		server: {
 			port,
 			cors: config.mode === 'development' ? false : undefined,
@@ -172,37 +179,23 @@ export default defineConfig((config) => {
 			},
 		},
 		define: {
-			'import.meta.env.VITE_DATADOG_ALLOWED_TRACING_URLS': JSON.stringify(
-				datadogEnv.VITE_DATADOG_ALLOWED_TRACING_URLS,
+			'import.meta.env.DEVNET_API_URL': JSON.stringify(
+				devnetUrls.DEVNET_API_URL ?? '',
 			),
-			'import.meta.env.VITE_DATADOG_ENABLED': JSON.stringify(
-				datadogEnv.VITE_DATADOG_ENABLED,
+			'import.meta.env.DEVNET_RPC_URL': JSON.stringify(
+				devnetUrls.DEVNET_RPC_URL ?? '',
 			),
-			'import.meta.env.VITE_DATADOG_ENV': JSON.stringify(
-				datadogEnv.VITE_DATADOG_ENV,
+			'import.meta.env.DEVNET_TIDX_URL': JSON.stringify(
+				devnetUrls.DEVNET_TIDX_URL ?? '',
 			),
-			'import.meta.env.VITE_DATADOG_SERVICE': JSON.stringify(
-				datadogEnv.VITE_DATADOG_SERVICE,
-			),
-			'import.meta.env.VITE_DATADOG_SESSION_REPLAY_SAMPLE_RATE': JSON.stringify(
-				datadogEnv.VITE_DATADOG_SESSION_REPLAY_SAMPLE_RATE,
-			),
-			'import.meta.env.VITE_DATADOG_SESSION_SAMPLE_RATE': JSON.stringify(
-				datadogEnv.VITE_DATADOG_SESSION_SAMPLE_RATE,
-			),
-			'import.meta.env.VITE_DATADOG_TRACE_SAMPLE_RATE': JSON.stringify(
-				datadogEnv.VITE_DATADOG_TRACE_SAMPLE_RATE,
+			'import.meta.env.VITE_DEVNET_RPC_OVERRIDDEN': JSON.stringify(
+				String(devnetRpcOverridden),
 			),
 			'import.meta.env.VITE_TEMPO_ENV': JSON.stringify(
 				wranglerVars.VITE_TEMPO_ENV || envConfig.VITE_TEMPO_ENV,
 			),
-			__BASE_URL__: JSON.stringify(
-				envConfig.VITE_BASE_URL
-					? envConfig.VITE_BASE_URL
-					: config.mode === 'development'
-						? `http://localhost:${port}`
-						: (envConfig.VITE_BASE_URL ?? ''),
-			),
+			// Use the request/browser origin unless an explicit base URL is configured.
+			__BASE_URL__: JSON.stringify(envConfig.VITE_BASE_URL),
 			// Empty outside a git checkout.
 			__BUILD_COMMIT__: JSON.stringify(
 				NodeChildProcess.spawnSync('git', ['rev-parse', 'HEAD'], {

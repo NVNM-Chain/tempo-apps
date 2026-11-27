@@ -1,24 +1,40 @@
 import * as Address from 'ox/Address'
 import * as Hex from 'ox/Hex'
-import type { TransactionReceipt } from 'viem'
+import {
+	type AbiFunction,
+	type TransactionReceipt,
+	toFunctionSelector,
+} from 'viem'
 import * as z from 'zod/mini'
 
+import { zonePortalAbi } from '#lib/abis'
 import {
+	decodeKnownTransactionCalls,
 	type KnownEvent,
 	parseKnownEvents,
 	type TransactionLike,
 } from '#lib/domain/known-events'
 import { type GetTip20MetadataFn, metadataForTokens } from '#lib/domain/tip20'
+import { selectTransactionDescriptionEvents } from '#lib/domain/transaction-activities'
 import { indexer, sqlTime } from '#lib/server/dex-indexer'
-import { getBatchedClient } from '#wagmi.config'
+import { getBatchedClient, getTempoChain } from '#wagmi.config'
 
 export const [MAX_LIMIT, DEFAULT_LIMIT] = [10, 10]
 const HISTORY_TOTAL_CACHE_TTL = 60_000
 const HISTORY_TOTAL_CACHE_MAX_ENTRIES = 50
+// One selector per submitBatch signature (T13 added tokenEnablementTransition).
+export const SUBMIT_BATCH_SELECTORS = [
+	...new Set(
+		zonePortalAbi
+			.filter((item) => item.type === 'function' && item.name === 'submitBatch')
+			.map((item) => toFunctionSelector(item as AbiFunction)),
+	),
+]
 
 export type EnrichedTransaction = {
 	hash: `0x${string}`
 	blockNumber: string
+	transactionIndex?: number | undefined
 	timestamp: number
 	from: `0x${string}`
 	to: `0x${string}` | null
@@ -46,6 +62,8 @@ export const RequestParametersSchema = z.object({
 	include: z.prefault(z.enum(['all', 'sent', 'received']), 'all'),
 	status: z.optional(z.enum(['success', 'reverted'])),
 	after: z.optional(z.coerce.number()),
+	// Upstream hides a zone portal's batch submissions through the Tempo API; accepted, not applied here.
+	hideSubmitBatches: z.optional(z.enum(['true', 'false'])),
 })
 
 export type HistoryRequestParameters = z.infer<typeof RequestParametersSchema>
@@ -147,9 +165,14 @@ export function toEnrichedTransaction(
 	const knownEvents = (() => {
 		if (!options.includeKnownEvents) return []
 		try {
-			return parseKnownEvents(receipt, {
-				transaction,
-				getTokenMetadata: options.getTokenMetadata,
+			return selectTransactionDescriptionEvents({
+				activityEvents: [],
+				fallbackEvents: parseKnownEvents(receipt, {
+					transaction,
+					getTokenMetadata: options.getTokenMetadata,
+					chainId: getTempoChain().id,
+				}),
+				knownCalls: decodeKnownTransactionCalls(transaction, receipt.status),
 			})
 		} catch (error) {
 			console.error(
@@ -163,6 +186,7 @@ export function toEnrichedTransaction(
 	return {
 		hash: receipt.transactionHash,
 		blockNumber: Hex.fromNumber(receipt.blockNumber),
+		transactionIndex: receipt.transactionIndex,
 		timestamp: options.timestamp,
 		from: Address.checksum(receipt.from),
 		to: receipt.to ? Address.checksum(receipt.to) : null,
@@ -251,7 +275,7 @@ export async function fetchAddressHistoryData(params: {
 		: () => undefined
 
 	const transactions = fetched.map(([transaction, receipt], index) =>
-		toEnrichedTransaction(transaction, receipt, {
+		toEnrichedTransaction(transaction, receipt as TransactionReceipt, {
 			timestamp: Number(page[index]?.timestamp ?? 0),
 			includeKnownEvents,
 			getTokenMetadata,

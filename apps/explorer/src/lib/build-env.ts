@@ -10,6 +10,13 @@ export const tempoEnvSchema = z.prefault(
 	'nvnm',
 )
 
+/** A `devnet` build's compiled-in backend overrides (see vite.config.ts). */
+export const devnetUrlsSchema = z.object({
+	DEVNET_API_URL: z.optional(z.url({ protocol: /^https?$/ })),
+	DEVNET_RPC_URL: z.optional(z.url({ protocol: /^https?$/ })),
+	DEVNET_TIDX_URL: z.optional(z.url({ protocol: /^https?$/ })),
+})
+
 export const buildEnvSchema = z.object({
 	ALLOWED_HOSTS: z.prefault(
 		z.pipe(
@@ -28,13 +35,6 @@ export const buildEnvSchema = z.object({
 	SENTRY_ORG: z.optional(z.string()),
 	SENTRY_PROJECT: z.optional(z.string()),
 	VITE_BASE_URL: z.prefault(z.string(), ''),
-	VITE_DATADOG_ALLOWED_TRACING_URLS: z.prefault(z.string(), ''),
-	VITE_DATADOG_ENABLED: z.prefault(enabledSchema, 'false'),
-	VITE_DATADOG_ENV: z.optional(z.string()),
-	VITE_DATADOG_SERVICE: z.prefault(z.string(), 'explorer'),
-	VITE_DATADOG_SESSION_REPLAY_SAMPLE_RATE: z.prefault(z.string(), '0'),
-	VITE_DATADOG_SESSION_SAMPLE_RATE: z.prefault(z.string(), '100'),
-	VITE_DATADOG_TRACE_SAMPLE_RATE: z.prefault(z.string(), '20'),
 	VITE_ENABLE_DEVTOOLS: z.prefault(enabledSchema, 'false'),
 	VITE_TEMPO_ENV: tempoEnvSchema,
 })

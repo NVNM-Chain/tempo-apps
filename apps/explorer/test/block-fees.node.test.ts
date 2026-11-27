@@ -8,6 +8,7 @@ const PAID = `0x${'aa'.repeat(32)}` as const
 const NO_RECEIPT = `0x${'bb'.repeat(32)}` as const
 
 vi.mock('#wagmi.config.ts', () => ({
+	getTempoChain: () => ({ id: 787222 }),
 	getBatchedClient: () => ({
 		getTransactionReceipt: async ({ hash }: { hash: string }) => {
 			if (hash !== PAID) throw new Error('no receipt')

@@ -1,9 +1,13 @@
 import { useQuery } from '@tanstack/react-query'
 import { createFileRoute, Link } from '@tanstack/react-router'
 import * as React from 'react'
-import { type Block, createPublicClient, webSocket } from 'viem'
-import { watchBlocks as subscribeToBlocks } from 'viem/actions'
-import { getTempoChain } from '#wagmi.config'
+import { type Block, type Client, createPublicClient, webSocket } from 'viem'
+import {
+	getBlock,
+	getBlockNumber,
+	watchBlocks as subscribeToBlocks,
+} from 'viem/actions'
+import { getBatchedClient, getTempoChain } from '#wagmi.config'
 import * as z from 'zod/mini'
 import { DataGrid } from '#comps/DataGrid'
 import { Midcut } from '#comps/Midcut'
@@ -16,7 +20,6 @@ import {
 import { syncBlockNumberAtLeast } from '#lib/block-number'
 import { cx } from '#lib/css'
 import { OG_BASE_URL } from '#lib/og'
-import { withLoaderTiming } from '#lib/profiling'
 import { BLOCKS_PER_PAGE, blocksQueryOptions } from '#lib/queries'
 import ChevronFirst from '~icons/lucide/chevron-first'
 import ChevronLast from '~icons/lucide/chevron-last'
@@ -54,10 +57,46 @@ export const Route = createFileRoute('/_layout/blocks')({
 		live: live ?? from == null,
 	}),
 	loader: ({ deps, context }) =>
-		withLoaderTiming('/_layout/blocks', async () =>
-			context.queryClient.ensureQueryData(blocksQueryOptions(deps.from)),
-		),
+		context.queryClient.ensureQueryData(blocksQueryOptions(deps.from)),
 })
+
+const BLOCK_POLL_INTERVAL_MS = 2_000
+
+/**
+ * Follow the chain head over HTTP: every poll emits the blocks since the last
+ * one, at most a page of them. Returns a cleanup function.
+ */
+function pollBlocks(client: Client, onBlock: (block: Block) => void) {
+	let cancelled = false
+	let inFlight = false
+	let last: bigint | undefined
+	const poll = async () => {
+		if (inFlight) return
+		inFlight = true
+		try {
+			const latest = await getBlockNumber(client, { cacheTime: 0 })
+			const oldest = latest - BigInt(BLOCKS_PER_PAGE) + 1n
+			const from = last == null || last < oldest ? oldest : last + 1n
+			const numbers: bigint[] = []
+			for (let number = from; number <= latest; number++) numbers.push(number)
+			const blocks = await Promise.all(
+				numbers.map((blockNumber) => getBlock(client, { blockNumber })),
+			)
+			last = latest
+			if (!cancelled) for (const block of blocks) onBlock(block)
+		} catch {
+			// Keep the current blocks and retry on the next polling interval.
+		} finally {
+			inFlight = false
+		}
+	}
+	void poll()
+	const id = setInterval(poll, BLOCK_POLL_INTERVAL_MS)
+	return () => {
+		cancelled = true
+		clearInterval(id)
+	}
+}
 
 function RouteComponent() {
 	const search = Route.useSearch()
@@ -106,35 +145,36 @@ function RouteComponent() {
 
 	// Live feed: stream new blocks over a WebSocket subscription (eth_subscribe
 	// newHeads) — viem hydrates each head into a full block (incl. tx hashes) via
-	// getBlock. While paused (hover) we buffer incoming blocks and flush them on
-	// resume so the view stays frozen.
+	// getBlock. Chains without a WebSocket poll same-origin /api/rpc instead.
+	// While paused (hover) we buffer incoming blocks and flush them on resume so
+	// the view stays frozen.
 	React.useEffect(() => {
 		if (!live || !isAtLatest) return
+
+		const onBlock = (block: Block) => {
+			const number = block.number
+			if (number != null) {
+				setLatestBlockNumber((prev) =>
+					prev == null || number > prev ? number : prev,
+				)
+				syncBlockNumberAtLeast(number)
+			}
+			if (pausedRef.current) {
+				pendingBlocksRef.current.push(block)
+				return
+			}
+			const buffered = pendingBlocksRef.current
+			pendingBlocksRef.current = []
+			mergeBlocks([...buffered, block])
+		}
 
 		const chain = getTempoChain()
 		const wsUrl = (chain.rpcUrls.default as { webSocket?: readonly string[] })
 			.webSocket?.[0]
-		if (!wsUrl) return
+		if (!wsUrl) return pollBlocks(getBatchedClient(), onBlock)
 
 		const client = createPublicClient({ chain, transport: webSocket(wsUrl) })
-		return subscribeToBlocks(client, {
-			onBlock: (block) => {
-				const number = block.number
-				if (number != null) {
-					setLatestBlockNumber((prev) =>
-						prev == null || number > prev ? number : prev,
-					)
-					syncBlockNumberAtLeast(number)
-				}
-				if (pausedRef.current) {
-					pendingBlocksRef.current.push(block)
-					return
-				}
-				const buffered = pendingBlocksRef.current
-				pendingBlocksRef.current = []
-				mergeBlocks([...buffered, block])
-			},
-		})
+		return subscribeToBlocks(client, { onBlock })
 	}, [live, isAtLatest, mergeBlocks])
 
 	// Flush blocks buffered during a pause as soon as we resume.
@@ -211,7 +251,7 @@ function RouteComponent() {
 											: undefined,
 								})}
 								className={cx(
-									'flex items-center gap-[4px] px-[6px] py-[2px] rounded-[4px] text-[11px] font-medium press-down',
+									'flex items-center gap-[4px] px-[6px] py-[2px] rounded-[4px] label-12 font-medium press-down',
 									live && !paused
 										? 'bg-positive/10 text-positive hover:bg-positive/20'
 										: 'bg-base-alt text-tertiary hover:bg-base-alt/80',
@@ -260,7 +300,7 @@ function RouteComponent() {
 												cells: [
 													<span
 														key="number"
-														className="font-mono tabular-nums text-accent font-medium"
+														className="font-sans tabular-nums text-accent font-medium"
 													>
 														#{blockNumber}
 													</span>,
@@ -269,7 +309,7 @@ function RouteComponent() {
 													</span>,
 													<span
 														key="time"
-														className="font-mono text-secondary tabular-nums whitespace-nowrap"
+														className="font-sans text-secondary tabular-nums whitespace-nowrap"
 													>
 														<FormattedTimestamp
 															timestamp={block.timestamp}
@@ -278,7 +318,7 @@ function RouteComponent() {
 													</span>,
 													<span
 														key="txns"
-														className="font-mono text-secondary tabular-nums"
+														className="font-sans text-secondary tabular-nums"
 													>
 														{txCount}
 													</span>,
@@ -335,14 +375,14 @@ function BlocksPagination({
 	const olderFrom = displayedEnd != null ? Number(displayedEnd) - 1 : undefined
 
 	return (
-		<div className="flex flex-col items-center sm:flex-row sm:justify-between gap-[12px] border-t border-dashed border-card-border px-[16px] py-[12px] text-[12px] text-tertiary">
+		<div className="flex flex-col items-center sm:flex-row sm:justify-between gap-[12px] border-t border-solid border-card-border px-[16px] py-[12px] label-12 text-tertiary">
 			<div className="flex items-center justify-center sm:justify-start gap-[6px]">
 				<Link
 					to="."
 					resetScroll={false}
 					search={{ from: undefined, live: undefined }}
 					disabled={!canGoNewer}
-					className="rounded-full border border-base-border hover:bg-alt flex items-center justify-center cursor-pointer active:translate-y-[0.5px] aria-disabled:cursor-not-allowed aria-disabled:opacity-50 size-[24px] text-primary"
+					className="rounded-button border border-base-border hover:bg-alt flex items-center justify-center cursor-pointer active:translate-y-[0.5px] aria-disabled:cursor-not-allowed aria-disabled:opacity-50 size-[24px] text-primary"
 					title="Latest blocks"
 				>
 					<ChevronFirst className="size-[14px]" />
@@ -352,7 +392,7 @@ function BlocksPagination({
 					resetScroll={false}
 					search={{ from: newerFrom, live: undefined }}
 					disabled={!canGoNewer}
-					className="rounded-full border border-base-border hover:bg-alt flex items-center justify-center cursor-pointer active:translate-y-[0.5px] aria-disabled:cursor-not-allowed aria-disabled:opacity-50 size-[24px] text-primary"
+					className="rounded-button border border-base-border hover:bg-alt flex items-center justify-center cursor-pointer active:translate-y-[0.5px] aria-disabled:cursor-not-allowed aria-disabled:opacity-50 size-[24px] text-primary"
 					title="Newer blocks"
 				>
 					<ChevronLeft className="size-[14px]" />
@@ -365,7 +405,7 @@ function BlocksPagination({
 					resetScroll={false}
 					search={{ from: olderFrom, live: undefined }}
 					disabled={!canGoOlder}
-					className="rounded-full border border-base-border hover:bg-alt flex items-center justify-center cursor-pointer active:translate-y-[0.5px] aria-disabled:cursor-not-allowed aria-disabled:opacity-50 size-[24px] text-primary"
+					className="rounded-button border border-base-border hover:bg-alt flex items-center justify-center cursor-pointer active:translate-y-[0.5px] aria-disabled:cursor-not-allowed aria-disabled:opacity-50 size-[24px] text-primary"
 					title="Older blocks"
 				>
 					<ChevronRight className="size-[14px]" />
@@ -375,7 +415,7 @@ function BlocksPagination({
 					resetScroll={false}
 					search={{ from: BLOCKS_PER_PAGE - 1, live: undefined }}
 					disabled={displayedEnd === 0n}
-					className="rounded-full border border-base-border hover:bg-alt flex items-center justify-center cursor-pointer active:translate-y-[0.5px] aria-disabled:cursor-not-allowed aria-disabled:opacity-50 size-[24px] text-primary"
+					className="rounded-button border border-base-border hover:bg-alt flex items-center justify-center cursor-pointer active:translate-y-[0.5px] aria-disabled:cursor-not-allowed aria-disabled:opacity-50 size-[24px] text-primary"
 					title="Oldest blocks"
 				>
 					<ChevronLast className="size-[14px]" />

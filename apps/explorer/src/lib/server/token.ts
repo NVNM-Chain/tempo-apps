@@ -62,6 +62,8 @@ export type TokenHoldersApiResponse = {
 	total: number
 	totalCapped: boolean
 	totalBalance: string
+	/** Set when holders can't be computed (a plain ERC-20 past the log scan limit). */
+	unavailable?: boolean | undefined
 }
 
 const EMPTY_HOLDERS_RESPONSE: TokenHoldersApiResponse = {
@@ -132,6 +134,7 @@ export type FetchTokenTransfersInput = z.infer<
 
 export type TokenTransfersApiResponse = {
 	transfers: Array<{
+		id: string
 		from: Address.Address
 		to: Address.Address
 		value: string
@@ -153,10 +156,12 @@ const FetchAccountTransfersInputSchema = z.object({
 	account: zAddress({ lowercase: true }),
 	page: z.coerce.number().check(z.gte(1)),
 	limit: z.coerce.number().check(z.gte(5), z.lte(200)),
+	direction: z.optional(z.enum(['in', 'out'])),
 })
 
 export type AccountTransfersApiResponse = {
 	transfers: Array<{
+		id: string
 		from: Address.Address
 		to: Address.Address
 		value: string
@@ -187,17 +192,23 @@ async function indexedTransfers(params: {
 	limit: number
 	token?: Address.Address | undefined
 	account?: Address.Address | undefined
+	direction?: 'in' | 'out' | undefined
 }) {
-	const { account } = params
+	const { account, direction } = params
 	const filters = [
 		params.token && `token = '${params.token}'`,
-		account && `("from" = '${account}' OR "to" = '${account}')`,
+		account &&
+			(direction === 'in'
+				? `"to" = '${account}'`
+				: direction === 'out'
+					? `"from" = '${account}'`
+					: `("from" = '${account}' OR "to" = '${account}')`),
 	].filter(Boolean)
 	const where = filters.length ? `WHERE ${filters.join(' AND ')}` : ''
 	const [rows, [counted]] = await Promise.all([
 		indexer(
 			params.chainId,
-			`SELECT token, "from", "to", toString(amount) AS value, tx_hash, block_num,
+			`SELECT token, "from", "to", toString(amount) AS value, tx_hash, block_num, log_idx,
 				toUnixTimestamp(block_timestamp) AS timestamp
 			FROM token_transfers ${where}
 			ORDER BY block_num DESC, log_idx DESC
@@ -210,6 +221,7 @@ async function indexedTransfers(params: {
 	])
 	return {
 		transfers: rows.map((row) => ({
+			id: `${row.tx_hash}-${row.log_idx}`,
 			token: String(row.token) as Address.Address,
 			from: String(row.from) as Address.Address,
 			to: String(row.to) as Address.Address,

@@ -154,7 +154,7 @@ function getLandingRedirect(query: string) {
 export const Route = createFileRoute('/search')({
 	validateSearch: z.object({
 		q: z.optional(z.coerce.string()),
-	}).parse,
+	}),
 	beforeLoad: async ({ search }) => {
 		const rawQuery = search.q?.trim() ?? ''
 		if (!rawQuery) throw redirect(getLandingRedirect(rawQuery))
@@ -177,7 +177,9 @@ export const Route = createFileRoute('/search')({
 		let uniqueMatch: SearchMatch | null = null
 		try {
 			uniqueMatch = await fetchUniqueSearchMatch(normalizedQuery)
-		} catch {}
+		} catch {
+			// Fall back to the search landing page when the lookup fails.
+		}
 
 		if (uniqueMatch != null)
 			throw redirect(getRedirectForSearchMatch(uniqueMatch))

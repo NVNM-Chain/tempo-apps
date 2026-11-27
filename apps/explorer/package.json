@@ -35,8 +35,8 @@
 		"test": "vitest"
 	},
 	"dependencies": {
-		"accounts": "catalog:",
-		"@datadog/browser-rum-slim": "catalog:",
+		"@pierre/diffs": "catalog:",
+		"@pierre/trees": "catalog:",
 		"@sentry/cloudflare": "catalog:",
 		"@sentry/react": "catalog:",
 		"@shazow/whatsabi": "catalog:",
@@ -48,19 +48,25 @@
 		"@tanstack/react-router-ssr-query": "catalog:",
 		"@tanstack/react-start": "catalog:",
 		"@tanstack/router-plugin": "catalog:",
+		"@tempo/llms": "workspace:*",
 		"@tempo/rpc-utils": "workspace:*",
+		"@tempoxyz/ds": "catalog:",
 		"abitype": "catalog:",
+		"accounts": "catalog:",
 		"animejs": "catalog:",
 		"cva": "catalog:",
+		"lucide-react": "catalog:",
 		"midcut": "catalog:",
 		"ox": "catalog:",
 		"react": "catalog:",
 		"react-dom": "catalog:",
+		"regen-ui": "catalog:",
 		"tailwindcss": "catalog:",
 		"tidx.ts": "catalog:",
 		"viem": "catalog:",
 		"wagmi": "catalog:",
-		"zod": "catalog:"
+		"zod": "catalog:",
+		"zyzz": "catalog:"
 	},
 	"devDependencies": {
 		"@cloudflare/puppeteer": "catalog:",
@@ -89,7 +95,7 @@
 		"typed-query-selector": "catalog:",
 		"unplugin-icons": "catalog:",
 		"vite": "catalog:",
-		"vite-plugin-devtools-json": "^1.0.0",
+		"vite-plugin-devtools-json": "^1.1.2",
 		"vitest": "catalog:",
 		"wrangler": "catalog:"
 	}

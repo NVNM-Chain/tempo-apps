@@ -1,0 +1,285 @@
+import { describe, expect, test } from 'vitest'
+import { renderReceiptText } from '#lib/domain/receipt-text'
+import type { KnownEvent } from '#lib/domain/known-events'
+import {
+	buildReceiptPresentation,
+	enrichReceiptEventAmounts,
+	getReceiptEventSideAmount,
+} from '#lib/domain/receipt-presentation'
+
+const sender = '0x0000000000000000000000000000000000000001'
+const other = '0x0000000000000000000000000000000000000002'
+const token = '0x20c0000000000000000000000000000000000000'
+const guard = '0xB10C000000000000000000000000000000000000'
+
+const receipt = {
+	effectiveGasPrice: 1n,
+	from: sender,
+	gasUsed: 1n,
+} as const
+
+const lineItems = {
+	feeTotals: [
+		{
+			price: { amount: 1n, currency: 'USD', decimals: 6, token },
+			ui: { left: 'Fee', right: '<$0.01' },
+		},
+	],
+	totals: [
+		{
+			price: { amount: 1_000_001n, currency: 'USD', decimals: 6, token },
+			ui: { left: 'Total', right: '$1' },
+		},
+	],
+}
+
+function build(events: KnownEvent[], extra: Record<string, unknown> = {}) {
+	return buildReceiptPresentation({
+		chainId: 4217,
+		feeBreakdown: [
+			{
+				amount: 1n,
+				currency: 'USD',
+				decimals: 6,
+				payer: sender,
+				symbol: 'pathUSD',
+				token,
+			},
+			{
+				amount: 2n,
+				currency: 'USD',
+				decimals: 6,
+				payer: other,
+				symbol: 'pathUSD',
+				token,
+			},
+		],
+		feeToken: token,
+		isTokenListed: () => true,
+		knownEvents: events,
+		lineItems,
+		receipt,
+		...extra,
+	})
+}
+
+describe('receipt presentation', () => {
+	test('hydrates missing amount metadata for every output format', () => {
+		const [event] = enrichReceiptEventAmounts(
+			[
+				{
+					type: 'send',
+					parts: [
+						{
+							type: 'amount',
+							value: { token, value: 250_120n },
+						},
+					],
+					totalAmount: { token, value: 250_120n },
+				},
+			],
+			() => ({ currency: 'USD', decimals: 6, symbol: 'pathUSD' }),
+		)
+
+		expect(event?.parts[0]).toMatchObject({
+			type: 'amount',
+			value: { currency: 'USD', decimals: 6, symbol: 'pathUSD' },
+		})
+		expect(event?.totalAmount).toMatchObject({
+			currency: 'USD',
+			decimals: 6,
+			symbol: 'pathUSD',
+		})
+	})
+
+	test('shares hidden-event, blocked-transfer, and fee-payer rules', () => {
+		const presentation = build([
+			{
+				type: 'nonce incremented',
+				parts: [{ type: 'action', value: 'Nonce Incremented' }],
+			},
+			{
+				type: 'active key count changed',
+				parts: [{ type: 'action', value: 'Active Key Count Changed' }],
+			},
+			{
+				type: 'send',
+				parts: [{ type: 'action', value: 'Send' }],
+				meta: { to: guard },
+			},
+			{
+				type: 'transfer blocked',
+				parts: [{ type: 'action', value: 'Transfer Blocked' }],
+			},
+		])
+
+		expect(presentation.events.map((event) => event.type)).toEqual([
+			'transfer blocked',
+		])
+		expect(presentation.feeBreakdown).toHaveLength(1)
+		expect(presentation.feeBreakdown[0]?.payer).toBe(sender)
+		expect(presentation.totalDisplay).toBeUndefined()
+	})
+
+	test('derives events and totals only from chain data', () => {
+		const settle: KnownEvent = {
+			type: 'settle channel',
+			parts: [
+				{ type: 'action', value: 'Settle' },
+				{
+					type: 'amount',
+					value: { currency: 'USD', decimals: 6, token, value: 1_000_000n },
+				},
+				{ type: 'text', value: 'to' },
+				{ type: 'account', value: other },
+			],
+			meta: { from: sender, to: other },
+		}
+		const baseline = build([settle])
+		const presentation = build([settle], {
+			voucher: { packetCount: 1, packetSize: 50_000_000 },
+		})
+
+		expect(presentation).toEqual(baseline)
+		expect(presentation.events.map((event) => event.type)).toEqual([
+			'settle channel',
+		])
+	})
+
+	test('uses the same side-amount and vault-total rules as the card', () => {
+		const first = { token, value: 1_000_000n, decimals: 6 }
+		const second = { token, value: 2_000_000n, decimals: 6 }
+		const redemption: KnownEvent = {
+			type: 'earn private redemption',
+			parts: [
+				{ type: 'action', value: 'Withdraw from Earn' },
+				{ type: 'amount', value: first },
+				{ type: 'text', value: 'for' },
+				{ type: 'amount', value: second },
+			],
+		}
+
+		expect(getReceiptEventSideAmount(redemption)).toBeUndefined()
+		expect(getReceiptEventSideAmount({ ...redemption, type: 'swap' })).toEqual(
+			first,
+		)
+		expect(build([redemption]).totalDisplay).toBeUndefined()
+	})
+
+	test('hides side amounts for private Zone activity', () => {
+		const amount = { token, value: 5_000n, decimals: 6 }
+		const privateDeposit: KnownEvent = {
+			type: 'private-assets-deposited',
+			parts: [
+				{ type: 'action', value: 'Private Zone Deposit' },
+				{ type: 'amount', value: amount },
+			],
+		}
+		const privateWithdrawal: KnownEvent = {
+			type: 'private-shares-redeemed',
+			parts: [
+				{ type: 'action', value: 'Private Zone Withdrawal' },
+				{ type: 'amount', value: amount },
+			],
+			totalAmount: { ...amount, value: 10_000n },
+		}
+		const publicWithdrawal: KnownEvent = {
+			...privateWithdrawal,
+			parts: [
+				{ type: 'action', value: 'Withdraw from Zone 1' },
+				{ type: 'amount', value: amount },
+			],
+		}
+
+		expect(getReceiptEventSideAmount(privateDeposit)).toBeUndefined()
+		expect(getReceiptEventSideAmount(privateWithdrawal)).toBeUndefined()
+		expect(getReceiptEventSideAmount(publicWithdrawal)).toEqual({
+			...amount,
+			value: 10_000n,
+		})
+	})
+
+	test('derives regular totals from the same visible token flows', () => {
+		const presentation = build([
+			{
+				type: 'send',
+				parts: [
+					{ type: 'action', value: 'Send' },
+					{
+						type: 'amount',
+						value: {
+							currency: 'USD',
+							decimals: 6,
+							token,
+							value: 1_000_000n,
+						},
+					},
+				],
+				meta: { from: sender, to: other },
+			},
+		])
+
+		expect(presentation.total).toBe(1.000001)
+		expect(presentation.totalDisplay).toBe('$1')
+	})
+})
+
+test('unpriced asset exchanges retain details and fees but never fall back to legacy totals', () => {
+	const events: KnownEvent[] = [
+		{
+			type: 'transfer',
+			parts: [
+				{
+					type: 'amount',
+					value: {
+						token,
+						value: 38_495_077_61472146n,
+						decimals: 8,
+						symbol: 'MEENY',
+						currency: 'MEENY',
+					},
+				},
+			],
+		},
+		{
+			type: 'transfer',
+			parts: [
+				{
+					type: 'amount',
+					value: {
+						token,
+						value: 232_854_000n,
+						decimals: 6,
+						symbol: 'USDC.e',
+						currency: 'USD',
+					},
+				},
+			],
+		},
+	]
+	const presentation = build(events)
+	expect(presentation.events).toEqual(events)
+	expect(presentation.feeDisplay).toBeDefined()
+	expect(presentation.feeBreakdown).toHaveLength(1)
+	expect(presentation.total).toBeUndefined()
+	expect(presentation.totalDisplay).toBeUndefined()
+	const text = renderReceiptText(
+		{
+			block: { timestamp: 1_787_524_629n },
+			receipt: {
+				...receipt,
+				blockNumber: 36_181_164n,
+				transactionHash: `0x${'1'.repeat(64)}`,
+				status: 'success',
+			},
+		},
+		presentation,
+	)
+	expect(text).not.toMatch(/TOTAL/)
+	expect(text).toContain('MEENY')
+	expect(text).toContain('USDC.E')
+})
+
+test('approval-only transactions do not fall back to a payment total', () => {
+	expect(build([{ type: 'approval', parts: [] }]).totalDisplay).toBeUndefined()
+})

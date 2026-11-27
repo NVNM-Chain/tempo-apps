@@ -1,12 +1,8 @@
 import { createFileRoute } from '@tanstack/react-router'
 import * as Address from 'ox/Address'
 import * as Hex from 'ox/Hex'
-import {
-	getBlock,
-	getBlockNumber,
-	getChainId,
-	getTransaction,
-} from 'wagmi/actions'
+import * as z from 'zod/mini'
+import { getBlock, getChainId, getTransaction } from 'wagmi/actions'
 import { getAccountTag } from '#lib/account'
 import {
 	contractRegistry,
@@ -18,6 +14,7 @@ import { normalizeSearchInput } from '#lib/tempo-address'
 import { findAnchoring } from '#lib/server/anchoring'
 import { getVerifiedTokens } from '#lib/server/verified-tokens'
 import { getWagmiConfig } from '#wagmi.config.ts'
+import { readBlockNumber } from '#lib/server/block-number'
 
 export type SearchResult =
 	| {
@@ -288,12 +285,17 @@ function dedupeSearchResults(results: SearchResult[]): SearchResult[] {
 	return deduped
 }
 
+export const SearchQuerySchema = z.object({ q: z.optional(z.string()) })
+
 export const Route = createFileRoute('/api/search')({
 	server: {
 		handlers: {
 			GET: async ({ request }) => {
 				const url = new URL(request.url)
-				const rawQuery = url.searchParams.get('q')?.trim() ?? ''
+				const { q } = SearchQuerySchema.parse(
+					Object.fromEntries(url.searchParams),
+				)
+				const rawQuery = q?.trim() ?? ''
 				const query = normalizeSearchInput(rawQuery)
 
 				if (!query)
@@ -317,7 +319,7 @@ export const Route = createFileRoute('/api/search')({
 					blockNumber >= 0
 				) {
 					try {
-						const latestBlock = await getBlockNumber(config)
+						const latestBlock = await readBlockNumber(config.getClient())
 						if (blockNumber <= Number(latestBlock))
 							results.push({ type: 'block', blockNumber })
 					} catch {

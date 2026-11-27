@@ -4,7 +4,6 @@ import {
 	getExplorerHostPolicy,
 	withExplorerIndexingHeaders,
 } from '#lib/explorer-indexing'
-import { handleDatadogProxy } from '#lib/server/datadog-proxy'
 import { checkRateLimit } from '#lib/server/rate-limit'
 import { checkRequestGuard } from '#lib/server/request-guard'
 
@@ -15,6 +14,9 @@ export const redirects: Array<{
 	{ from: /^\/blocks\/(latest|\d+)$/, to: (m) => `/block/${m[1]}` },
 	{ from: /^\/transaction\/(.+)$/, to: (m) => `/tx/${m[1]}` },
 	{ from: /^\/tokens\/(.+)$/, to: (m) => `/token/${m[1]}` },
+	{ from: /^\/(0x[a-fA-F0-9]{40})\/?$/, to: (m) => `/address/${m[1]}` },
+	{ from: /^\/(\d+)\/?$/, to: (m) => `/block/${m[1]}` },
+	{ from: /^\/(0x[a-fA-F0-9]{64})\/?$/, to: (m) => `/receipt/${m[1]}` },
 ]
 
 function normalizeApiPath(pathname: string): string {
@@ -25,6 +27,8 @@ function normalizeApiPath(pathname: string): string {
 
 const SENSITIVE_HEADERS = new Set([
 	'authorization',
+	'cf-access-client-id',
+	'cf-access-client-secret',
 	'cookie',
 	'set-cookie',
 	'x-api-key',
@@ -61,8 +65,11 @@ const serverEntry = createServerEntry({
 	fetch: async (request, opts) => {
 		const url = new URL(request.url)
 
-		if (url.pathname === '/dd-proxy') {
-			return handleDatadogProxy(request)
+		if (url.pathname === '/llms.txt' || url.pathname === '/llms-full.txt') {
+			const { llmsResponse } = await import('#lib/llms/serve')
+			return llmsResponse(
+				url.pathname === '/llms.txt' ? 'llms.txt' : 'llms-full.txt',
+			)
 		}
 
 		for (const { from, to } of redirects) {

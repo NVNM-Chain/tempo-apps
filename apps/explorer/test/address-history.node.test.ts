@@ -16,6 +16,7 @@ vi.mock('#lib/server/dex-indexer', async (importOriginal) => ({
 }))
 vi.mock('#wagmi.config', () => ({
 	getBatchedClient: () => ({ getTransaction, getTransactionReceipt }),
+	getTempoChain: () => ({ id: 787222 }),
 }))
 
 const SENDER = '0x286ad6cfc7279c8a6d86d15dcefcb77a65aa7e92'

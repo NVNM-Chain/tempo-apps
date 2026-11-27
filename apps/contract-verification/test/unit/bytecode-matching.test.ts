@@ -6,6 +6,7 @@ import {
 	AuxdataStyle,
 	getVyperAuxdataStyle,
 	splitAuxdata,
+	getSolarAuxdataVersion,
 	decodeVyperAuxdata,
 	hasContentHash,
 	extractCallProtectionTransformation,
@@ -18,6 +19,7 @@ import {
 	type ImmutableReferences,
 	type CborAuxdataPositions,
 } from '#lib/bytecode-matching.ts'
+import { solarFixture } from '../fixtures/solar.fixture.ts'
 
 function keccakString(str: string): `0x${string}` {
 	return Hash.keccak256(Hex.fromString(str))
@@ -632,6 +634,40 @@ describe('matchBytecode', () => {
 		)
 	})
 
+	it('does not verify a library when its executable opcode differs', () => {
+		const address = '12'.repeat(20)
+		const cbor = Hex.fromBytes(
+			CBOR.encode({ ipfs: 'QmTest', solc: [0, 8, 20] }),
+		).slice(2)
+		const suffix = `602a60005260206000f3${cbor}${(cbor.length / 2).toString(16).padStart(4, '0')}`
+		const recompiledBytecode = `0x73${'00'.repeat(20)}${suffix}`
+
+		expect(
+			matchBytecode({
+				recompiledBytecode,
+				onchainBytecode: `0x73${address}${suffix}`,
+				deploymentAddress: `0x${address}`,
+				isCreation: false,
+			}).match,
+		).toBe('exact_match')
+		expect(
+			matchBytecode({
+				recompiledBytecode,
+				onchainBytecode: `0x00${address}${suffix}`,
+				deploymentAddress: `0x${address}`,
+				isCreation: false,
+			}).match,
+		).toBeNull()
+		expect(
+			matchBytecode({
+				recompiledBytecode,
+				onchainBytecode: `0x73${'ff'.repeat(20)}${suffix}`,
+				deploymentAddress: `0x${address}`,
+				isCreation: false,
+			}).match,
+		).toBeNull()
+	})
+
 	it('handles library transformations', () => {
 		const linkReferences: LinkReferences = {
 			'lib.sol': {
@@ -715,5 +751,140 @@ describe('matchBytecode', () => {
 		expect(result.transformationValues.constructorArguments).toBe(
 			`0x${constructorArgs}`,
 		)
+	})
+})
+
+describe('matchBytecode with empty or metadata-less compiler output', () => {
+	// PC, JUMPDEST, then SSTORE(0, 1): executable bytes that also decode as a 91-byte CBOR string.
+	const executablePayload = '6001600055'.padEnd(91 * 2, '0')
+	const cborShapedRuntime = `0x585b${executablePayload}005d` as const
+
+	it('treats the CBOR-shaped runtime as auxdata when split on its own', () => {
+		expect(splitAuxdata(cborShapedRuntime).executionBytecode).toBe('0x')
+	})
+
+	it('rejects empty compiled runtime bytecode', () => {
+		for (const recompiledBytecode of ['0x', ''] as const) {
+			const result = matchBytecode({
+				onchainBytecode: cborShapedRuntime,
+				recompiledBytecode: recompiledBytecode as `0x${string}`,
+				isCreation: false,
+			})
+			expect(result.match).toBeNull()
+			expect(result.message).toBe('Compiled contract has no bytecode to verify')
+		}
+	})
+
+	it('rejects empty compiled creation bytecode', () => {
+		const result = matchBytecode({
+			onchainBytecode: cborShapedRuntime,
+			recompiledBytecode: '0x',
+			isCreation: true,
+		})
+		expect(result.match).toBeNull()
+	})
+
+	it('does not ignore a CBOR-decodable onchain suffix when the compiler output has no auxdata', () => {
+		const result = matchBytecode({
+			onchainBytecode: `0x6080604052${cborShapedRuntime.slice(2)}`,
+			recompiledBytecode: '0x6080604052',
+			isCreation: false,
+		})
+		expect(result.match).toBeNull()
+	})
+})
+
+describe('solar output', () => {
+	const compiled =
+		solarFixture.solarCompileOutput.contracts['src/WithImmutables.sol']
+			.WithImmutables
+	const runtime = `0x${compiled.evm.deployedBytecode.object}`
+	const immutableReferences = compiled.evm.deployedBytecode
+		.immutableReferences as ImmutableReferences
+
+	it('splits and decodes the solar CBOR tail', () => {
+		const { auxdata, cborLength } = splitAuxdata(runtime)
+		expect(auxdata).not.toBeNull()
+		// {ipfs: <34 bytes>, solar: 0x000200}: solar records its own version, not solc's
+		expect(cborLength).toBe(0x34)
+		const decoded = CBOR.decode(Hex.toBytes(`0x${auxdata}`)) as Record<
+			string,
+			Uint8Array
+		>
+		expect(decoded.ipfs).toHaveLength(34)
+		expect([...(decoded.solar ?? [])]).toEqual([0, 2, 0])
+		expect(hasContentHash(runtime)).toBe(true)
+	})
+
+	it('reads the solar version from the CBOR tail', () => {
+		expect(getSolarAuxdataVersion(solarFixture.onchainRuntimeBytecode)).toBe(
+			'0.2.0',
+		)
+		// solc output carries a solc key instead
+		const solcRuntime =
+			'0x6080604052348015600e575f5ffd5ba2646970667358221220111111111111111111111111111111111111111111111111111111111111111164736f6c634300081e0033'
+		expect(getSolarAuxdataVersion(solcRuntime)).toBeNull()
+		expect(getSolarAuxdataVersion('0x6080')).toBeNull()
+	})
+
+	it('reads the solar version solar 0.3 writes as a string', () => {
+		// Tail of a contract built with forge --use solar (solar 0.3.0-dev+commit.a2b44354)
+		const runtime =
+			'0x6080a2646970667358221220a6f986536a6b3b611bb6566f8a588f1b44d39c6e28657cf529581d5b47d59ccd65736f6c61727819302e332e302d6465762b636f6d6d69742e6132623434333534004b'
+		expect(getSolarAuxdataVersion(runtime)).toBe('0.3.0-dev+commit.a2b44354')
+	})
+
+	it('exact-matches a deployment with its immutables filled in', () => {
+		const result = matchBytecode({
+			onchainBytecode: solarFixture.onchainRuntimeBytecode,
+			recompiledBytecode: runtime,
+			isCreation: false,
+			immutableReferences,
+			auxdataStyle: AuxdataStyle.SOLIDITY,
+		})
+		expect(result.match).toBe('exact_match')
+		expect(result.transformations.map((t) => t.reason)).toEqual([
+			'immutable',
+			'immutable',
+			'immutable',
+			'immutable',
+			'immutable',
+			'immutable',
+			'immutable',
+		])
+	})
+
+	it('partially matches when only the metadata hash differs', () => {
+		const onchain = solarFixture.onchainRuntimeBytecode
+		const { auxdata } = splitAuxdata(onchain)
+		if (!auxdata) throw new Error('expected auxdata')
+		// Flip a byte of the IPFS hash, as editing a comment would.
+		const ipfsStart = auxdata.indexOf('5822') + 4
+		const flipped =
+			auxdata.slice(0, ipfsStart) +
+			(auxdata.slice(ipfsStart, ipfsStart + 2) === 'ff' ? '00' : 'ff') +
+			auxdata.slice(ipfsStart + 2)
+		const result = matchBytecode({
+			onchainBytecode: onchain.replace(auxdata, flipped),
+			recompiledBytecode: runtime,
+			isCreation: false,
+			immutableReferences,
+			auxdataStyle: AuxdataStyle.SOLIDITY,
+		})
+		expect(result.match).toBe('match')
+	})
+
+	it('does not match different execution bytecode', () => {
+		const result = matchBytecode({
+			onchainBytecode: solarFixture.onchainRuntimeBytecode.replace(
+				'60e01c',
+				'60e11c',
+			),
+			recompiledBytecode: runtime,
+			isCreation: false,
+			immutableReferences,
+			auxdataStyle: AuxdataStyle.SOLIDITY,
+		})
+		expect(result.match).toBeNull()
 	})
 })
